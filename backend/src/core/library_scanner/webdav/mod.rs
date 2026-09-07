@@ -187,8 +187,8 @@ impl LibraryScanner {
             if existing_info.is_none() {
                 existing_info = book_hash_map.get(&dir_hash).cloned();
             }
-            if existing_info.is_none() {
-                if let Some(child_dirs) = coalesced_range_dirs.get(&dir_url) {
+            if existing_info.is_none()
+                && let Some(child_dirs) = coalesced_range_dirs.get(&dir_url) {
                     for child_dir in &child_dirs.child_dirs {
                         if let Some(info) = book_path_map.get(child_dir).cloned() {
                             existing_info = Some(info);
@@ -196,7 +196,6 @@ impl LibraryScanner {
                         }
                     }
                 }
-            }
 
             let existing_lock_state = existing_info
                 .as_ref()
@@ -207,8 +206,7 @@ impl LibraryScanner {
             let directory_fingerprint = webdav_directory_fingerprint(&file_entries);
             if let (Some((book_id, _, _)), Some(directory_fingerprint)) =
                 (existing_info.as_ref(), directory_fingerprint.as_ref())
-            {
-                if cached_book_states.get(&dir_url).is_some_and(|state| {
+                && cached_book_states.get(&dir_url).is_some_and(|state| {
                     state.fingerprint == *directory_fingerprint
                         && state.config_fingerprint.as_deref()
                             == Some(state_config_fingerprint.as_str())
@@ -218,7 +216,6 @@ impl LibraryScanner {
                     found_book_ids.insert(book_id.clone());
                     continue;
                 }
-            }
 
             // Natural ordering is needed only when this book will enter title
             // checks or chapter reconciliation. Cache hits above stay linear.
@@ -360,9 +357,9 @@ impl LibraryScanner {
                         state.config_fingerprint = Some(state_config_fingerprint);
                         pending_book_states.push(state);
                     }
-                    if status != ScanStatus::Skipped {
-                        if let Some(series_info) = inferred_series.get(&dir_url) {
-                            if let Err(e) = self
+                    if status != ScanStatus::Skipped
+                        && let Some(series_info) = inferred_series.get(&dir_url)
+                            && let Err(e) = self
                                 .link_book_to_inferred_series(&library.id, &book_id, series_info)
                                 .await
                             {
@@ -373,22 +370,17 @@ impl LibraryScanner {
                                     "Failed to link WebDAV book to inferred series"
                                 );
                             }
-                        }
-                    }
-                    if status != ScanStatus::Skipped {
-                        if let Some(child_dirs) = coalesced_range_dirs.get(&dir_url) {
+                    if status != ScanStatus::Skipped
+                        && let Some(child_dirs) = coalesced_range_dirs.get(&dir_url) {
                             for child_dir in &child_dirs.child_dirs {
                                 if let Some((child_book_id, manual_corrected, _)) =
                                     book_path_map.get(child_dir)
-                                {
-                                    if child_book_id != &book_id && *manual_corrected == 0 {
+                                    && child_book_id != &book_id && *manual_corrected == 0 {
                                         absorbed_range_book_ids
                                             .insert(child_book_id.clone(), book_id.clone());
                                     }
-                                }
                             }
                         }
-                    }
                     debug!(book_id = %book_id, url = %dir_url, status = ?status, "Processed WebDAV book directory");
                 }
                 Err(e) => {
@@ -513,18 +505,16 @@ impl LibraryScanner {
 
             let mut regex_idx = None;
             let mut regex_title = None;
-            if let Some(re) = &chapter_regex {
-                if let Some(caps) = re.captures(&filename) {
-                    if let Some(m) = caps.get(1) {
-                        if let Ok(idx) = m.as_str().parse::<i32>() {
+            if let Some(re) = &chapter_regex
+                && let Some(caps) = re.captures(&filename) {
+                    if let Some(m) = caps.get(1)
+                        && let Ok(idx) = m.as_str().parse::<i32>() {
                             regex_idx = Some(idx);
                         }
-                    }
                     if let Some(m) = caps.get(2) {
                         regex_title = Some(m.as_str().to_string());
                     }
                 }
-            }
 
             let title_override = if let Some(rt) = regex_title {
                 let (cleaned, is_extra) = self

@@ -60,7 +60,7 @@ impl JwtKeyPair {
     /// 生成随机密钥
     fn generate_secret() -> String {
         let mut rng = rand::thread_rng();
-        let bytes: Vec<u8> = (0..64).map(|_| rng.gen()).collect();
+        let bytes: Vec<u8> = (0..64).map(|_| rng.r#gen()).collect();
         use base64::{engine::general_purpose, Engine as _};
         general_purpose::STANDARD.encode(&bytes)
     }

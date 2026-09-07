@@ -135,7 +135,7 @@ impl MasterKeyManager {
 
             // 尝试使用 ip 命令
             let output = Command::new("ip")
-                .args(&["link", "show"])
+                .args(["link", "show"])
                 .output()
                 .map_err(|e| TingError::ConfigError(format!("获取网络接口失败: {}", e)))?;
 
@@ -144,14 +144,13 @@ impl MasterKeyManager {
                 for line in stdout.lines() {
                     if line.contains("link/ether") {
                         let parts: Vec<&str> = line.split_whitespace().collect();
-                        if let Some(mac_pos) = parts.iter().position(|&x| x == "link/ether") {
-                            if let Some(mac) = parts.get(mac_pos + 1) {
+                        if let Some(mac_pos) = parts.iter().position(|&x| x == "link/ether")
+                            && let Some(mac) = parts.get(mac_pos + 1) {
                                 let mac_clean = mac.replace(":", "");
                                 if mac_clean != "000000000000" {
                                     return Ok(mac_clean.into_bytes());
                                 }
                             }
-                        }
                     }
                 }
             }
@@ -183,8 +182,8 @@ impl MasterKeyManager {
             .into_iter()
             .flatten()
         {
-            if path.exists() {
-                if let Ok(content) = std::fs::read_to_string(path) {
+            if path.exists()
+                && let Ok(content) = std::fs::read_to_string(path) {
                     let id = content.trim();
                     if !id.is_empty() {
                         tracing::info!(
@@ -198,15 +197,14 @@ impl MasterKeyManager {
                         return Ok(id.as_bytes().to_vec());
                     }
                 }
-            }
         }
 
         // 创建新的机器 ID，优先保存到数据目录（容器持久化友好）
         let machine_id = uuid::Uuid::new_v4().to_string();
 
         // 尝试保存到数据目录
-        if let Some(parent) = data_machine_id_path.parent() {
-            if std::fs::create_dir_all(parent).is_ok()
+        if let Some(parent) = data_machine_id_path.parent()
+            && std::fs::create_dir_all(parent).is_ok()
                 && std::fs::write(&data_machine_id_path, &machine_id).is_ok()
             {
                 tracing::info!(
@@ -219,12 +217,11 @@ impl MasterKeyManager {
                 );
                 return Ok(machine_id.as_bytes().to_vec());
             }
-        }
 
         // 备选：保存到用户目录
-        if let Some(user_path) = user_machine_id_path {
-            if let Some(parent) = user_path.parent() {
-                if std::fs::create_dir_all(parent).is_ok()
+        if let Some(user_path) = user_machine_id_path
+            && let Some(parent) = user_path.parent()
+                && std::fs::create_dir_all(parent).is_ok()
                     && std::fs::write(&user_path, &machine_id).is_ok()
                 {
                     tracing::info!(
@@ -237,8 +234,6 @@ impl MasterKeyManager {
                     );
                     return Ok(machine_id.as_bytes().to_vec());
                 }
-            }
-        }
 
         // 如果都失败了，返回基于UUID的临时ID（不推荐，但至少能工作）
         tracing::warn!(

@@ -50,11 +50,9 @@ impl LibraryScanner {
                 if let Ok((mut reader, _)) = storage
                     .get_webdav_reader(library, file_url, None, key)
                     .await
-                {
-                    if let Ok(mut file) = tokio::fs::File::create(&temp_path).await {
+                    && let Ok(mut file) = tokio::fs::File::create(&temp_path).await {
                         let _ = tokio::io::copy(&mut reader, &mut file).await;
                     }
-                }
 
                 // Read the URL from the .strm file
                 let url = match tokio::fs::read_to_string(&temp_path).await {
@@ -216,17 +214,14 @@ impl LibraryScanner {
                         .plugin_manager
                         .call_format(&plugin.id, FormatMethod::GetMetadataReadSize, params)
                         .await
-                    {
-                        if let Some(size) = result.get("size").and_then(|v| v.as_u64()) {
-                            if size > required_size {
+                        && let Some(size) = result.get("size").and_then(|v| v.as_u64())
+                            && size > required_size {
                                 required_size = size;
                                 debug!(
                                     "Plugin {} requested {} bytes for metadata",
                                     plugin.name, required_size
                                 );
                             }
-                        }
-                    }
                 }
             }
 
@@ -298,26 +293,22 @@ impl LibraryScanner {
                             );
 
                             // 提取元数据
-                            if let Some(a) = result.get("album").and_then(|v| v.as_str()) {
-                                if !a.trim().is_empty() {
+                            if let Some(a) = result.get("album").and_then(|v| v.as_str())
+                                && !a.trim().is_empty() {
                                     album = a.to_string();
                                 }
-                            }
-                            if let Some(t) = result.get("title").and_then(|v| v.as_str()) {
-                                if !t.trim().is_empty() {
+                            if let Some(t) = result.get("title").and_then(|v| v.as_str())
+                                && !t.trim().is_empty() {
                                     title = t.to_string();
                                 }
-                            }
-                            if let Some(au) = result.get("author").and_then(|v| v.as_str()) {
-                                if !au.trim().is_empty() {
+                            if let Some(au) = result.get("author").and_then(|v| v.as_str())
+                                && !au.trim().is_empty() {
                                     author = Some(au.to_string());
                                 }
-                            }
-                            if let Some(n) = result.get("narrator").and_then(|v| v.as_str()) {
-                                if !n.trim().is_empty() {
+                            if let Some(n) = result.get("narrator").and_then(|v| v.as_str())
+                                && !n.trim().is_empty() {
                                     narrator = Some(n.to_string());
                                 }
-                            }
                             if let Some(dur) = result.get("duration").and_then(|v| v.as_f64()) {
                                 duration = dur.round() as i32;
                                 if duration > 0 {
@@ -328,11 +319,10 @@ impl LibraryScanner {
                                     );
                                 }
                             }
-                            if let Some(c) = result.get("cover_url").and_then(|v| v.as_str()) {
-                                if !c.trim().is_empty() {
+                            if let Some(c) = result.get("cover_url").and_then(|v| v.as_str())
+                                && !c.trim().is_empty() {
                                     cover_url = Some(c.to_string());
                                 }
-                            }
 
                             plugin_handled = true;
                             break;
@@ -340,42 +330,37 @@ impl LibraryScanner {
                     }
 
                     // 2. 如果没有插件处理，且是 MP3 文件，尝试使用 ID3 库（对部分文件支持好）
-                    if !plugin_handled && ext == "mp3" {
-                        if let Ok(tag) = id3::Tag::read_from_path(&temp_path) {
+                    if !plugin_handled && ext == "mp3"
+                        && let Ok(tag) = id3::Tag::read_from_path(&temp_path) {
                             debug!("Using ID3 library to process MP3 file");
-                            if let Some(t) = tag.album() {
-                                if !t.trim().is_empty() {
+                            if let Some(t) = tag.album()
+                                && !t.trim().is_empty() {
                                     album = t.to_string();
                                 }
-                            }
-                            if let Some(t) = tag.title() {
-                                if !t.trim().is_empty() {
+                            if let Some(t) = tag.title()
+                                && !t.trim().is_empty() {
                                     title = t.to_string();
                                 }
-                            }
 
                             // Author logic: Album Artist > Artist
-                            if let Some(t) = tag.album_artist() {
-                                if !t.trim().is_empty() {
+                            if let Some(t) = tag.album_artist()
+                                && !t.trim().is_empty() {
                                     author = Some(t.to_string());
                                 }
-                            }
 
-                            if let Some(t) = tag.artist() {
-                                if !t.trim().is_empty() {
+                            if let Some(t) = tag.artist()
+                                && !t.trim().is_empty() {
                                     if author.is_none() {
                                         author = Some(t.to_string());
                                     } else if author.as_deref() != Some(t) {
                                         narrator = Some(t.to_string());
                                     }
                                 }
-                            }
 
                             if let Some(d) = tag.duration() {
                                 duration = (d / 1000) as i32;
                             }
                         }
-                    }
 
                     // 注意：不再调用 extract_chapter_metadata，因为它使用 Symphonia
                     // 对部分文件会报 "end of stream" 错误
@@ -387,8 +372,7 @@ impl LibraryScanner {
                         if let Ok((_, file_size)) = storage
                             .get_webdav_reader(library, file_url, Some((0, 1)), key)
                             .await
-                        {
-                            if file_size > 0 {
+                            && file_size > 0 {
                                 // 根据文件大小和格式估算时长
                                 let estimated_duration =
                                     self.estimate_duration_by_size(file_size, &ext);
@@ -423,7 +407,6 @@ impl LibraryScanner {
                                     }
                                 }
                             }
-                        }
                     } else {
                         // 无法从部分文件中获取时长，需要 FFprobe
                         use_ffprobe = true;
@@ -573,23 +556,19 @@ impl LibraryScanner {
                                     .plugin_manager
                                     .call_format(&plugin.id, FormatMethod::ExtractMetadata, params)
                                     .await
-                                {
-                                    if let Some(c) =
+                                    && let Some(c) =
                                         result.get("cover_url").and_then(|v| v.as_str())
-                                    {
-                                        if !c.trim().is_empty() {
+                                        && !c.trim().is_empty() {
                                             // Plugin returned a cover path, use it
                                             final_cover_url = Some(c.to_string());
                                             break;
                                         }
-                                    }
-                                }
                             }
 
                             // Fallback to ID3 extraction (for MP3)
-                            if final_cover_url.is_none() {
-                                if let Ok(tag) = id3::Tag::read_from_path(&temp_path) {
-                                    if let Some(picture) = tag.pictures().next() {
+                            if final_cover_url.is_none()
+                                && let Ok(tag) = id3::Tag::read_from_path(&temp_path)
+                                    && let Some(picture) = tag.pictures().next() {
                                         let ext = match picture.mime_type.as_str() {
                                             "image/png" => "png",
                                             "image/webp" => "webp",
@@ -625,8 +604,6 @@ impl LibraryScanner {
                                         final_cover_url =
                                             Some(target_path.to_string_lossy().replace('\\', "/"));
                                     }
-                                }
-                            }
                         }
                     }
 

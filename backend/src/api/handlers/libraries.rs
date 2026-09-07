@@ -37,8 +37,7 @@ fn normalize_rss_sync_config(config: serde_json::Value) -> Option<serde_json::Va
     if let Some(interval) = object
         .get("scheduled_sync_interval")
         .and_then(|value| value.as_str())
-    {
-        if matches!(
+        && matches!(
             interval.trim().to_ascii_lowercase().as_str(),
             "hourly" | "daily" | "weekly" | "monthly"
         ) {
@@ -47,7 +46,6 @@ fn normalize_rss_sync_config(config: serde_json::Value) -> Option<serde_json::Va
                 serde_json::Value::String(interval.to_string()),
             );
         }
-    }
 
     if normalized.is_empty() {
         None
@@ -188,8 +186,8 @@ pub async fn create_library(
         if library_type == "rss" {
             return normalize_rss_sync_config(config).map(|config| config.to_string());
         }
-        if library_type == "webdav" {
-            if let Some(object) = config.as_object_mut() {
+        if library_type == "webdav"
+            && let Some(object) = config.as_object_mut() {
                 object.insert(
                     "nfo_writing_enabled".to_string(),
                     serde_json::Value::Bool(false),
@@ -199,7 +197,6 @@ pub async fn create_library(
                     serde_json::Value::Bool(false),
                 );
             }
-        }
         Some(config.to_string())
     });
 
@@ -306,8 +303,8 @@ pub async fn create_library(
             .and_then(|json| serde_json::from_str(json).ok())
             .unwrap_or_default();
 
-        if !scraper_config.disable_watcher {
-            if let Err(e) = state
+        if !scraper_config.disable_watcher
+            && let Err(e) = state
                 .library_watcher
                 .watch_library(&library.id, &library_path)
                 .await
@@ -323,7 +320,6 @@ pub async fn create_library(
                     "Failed to watch new library"
                 );
             }
-        }
     }
 
     Ok((StatusCode::CREATED, Json(LibraryResponse::from(library))))
@@ -406,11 +402,10 @@ pub async fn update_library(
         }
     }
 
-    if library.library_type == "webdav" || library.library_type == "local" {
-        if let Some(root_path) = req.root_path {
+    if (library.library_type == "webdav" || library.library_type == "local")
+        && let Some(root_path) = req.root_path {
             library.root_path = root_path;
         }
-    }
 
     if let Some(config) = req.scraper_config {
         library.scraper_config = if library.library_type == "rss" {
@@ -759,8 +754,8 @@ pub async fn get_storage_folders(
                 continue;
             }
 
-            if let Some(name) = entry_path.file_name().and_then(|n| n.to_str()) {
-                if !name.starts_with('.') {
+            if let Some(name) = entry_path.file_name().and_then(|n| n.to_str())
+                && !name.starts_with('.') {
                     let relative_path = canonical_entry
                         .strip_prefix(&storage_root)
                         .unwrap_or(&canonical_entry)
@@ -773,11 +768,10 @@ pub async fn get_storage_folders(
                         is_directory: true,
                     });
                 }
-            }
         }
     }
 
-    folders.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    folders.sort_by_key(|a| a.name.to_lowercase());
 
     Ok(Json(folders))
 }
@@ -821,7 +815,7 @@ pub async fn test_webdav_connection(
         .timeout(std::time::Duration::from_secs(10))
         .build() {
             Ok(c) => c,
-            Err(e) => return Err(TingError::IoError(std::io::Error::new(std::io::ErrorKind::Other, e))),
+            Err(e) => return Err(TingError::IoError(std::io::Error::other(e))),
         };
 
     // 尝试多种方法以兼容不同的 WebDAV 实现（如 Alist）
@@ -843,11 +837,10 @@ pub async fn test_webdav_connection(
             request = request.header("Depth", depth);
         }
 
-        if let Some(ref username) = req.username {
-            if !username.is_empty() {
+        if let Some(ref username) = req.username
+            && !username.is_empty() {
                 request = request.basic_auth(username, req.password.as_ref());
             }
-        }
 
         match request.send().await {
             Ok(res) => {

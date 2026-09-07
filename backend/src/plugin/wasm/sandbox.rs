@@ -139,11 +139,10 @@ impl Sandbox {
                 }
                 Component::ParentDir => {
                     // Handle ".." by popping the last component if it's not a root
-                    if let Some(last) = components.last() {
-                        if !matches!(last, Component::RootDir | Component::Prefix(_)) {
+                    if let Some(last) = components.last()
+                        && !matches!(last, Component::RootDir | Component::Prefix(_)) {
                             components.pop();
                         }
-                    }
                 }
                 Component::Normal(_) => {
                     components.push(component);

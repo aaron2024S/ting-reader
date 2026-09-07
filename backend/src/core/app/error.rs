@@ -378,9 +378,9 @@ impl IntoResponse for TingError {
             // All other errors are actual system errors
             _ => {
                 // Check if it's a database lock error (should be warning, not error)
-                if let TingError::DatabaseError(rusqlite::Error::SqliteFailure(err, _)) = self {
-                    if err.code == rusqlite::ErrorCode::DatabaseBusy
-                        || err.code == rusqlite::ErrorCode::DatabaseLocked
+                if let TingError::DatabaseError(rusqlite::Error::SqliteFailure(err, _)) = self
+                    && (err.code == rusqlite::ErrorCode::DatabaseBusy
+                        || err.code == rusqlite::ErrorCode::DatabaseLocked)
                     {
                         tracing::warn!(
                             error_type = self.error_type(),
@@ -393,7 +393,6 @@ impl IntoResponse for TingError {
                         );
                         return (status_code, Json(error_response)).into_response();
                     }
-                }
 
                 tracing::error!(
                     error_type = self.error_type(),

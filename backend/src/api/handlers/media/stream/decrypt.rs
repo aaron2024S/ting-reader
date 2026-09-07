@@ -375,7 +375,7 @@ pub(crate) async fn create_decrypted_stream(
                     };
 
                     let stream = ReaderStream::new(reader).map(|res| {
-                        res.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+                        res.map_err(std::io::Error::other)
                     });
 
                     Ok(stream)

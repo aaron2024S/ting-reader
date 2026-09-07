@@ -69,7 +69,7 @@ impl LogFilters {
     fn matches(&self, log: &LogEntry) -> bool {
         self.level
             .as_ref()
-            .map_or(true, |level| log.level.eq_ignore_ascii_case(level))
+            .is_none_or(|level| log.level.eq_ignore_ascii_case(level))
             && self.module_matches(log)
             && self.query_matches(log)
             && self.time_matches(log)
@@ -123,8 +123,8 @@ impl LogFilters {
             return false;
         };
         let timestamp = timestamp.with_timezone(&Utc);
-        self.since.map_or(true, |since| timestamp >= since)
-            && self.until.map_or(true, |until| timestamp <= until)
+        self.since.is_none_or(|since| timestamp >= since)
+            && self.until.is_none_or(|until| timestamp <= until)
     }
 }
 

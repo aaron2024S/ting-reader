@@ -176,8 +176,7 @@ async fn transcode_plugin_stream(
     let mut child = cmd.spawn().map_err(TingError::IoError)?;
 
     let mut stdin = child.stdin.take().ok_or_else(|| {
-        TingError::IoError(std::io::Error::new(
-            std::io::ErrorKind::Other,
+        TingError::IoError(std::io::Error::other(
             "Failed to capture ffmpeg stdin",
         ))
     })?;
@@ -221,8 +220,7 @@ async fn transcode_plugin_stream(
     }
 
     let stdout = child.stdout.take().ok_or_else(|| {
-        TingError::IoError(std::io::Error::new(
-            std::io::ErrorKind::Other,
+        TingError::IoError(std::io::Error::other(
             "Failed to capture ffmpeg stdout",
         ))
     })?;
@@ -304,8 +302,8 @@ pub async fn stream_chapter(
         .await;
     }
     // Handle HLS Transcoding Request
-    if let Some(format) = &params.transcode {
-        if format == "hls" {
+    if let Some(format) = &params.transcode
+        && format == "hls" {
             tracing::info!("Requested HLS transcoding: {}", chapter.path);
             return handle_hls_request(
                 state,
@@ -317,7 +315,6 @@ pub async fn stream_chapter(
             )
             .await;
         }
-    }
 
     // Handle Transcoding Request
     if let Some(format) = &params.transcode {
@@ -514,8 +511,7 @@ pub async fn stream_chapter(
             let mut child = cmd.spawn().map_err(TingError::IoError)?;
 
             let stdout = child.stdout.take().ok_or_else(|| {
-                TingError::IoError(std::io::Error::new(
-                    std::io::ErrorKind::Other,
+                TingError::IoError(std::io::Error::other(
                     "Failed to capture ffmpeg stdout",
                 ))
             })?;
@@ -589,8 +585,8 @@ pub async fn stream_chapter(
                 )
                 .await;
 
-            if let Ok(val) = res {
-                if let Some(cmd) = val.get("command").and_then(|c| c.as_array()) {
+            if let Ok(val) = res
+                && let Some(cmd) = val.get("command").and_then(|c| c.as_array()) {
                     let cmd_vec: Vec<String> = cmd
                         .iter()
                         .filter_map(|v| v.as_str())
@@ -604,7 +600,6 @@ pub async fn stream_chapter(
                         );
                     }
                 }
-            }
         }
 
         if let Some(cmd_vec) = plugin_command {
@@ -624,8 +619,8 @@ pub async fn stream_chapter(
             let mut child = cmd.spawn().map_err(TingError::IoError)?;
 
             // Handle input pipe if needed (Only if we are using the fallback pipe logic)
-            if use_pipe && child.stdin.is_some() {
-                if let Some(mut stdin) = child.stdin.take() {
+            if use_pipe && child.stdin.is_some()
+                && let Some(mut stdin) = child.stdin.take() {
                     // Get reader
                     let (mut reader, _) =
                         get_remote_media_reader(&state, &library, &chapter.path, None).await?;
@@ -641,11 +636,9 @@ pub async fn stream_chapter(
                         }
                     });
                 }
-            }
 
             let stdout = child.stdout.take().ok_or_else(|| {
-                TingError::IoError(std::io::Error::new(
-                    std::io::ErrorKind::Other,
+                TingError::IoError(std::io::Error::other(
                     "Failed to capture ffmpeg stdout",
                 ))
             })?;
@@ -730,8 +723,8 @@ pub async fn stream_chapter(
 
             // Handle input pipe if needed (Only if we are using the fallback pipe logic)
             let use_pipe = !cache_path.exists() && library.library_type != "local";
-            if use_pipe && child.stdin.is_some() {
-                if let Some(mut stdin) = child.stdin.take() {
+            if use_pipe && child.stdin.is_some()
+                && let Some(mut stdin) = child.stdin.take() {
                     // Get reader
                     let (mut reader, _) =
                         get_remote_media_reader(&state, &library, &chapter.path, None).await?;
@@ -747,11 +740,9 @@ pub async fn stream_chapter(
                         }
                     });
                 }
-            }
 
             let stdout = child.stdout.take().ok_or_else(|| {
-                TingError::IoError(std::io::Error::new(
-                    std::io::ErrorKind::Other,
+                TingError::IoError(std::io::Error::other(
                     "Failed to capture ffmpeg stdout",
                 ))
             })?;
@@ -808,8 +799,8 @@ pub async fn stream_chapter(
 
                 let range_header = headers.get(header::RANGE).and_then(|v| v.to_str().ok());
 
-                if let Some(range_str) = range_header {
-                    if let Ok(range) = state
+                if let Some(range_str) = range_header
+                    && let Ok(range) = state
                         .audio_streamer
                         .parse_range_header(range_str, file_size)
                     {
@@ -839,7 +830,6 @@ pub async fn stream_chapter(
                         )
                             .into_response());
                     }
-                }
 
                 return Ok((
                     StatusCode::OK,
@@ -884,8 +874,8 @@ pub async fn stream_chapter(
             let mime_type = stream_mime_type_from_path(&chapter.path);
 
             let range_header = headers.get(header::RANGE).and_then(|v| v.to_str().ok());
-            if let Some(range_str) = range_header {
-                if let Ok(range) = state
+            if let Some(range_str) = range_header
+                && let Ok(range) = state
                     .audio_streamer
                     .parse_range_header(range_str, file_size)
                 {
@@ -915,7 +905,6 @@ pub async fn stream_chapter(
                     )
                         .into_response());
                 }
-            }
 
             let file = tokio::fs::File::open(&cache_path).await?;
             let stream = ReaderStream::new(file);

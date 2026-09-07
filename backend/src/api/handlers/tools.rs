@@ -17,21 +17,19 @@ pub async fn generate_regex(Json(req): Json<GenerateRegexRequest>) -> Result<imp
     // Try to find the number as digits
     if num_val >= 0 {
         for mat in re_digits.find_iter(&filename) {
-            if let Ok(val) = mat.as_str().parse::<i32>() {
-                if val == num_val {
+            if let Ok(val) = mat.as_str().parse::<i32>()
+                && val == num_val {
                     num_range = Some(mat.range());
                     break; // Take first match
                 }
-            }
         }
     }
 
     // Fallback: if not found as digits (or num is not integer), search as string literal
-    if num_range.is_none() {
-        if let Some(idx) = filename.find(&num_str) {
+    if num_range.is_none()
+        && let Some(idx) = filename.find(&num_str) {
             num_range = Some(idx..idx + num_str.len());
         }
-    }
 
     // 2. Find title range
     // Search for title AFTER the number if possible
@@ -108,7 +106,6 @@ pub async fn generate_regex(Json(req): Json<GenerateRegexRequest>) -> Result<imp
         let mut index_val = None;
         let mut title_val = None;
 
-        let mut group_idx = 1;
         // Re-sort ranges to match regex group order
         // We re-create the ranges list same way
         let mut sorted_ranges: Vec<(usize, &str)> = Vec::new();
@@ -120,7 +117,7 @@ pub async fn generate_regex(Json(req): Json<GenerateRegexRequest>) -> Result<imp
         }
         sorted_ranges.sort_by_key(|(start, _)| *start);
 
-        for (_, type_name) in sorted_ranges {
+        for (group_idx, (_, type_name)) in (1..).zip(sorted_ranges) {
             if let Some(m) = c.get(group_idx) {
                 let val = m.as_str().to_string();
                 if type_name == "index" {
@@ -129,7 +126,6 @@ pub async fn generate_regex(Json(req): Json<GenerateRegexRequest>) -> Result<imp
                     title_val = Some(val);
                 }
             }
-            group_idx += 1;
         }
 
         (index_val, title_val)

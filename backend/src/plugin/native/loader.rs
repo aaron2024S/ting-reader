@@ -413,8 +413,8 @@ impl NativeLoader {
         // Catch any panics from the native code
         let return_code = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
             symbol(
-                method_cstr.as_ptr() as *const u8,
-                params_cstr.as_ptr() as *const u8,
+                method_cstr.as_bytes().as_ptr(),
+                params_cstr.as_bytes().as_ptr(),
                 &mut result_ptr as *mut *mut u8,
             )
         }));
@@ -442,8 +442,8 @@ impl NativeLoader {
                     cstr.to_str().unwrap_or("")
                 };
 
-                if let Ok(json) = serde_json::from_str::<serde_json::Value>(result_str) {
-                    if let Some(err) = json.get("error").and_then(|e| e.as_str()) {
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(result_str)
+                    && let Some(err) = json.get("error").and_then(|e| e.as_str()) {
                         tracing::warn!(
                             plugin_id = %plugin_id,
                             error = %err,
@@ -469,7 +469,6 @@ impl NativeLoader {
 
                         return Ok(json);
                     }
-                }
             }
 
             tracing::warn!(

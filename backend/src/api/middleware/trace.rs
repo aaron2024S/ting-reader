@@ -82,11 +82,9 @@ fn request_target_for_logs(uri: &Uri) -> String {
     if let Some(index) = segments
         .iter()
         .position(|segment| segment == "plugin-assets")
-    {
-        if let Some(grant) = segments.get_mut(index + 1) {
+        && let Some(grant) = segments.get_mut(index + 1) {
             *grant = "<redacted-grant>".to_string();
         }
-    }
     let path = segments.join("/");
     if uri.query().is_some() {
         format!("{path}?<redacted-query>")

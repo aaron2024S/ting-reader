@@ -99,8 +99,8 @@ pub async fn create_book(
     let created_at = chrono::Utc::now().to_rfc3339();
 
     let mut theme_color = req.theme_color.clone();
-    if theme_color.is_none() {
-        if let Some(ref url) = req.cover_url {
+    if theme_color.is_none()
+        && let Some(ref url) = req.cover_url {
             let cover_path = if url.starts_with("http://") || url.starts_with("https://") {
                 url.clone()
             } else {
@@ -119,7 +119,6 @@ pub async fn create_book(
                 theme_color = Some(color);
             }
         }
-    }
 
     let book = Book {
         id: book_id.clone(),
@@ -242,9 +241,8 @@ pub async fn update_book(
                         .library_repo
                         .find_by_id(&existing_book.library_id)
                         .await
-                    {
-                        if library.library_type == "webdav" {
-                            if let Ok((mut reader, _)) = state
+                        && library.library_type == "webdav"
+                            && let Ok((mut reader, _)) = state
                                 .storage_service
                                 .get_webdav_reader(
                                     &library,
@@ -258,8 +256,7 @@ pub async fn update_book(
                                 if tokio::io::AsyncReadExt::read_to_end(&mut reader, &mut buffer)
                                     .await
                                     .is_ok()
-                                {
-                                    if let Ok(Some(color)) =
+                                    && let Ok(Some(color)) =
                                         crate::core::color::calculate_theme_color_from_bytes(
                                             &buffer,
                                         )
@@ -267,10 +264,7 @@ pub async fn update_book(
                                     {
                                         theme_color = Some(color);
                                     }
-                                }
                             }
-                        }
-                    }
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -285,8 +279,8 @@ pub async fn update_book(
             // If cover URL is NOT provided in request, keep existing theme color
             // UNLESS existing cover exists and theme color is missing
             theme_color = existing_book.theme_color.clone();
-            if theme_color.is_none() {
-                if let Some(ref url) = existing_book.cover_url {
+            if theme_color.is_none()
+                && let Some(ref url) = existing_book.cover_url {
                     let cover_path = if url.starts_with("http://") || url.starts_with("https://") {
                         url.clone()
                     } else {
@@ -308,9 +302,8 @@ pub async fn update_book(
                                 .library_repo
                                 .find_by_id(&existing_book.library_id)
                                 .await
-                            {
-                                if library.library_type == "webdav" {
-                                    if let Ok((mut reader, _)) = state
+                                && library.library_type == "webdav"
+                                    && let Ok((mut reader, _)) = state
                                         .storage_service
                                         .get_webdav_reader(
                                             &library,
@@ -327,19 +320,14 @@ pub async fn update_book(
                                         )
                                         .await
                                         .is_ok()
-                                        {
-                                            if let Ok(Some(color)) = crate::core::color::calculate_theme_color_from_bytes(&buffer).await {
+                                            && let Ok(Some(color)) = crate::core::color::calculate_theme_color_from_bytes(&buffer).await {
                                                  theme_color = Some(color);
                                              }
-                                        }
                                     }
-                                }
-                            }
                         }
                         Err(_) => {}
                     }
                 }
-            }
         }
     }
 
@@ -735,8 +723,8 @@ async fn delete_book_files_inside_library_root(
         delete_file_if_inside_root(&path, library_root, &mut deleted_paths)?;
     }
 
-    if let Some(cover_url) = &book.cover_url {
-        if !cover_url.starts_with("http://")
+    if let Some(cover_url) = &book.cover_url
+        && !cover_url.starts_with("http://")
             && !cover_url.starts_with("https://")
             && !cover_url.starts_with("//")
         {
@@ -748,7 +736,6 @@ async fn delete_book_files_inside_library_root(
             };
             delete_file_if_inside_root(&candidate, library_root, &mut deleted_paths)?;
         }
-    }
 
     tracing::info!(
         book_id = %book.id,

@@ -266,14 +266,13 @@ impl PluginHostGateway {
             MAX_MEDIA_SIGNATURE_TTL_SECONDS,
         );
         let transcode = string_param(params, "transcode");
-        if let Some(transcode) = transcode.as_deref() {
-            if !matches!(transcode, "hls" | "mp3" | "wav") {
+        if let Some(transcode) = transcode.as_deref()
+            && !matches!(transcode, "hls" | "mp3" | "wav") {
                 return Err(TingError::InvalidRequest(format!(
                     "Unsupported media transcode target: {}",
                     transcode
                 )));
             }
-        }
         let seek = string_param(params, "seek");
         let download = bool_param(params, "download").unwrap_or(false);
         let signature = sign_media_stream_request(

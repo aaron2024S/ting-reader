@@ -213,25 +213,22 @@ impl LibraryScanner {
         message_key: &str,
         message_params: serde_json::Value,
     ) {
-        if let (Some(repo), Some(tid)) = (&self.task_repo, task_id) {
-            if let Err(e) = repo
+        if let (Some(repo), Some(tid)) = (&self.task_repo, task_id)
+            && let Err(e) = repo
                 .update_progress_key(tid, message_key, message_params)
                 .await
             {
                 warn!("Failed to update task progress: {}", e);
             }
-        }
     }
 
     /// Check if task has been cancelled
     pub(crate) async fn check_cancellation(&self, task_id: Option<&str>) -> Result<()> {
-        if let (Some(repo), Some(tid)) = (&self.task_repo, task_id) {
-            if let Ok(Some(task)) = repo.find_by_id(tid).await {
-                if task.status == "cancelled" {
+        if let (Some(repo), Some(tid)) = (&self.task_repo, task_id)
+            && let Ok(Some(task)) = repo.find_by_id(tid).await
+                && task.status == "cancelled" {
                     return Err(TingError::TaskError("Task cancelled by user".to_string()));
                 }
-            }
-        }
         Ok(())
     }
 
@@ -474,8 +471,8 @@ impl LibraryScanner {
         .await;
 
         // Trigger Merge Suggestions
-        if !scan_result.changed_book_ids.is_empty() && scan_result.failed_count == 0 {
-            if let Some(merge_service) = &self.merge_service {
+        if !scan_result.changed_book_ids.is_empty() && scan_result.failed_count == 0
+            && let Some(merge_service) = &self.merge_service {
                 self.update_progress_key(
                     task_id,
                     "scan.auto_merge.processing",
@@ -492,7 +489,6 @@ impl LibraryScanner {
                     warn!("Failed to process auto-merges: {}", e);
                 }
             }
-        }
 
         Ok(scan_result)
     }
@@ -697,31 +693,26 @@ impl LibraryScanner {
                     ext
                 );
 
-                if let Some(t) = result.get("title").and_then(|v| v.as_str()) {
-                    if !t.trim().is_empty() {
+                if let Some(t) = result.get("title").and_then(|v| v.as_str())
+                    && !t.trim().is_empty() {
                         title = t.to_string();
                     }
-                }
-                if let Some(a) = result.get("album").and_then(|v| v.as_str()) {
-                    if !a.trim().is_empty() {
+                if let Some(a) = result.get("album").and_then(|v| v.as_str())
+                    && !a.trim().is_empty() {
                         album = a.to_string();
                     }
-                }
-                if let Some(au) = result.get("artist").and_then(|v| v.as_str()) {
-                    if !au.trim().is_empty() {
+                if let Some(au) = result.get("artist").and_then(|v| v.as_str())
+                    && !au.trim().is_empty() {
                         author = Some(au.to_string());
                     }
-                }
-                if let Some(aa) = result.get("album_artist").and_then(|v| v.as_str()) {
-                    if !aa.trim().is_empty() {
+                if let Some(aa) = result.get("album_artist").and_then(|v| v.as_str())
+                    && !aa.trim().is_empty() {
                         author = Some(aa.to_string());
                     }
-                }
-                if let Some(n) = result.get("narrator").and_then(|v| v.as_str()) {
-                    if !n.trim().is_empty() {
+                if let Some(n) = result.get("narrator").and_then(|v| v.as_str())
+                    && !n.trim().is_empty() {
                         narrator = Some(n.to_string());
                     }
-                }
                 if let Some(dur) = result.get("duration").and_then(|v| v.as_f64()) {
                     duration = dur.round() as i32;
                     if duration > 0 {
@@ -732,11 +723,10 @@ impl LibraryScanner {
                         );
                     }
                 }
-                if let Some(c) = result.get("cover_url").and_then(|v| v.as_str()) {
-                    if !c.trim().is_empty() {
+                if let Some(c) = result.get("cover_url").and_then(|v| v.as_str())
+                    && !c.trim().is_empty() {
                         cover_url = Some(c.to_string());
                     }
-                }
 
                 plugin_handled = true;
                 break;
@@ -784,8 +774,8 @@ impl LibraryScanner {
                 }
 
                 // If ID3 is unreliable or missing, use Symphonia as fallback
-                if duration == 0 {
-                    if let Ok(meta) = self.audio_streamer.read_metadata(path) {
+                if duration == 0
+                    && let Ok(meta) = self.audio_streamer.read_metadata(path) {
                         duration = meta.duration.as_secs() as i32;
                         tracing::debug!(
                             "Using Symphonia to get {} duration: {} seconds",
@@ -793,12 +783,11 @@ impl LibraryScanner {
                             duration
                         );
                     }
-                }
             }
 
             // 提取其他元数据（如果插件没有提供）
-            if duration > 0 && (title.is_empty() || album.is_empty()) {
-                if let Ok(meta) = self.audio_streamer.read_metadata(path) {
+            if duration > 0 && (title.is_empty() || album.is_empty())
+                && let Ok(meta) = self.audio_streamer.read_metadata(path) {
                     if title.is_empty() {
                         title = meta.title.unwrap_or_default();
                     }
@@ -811,23 +800,20 @@ impl LibraryScanner {
                         author = meta.album_artist;
                     }
 
-                    if let Some(a) = meta.artist {
-                        if !a.trim().is_empty() {
+                    if let Some(a) = meta.artist
+                        && !a.trim().is_empty() {
                             if author.is_none() {
                                 author = Some(a.clone());
                             } else if author.as_ref() != Some(&a) && narrator.is_none() {
                                 narrator = Some(a);
                             }
                         }
-                    }
 
-                    if let Some(c) = meta.composer {
-                        if !c.trim().is_empty() && narrator.is_none() {
+                    if let Some(c) = meta.composer
+                        && !c.trim().is_empty() && narrator.is_none() {
                             narrator = Some(c);
                         }
-                    }
                 }
-            }
         }
 
         // 3. 返回提取的元数据

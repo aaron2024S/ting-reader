@@ -1631,11 +1631,9 @@ pub async fn install_store_plugin(
         .await?
         .into_iter()
         .find(|plugin| plugin.id == req.plugin_id)
-    {
-        if plugin.admin_only {
+        && plugin.admin_only {
             require_admin(&user)?;
         }
-    }
 
     let temp_path = state
         .plugin_manager

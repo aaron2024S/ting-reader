@@ -112,12 +112,11 @@ impl DecryptionCacheService {
         Fut: std::future::Future<Output = Result<()>>,
     {
         // 检查缓存
-        if self.config.enable_cache {
-            if let Some(cached_path) = self.get_from_cache(encrypted_path)? {
+        if self.config.enable_cache
+            && let Some(cached_path) = self.get_from_cache(encrypted_path)? {
                 info!("Cache hit for encrypted file: {:?}", encrypted_path);
                 return Ok(cached_path);
             }
-        }
 
         info!("Cache miss, decrypting file: {:?}", encrypted_path);
 
@@ -150,14 +149,13 @@ impl DecryptionCacheService {
             }
 
             // 检查是否过期
-            if let Ok(elapsed) = entry.created_at.elapsed() {
-                if elapsed > self.config.cache_expiry {
+            if let Ok(elapsed) = entry.created_at.elapsed()
+                && elapsed > self.config.cache_expiry {
                     // 过期，删除
                     let _ = fs::remove_file(&entry.decrypted_path);
                     cache.entries.remove(&key);
                     return Ok(None);
                 }
-            }
 
             // 更新访问时间
             entry.last_accessed = SystemTime::now();
@@ -214,8 +212,8 @@ impl DecryptionCacheService {
             .min_by_key(|(_, entry)| entry.last_accessed)
             .map(|(key, _)| key.clone());
 
-        if let Some(key) = oldest_key {
-            if let Some(entry) = cache.entries.remove(&key) {
+        if let Some(key) = oldest_key
+            && let Some(entry) = cache.entries.remove(&key) {
                 cache.current_size = cache.current_size.saturating_sub(entry.file_size);
 
                 if entry.decrypted_path.exists() {
@@ -223,7 +221,6 @@ impl DecryptionCacheService {
                     info!("Evicted and deleted: {:?}", entry.decrypted_path);
                 }
             }
-        }
 
         Ok(())
     }
@@ -237,11 +234,10 @@ impl DecryptionCacheService {
         let mut to_remove = Vec::new();
 
         for (key, entry) in &cache.entries {
-            if let Ok(elapsed) = entry.created_at.elapsed() {
-                if elapsed > self.config.cache_expiry {
+            if let Ok(elapsed) = entry.created_at.elapsed()
+                && elapsed > self.config.cache_expiry {
                     to_remove.push(key.clone());
                 }
-            }
         }
 
         for key in to_remove {

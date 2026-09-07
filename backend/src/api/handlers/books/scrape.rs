@@ -140,14 +140,13 @@ pub async fn scrape_book_diff(
     // We assume the search query is the same (Book Title) for other sources too.
 
     // Check Author Source
-    if let Some(srcs) = &config.author_sources {
-        if !srcs.is_empty() && srcs[0] != primary_source_id {
-            if let Some(s_id) = sources
+    if let Some(srcs) = &config.author_sources
+        && !srcs.is_empty() && srcs[0] != primary_source_id
+            && let Some(s_id) = sources
                 .iter()
                 .find(|s| s.id == srcs[0] && s.enabled)
                 .map(|s| s.id.clone())
-            {
-                if let Ok(res) = state
+                && let Ok(res) = state
                     .scraper_service
                     .search(
                         &req.query,
@@ -158,27 +157,21 @@ pub async fn scrape_book_diff(
                         1,
                     )
                     .await
-                {
-                    if !res.items.is_empty() {
+                    && !res.items.is_empty() {
                         let item = &res.items[0];
                         if !item.author.is_empty() {
                             detail.author = item.author.clone();
                         }
                     }
-                }
-            }
-        }
-    }
 
     // Check Narrator Source
-    if let Some(srcs) = &config.narrator_sources {
-        if !srcs.is_empty() && srcs[0] != primary_source_id {
-            if let Some(s_id) = sources
+    if let Some(srcs) = &config.narrator_sources
+        && !srcs.is_empty() && srcs[0] != primary_source_id
+            && let Some(s_id) = sources
                 .iter()
                 .find(|s| s.id == srcs[0] && s.enabled)
                 .map(|s| s.id.clone())
-            {
-                if let Ok(res) = state
+                && let Ok(res) = state
                     .scraper_service
                     .search(
                         &req.query,
@@ -189,27 +182,21 @@ pub async fn scrape_book_diff(
                         1,
                     )
                     .await
-                {
-                    if !res.items.is_empty() {
+                    && !res.items.is_empty() {
                         let item = &res.items[0];
                         if item.narrator.is_some() {
                             detail.narrator = item.narrator.clone();
                         }
                     }
-                }
-            }
-        }
-    }
 
     // Check Cover Source
-    if let Some(srcs) = &config.cover_sources {
-        if !srcs.is_empty() && srcs[0] != primary_source_id {
-            if let Some(s_id) = sources
+    if let Some(srcs) = &config.cover_sources
+        && !srcs.is_empty() && srcs[0] != primary_source_id
+            && let Some(s_id) = sources
                 .iter()
                 .find(|s| s.id == srcs[0] && s.enabled)
                 .map(|s| s.id.clone())
-            {
-                if let Ok(res) = state
+                && let Ok(res) = state
                     .scraper_service
                     .search(
                         &req.query,
@@ -220,27 +207,21 @@ pub async fn scrape_book_diff(
                         1,
                     )
                     .await
-                {
-                    if !res.items.is_empty() {
+                    && !res.items.is_empty() {
                         let item = &res.items[0];
                         if item.cover_url.is_some() {
                             detail.cover_url = item.cover_url.clone();
                         }
                     }
-                }
-            }
-        }
-    }
 
     // Check Intro Source
-    if let Some(srcs) = &config.intro_sources {
-        if !srcs.is_empty() && srcs[0] != primary_source_id {
-            if let Some(s_id) = sources
+    if let Some(srcs) = &config.intro_sources
+        && !srcs.is_empty() && srcs[0] != primary_source_id
+            && let Some(s_id) = sources
                 .iter()
                 .find(|s| s.id == srcs[0] && s.enabled)
                 .map(|s| s.id.clone())
-            {
-                if let Ok(res) = state
+                && let Ok(res) = state
                     .scraper_service
                     .search(
                         &req.query,
@@ -251,29 +232,22 @@ pub async fn scrape_book_diff(
                         1,
                     )
                     .await
-                {
-                    if !res.items.is_empty() {
+                    && !res.items.is_empty() {
                         let item = &res.items[0];
-                        if let Some(intro) = &item.intro {
-                            if !intro.is_empty() {
+                        if let Some(intro) = &item.intro
+                            && !intro.is_empty() {
                                 detail.intro = intro.clone();
                             }
-                        }
                     }
-                }
-            }
-        }
-    }
 
     // Check Tags Source
-    if let Some(srcs) = &config.tags_sources {
-        if !srcs.is_empty() && srcs[0] != primary_source_id {
-            if let Some(s_id) = sources
+    if let Some(srcs) = &config.tags_sources
+        && !srcs.is_empty() && srcs[0] != primary_source_id
+            && let Some(s_id) = sources
                 .iter()
                 .find(|s| s.id == srcs[0] && s.enabled)
                 .map(|s| s.id.clone())
-            {
-                if let Ok(res) = state
+                && let Ok(res) = state
                     .scraper_service
                     .search(
                         &req.query,
@@ -284,17 +258,12 @@ pub async fn scrape_book_diff(
                         1,
                     )
                     .await
-                {
-                    if !res.items.is_empty() {
+                    && !res.items.is_empty() {
                         let item = &res.items[0];
                         if !item.tags.is_empty() {
                             detail.tags = item.tags.clone();
                         }
                     }
-                }
-            }
-        }
-    }
 
     // Construct ScrapeMetadata for current book
     let current_meta = crate::api::models::books::ScrapeMetadata {
@@ -525,9 +494,8 @@ pub async fn apply_scrape_result(
                 Ok(None) => {
                     // Try WebDAV if local/http failed and it's a webdav library
                     if let Ok(Some(library)) = state.library_repo.find_by_id(&book.library_id).await
-                    {
-                        if library.library_type == "webdav" {
-                            if let Ok((mut reader, _)) = state
+                        && library.library_type == "webdav"
+                            && let Ok((mut reader, _)) = state
                                 .storage_service
                                 .get_webdav_reader(
                                     &library,
@@ -541,8 +509,7 @@ pub async fn apply_scrape_result(
                                 if tokio::io::AsyncReadExt::read_to_end(&mut reader, &mut buffer)
                                     .await
                                     .is_ok()
-                                {
-                                    if let Ok(Some(color)) =
+                                    && let Ok(Some(color)) =
                                         crate::core::color::calculate_theme_color_from_bytes(
                                             &buffer,
                                         )
@@ -550,10 +517,7 @@ pub async fn apply_scrape_result(
                                     {
                                         book.theme_color = Some(color);
                                     }
-                                }
                             }
-                        }
-                    }
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -570,8 +534,8 @@ pub async fn apply_scrape_result(
         sync_manual_scrape_lock(&state, &mut book).await?;
 
         // Check NFO writing
-        if let Ok(Some(library)) = state.library_repo.find_by_id(&book.library_id).await {
-            if library.library_type == "local" {
+        if let Ok(Some(library)) = state.library_repo.find_by_id(&book.library_id).await
+            && library.library_type == "local" {
                 let config: crate::db::models::ScraperConfig = library
                     .scraper_config
                     .as_ref()
@@ -721,7 +685,6 @@ pub async fn apply_scrape_result(
                     }
                 }
             }
-        }
     }
 
     // Even a manual save without selected metadata fields establishes ownership
@@ -807,9 +770,9 @@ async fn recalculate_cover_theme_color(
             book.theme_color = Some(color);
         }
         Ok(None) => {
-            if let Ok(Some(library)) = state.library_repo.find_by_id(&book.library_id).await {
-                if library.library_type == "webdav" {
-                    if let Ok((mut reader, _)) = state
+            if let Ok(Some(library)) = state.library_repo.find_by_id(&book.library_id).await
+                && library.library_type == "webdav"
+                    && let Ok((mut reader, _)) = state
                         .storage_service
                         .get_webdav_reader(
                             &library,
@@ -823,16 +786,12 @@ async fn recalculate_cover_theme_color(
                         if tokio::io::AsyncReadExt::read_to_end(&mut reader, &mut buffer)
                             .await
                             .is_ok()
-                        {
-                            if let Ok(Some(color)) =
+                            && let Ok(Some(color)) =
                                 crate::core::color::calculate_theme_color_from_bytes(&buffer).await
                             {
                                 book.theme_color = Some(color);
                             }
-                        }
                     }
-                }
-            }
         }
         Err(e) => {
             tracing::warn!(

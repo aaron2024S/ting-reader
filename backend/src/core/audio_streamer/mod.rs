@@ -104,12 +104,11 @@ impl AudioStreamer {
         // Check cache first
         if self.config.cache_enabled {
             let cache_key = file_path.to_string_lossy().to_string();
-            if let Ok(mut cache) = self.cache.write() {
-                if let Some(metadata) = cache.get(&cache_key) {
+            if let Ok(mut cache) = self.cache.write()
+                && let Some(metadata) = cache.get(&cache_key) {
                     debug!("Cache hit for metadata: {:?}", file_path);
                     return Ok(metadata);
                 }
-            }
         }
 
         // Skip metadata extraction for .strm files (they are URL redirects, not audio files)
@@ -258,11 +257,10 @@ impl AudioStreamer {
                             composer = Some(tag.value.to_string());
                         }
                     }
-                    Some(symphonia::core::meta::StandardTagKey::Genre) => {
-                        if genre.is_none() {
+                    Some(symphonia::core::meta::StandardTagKey::Genre)
+                        if genre.is_none() => {
                             genre = Some(tag.value.to_string());
                         }
-                    }
                     _ => {}
                 }
             }

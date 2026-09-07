@@ -451,18 +451,16 @@ pub async fn update_me(
         .ok_or_else(|| TingError::AuthenticationError("用户不存在".to_string()))?;
 
     // Update username if provided
-    if let Some(new_username) = req.username {
-        if !new_username.is_empty() {
+    if let Some(new_username) = req.username
+        && !new_username.is_empty() {
             db_user.username = new_username;
         }
-    }
 
     // Update password if provided
-    if let Some(new_password) = req.password {
-        if !new_password.is_empty() {
+    if let Some(new_password) = req.password
+        && !new_password.is_empty() {
             db_user.password_hash = hash_password(&new_password)?;
         }
-    }
 
     // Save updated user
     state.user_repo.update(&db_user).await?;

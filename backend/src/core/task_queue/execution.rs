@@ -390,12 +390,11 @@ impl TaskQueue {
 
                 match req.send().await {
                     Ok(resp) => {
-                        if let Ok(bytes) = resp.bytes().await {
-                            if tokio::fs::write(&path, bytes).await.is_ok() {
+                        if let Ok(bytes) = resp.bytes().await
+                            && tokio::fs::write(&path, bytes).await.is_ok() {
                                 temp_cover_path = Some(path.clone());
                                 cover_path_str = Some(path.to_string_lossy().to_string());
                             }
-                        }
                     }
                     Err(e) => warn!("Failed to download cover for metadata writing: {}", e),
                 }
@@ -558,8 +557,8 @@ impl TaskQueue {
                             text: desc_clone,
                         });
 
-                        if let Some(cp) = cover_path_str_clone {
-                            if let Ok(data) = std::fs::read(&cp) {
+                        if let Some(cp) = cover_path_str_clone
+                            && let Ok(data) = std::fs::read(&cp) {
                                 let mime_type = if cp.to_lowercase().ends_with("png") {
                                     "image/png".to_string()
                                 } else {
@@ -574,12 +573,10 @@ impl TaskQueue {
                                     data,
                                 });
                             }
-                        }
 
                         tag.write_to_path(&path_clone, Version::Id3v23)
                             .map_err(|e| {
-                                crate::core::error::TingError::IoError(std::io::Error::new(
-                                    std::io::ErrorKind::Other,
+                                crate::core::error::TingError::IoError(std::io::Error::other(
                                     e.to_string(),
                                 ))
                             })?;

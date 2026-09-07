@@ -232,8 +232,7 @@ pub(super) async fn handle_strm_stream(
         let mut child = cmd.spawn().map_err(TingError::IoError)?;
 
         let stdout = child.stdout.take().ok_or_else(|| {
-            TingError::IoError(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            TingError::IoError(std::io::Error::other(
                 "Failed to capture ffmpeg stdout",
             ))
         })?;
@@ -370,8 +369,7 @@ pub(super) async fn handle_strm_stream(
 
         // Make the request
         let response = req.send().await.map_err(|e| {
-            TingError::IoError(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            TingError::IoError(std::io::Error::other(
                 format!("Failed to fetch strm URL: {}", e),
             ))
         })?;

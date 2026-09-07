@@ -78,8 +78,8 @@ impl PluginLogFilters {
             && self
                 .level
                 .as_ref()
-                .map_or(true, |level| log.level.eq_ignore_ascii_case(level))
-            && self.source.as_ref().map_or(true, |source| {
+                .is_none_or(|level| log.level.eq_ignore_ascii_case(level))
+            && self.source.as_ref().is_none_or(|source| {
                 log_field(log, "source")
                     .is_some_and(|candidate| candidate.eq_ignore_ascii_case(source))
             })
@@ -129,8 +129,8 @@ impl PluginLogFilters {
             return false;
         };
         let timestamp = timestamp.with_timezone(&Utc);
-        self.since.map_or(true, |since| timestamp >= since)
-            && self.until.map_or(true, |until| timestamp <= until)
+        self.since.is_none_or(|since| timestamp >= since)
+            && self.until.is_none_or(|until| timestamp <= until)
     }
 }
 

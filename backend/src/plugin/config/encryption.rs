@@ -141,14 +141,12 @@ pub fn decrypt_sensitive_fields(
     let mut decrypted_config = config.clone();
     if let Some(obj) = decrypted_config.as_object_mut() {
         for field_name in encrypted_fields {
-            if let Some(field_value) = obj.get(field_name) {
-                if let Some(encrypted_str) = field_value.as_str() {
-                    if let Some(encrypted_data) = encrypted_str.strip_prefix("encrypted:") {
+            if let Some(field_value) = obj.get(field_name)
+                && let Some(encrypted_str) = field_value.as_str()
+                    && let Some(encrypted_data) = encrypted_str.strip_prefix("encrypted:") {
                         let decrypted = decrypt_value(encryption_key, encrypted_data)?;
                         obj.insert(field_name.clone(), Value::String(decrypted));
                     }
-                }
-            }
         }
     }
 

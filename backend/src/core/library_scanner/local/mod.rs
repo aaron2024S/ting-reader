@@ -153,22 +153,20 @@ impl LibraryScanner {
                         &mut changed_parent_dirs,
                     );
                 }
-                if is_audio {
-                    if let Some(parent) = entry_path.parent() {
+                if is_audio
+                    && let Some(parent) = entry_path.parent() {
                         dir_groups
                             .entry(parent.to_path_buf())
                             .or_default()
                             .push(path_buf.clone());
                     }
-                }
-                if is_sidecar {
-                    if let Some(parent) = entry_path.parent() {
+                if is_sidecar
+                    && let Some(parent) = entry_path.parent() {
                         sidecar_fingerprints
                             .entry(parent.to_path_buf())
                             .or_default()
                             .push(snapshot.fingerprint.clone());
                     }
-                }
                 file_snapshots.insert(path_buf, snapshot);
             }
         }
@@ -337,8 +335,8 @@ impl LibraryScanner {
                 existing_info = book_hash_map.get(&book_hash).cloned();
             }
 
-            if existing_info.is_none() {
-                if let Some(child_dirs) = coalesced_range_dirs.get(&dir) {
+            if existing_info.is_none()
+                && let Some(child_dirs) = coalesced_range_dirs.get(&dir) {
                     for child_dir in &child_dirs.child_dirs {
                         if let Some(info) = book_path_map.get(child_dir).cloned() {
                             existing_info = Some(info);
@@ -346,7 +344,6 @@ impl LibraryScanner {
                         }
                     }
                 }
-            }
 
             let dir_path_string = dir.to_string_lossy().to_string();
             let files_changed = local_group_is_changed(
@@ -361,8 +358,8 @@ impl LibraryScanner {
                 .unwrap_or(0);
             let state_config_fingerprint =
                 format!("{}:lock={}", scan_config_fingerprint, existing_lock_state);
-            if let Some((book_id, _, _)) = existing_info.as_ref() {
-                if cached_states.get(&dir_path_string).is_some_and(|state| {
+            if let Some((book_id, _, _)) = existing_info.as_ref()
+                && cached_states.get(&dir_path_string).is_some_and(|state| {
                     !files_changed
                         && state.config_fingerprint.as_deref()
                             == Some(state_config_fingerprint.as_str())
@@ -370,9 +367,9 @@ impl LibraryScanner {
                     scan_result.total_books += 1;
                     scan_result.books_skipped += 1;
                     found_book_ids.insert(book_id.clone());
-                    if affected_series_dirs.contains(&dir) {
-                        if let Some(series_info) = inferred_series.get(&dir) {
-                            if let Err(e) = self
+                    if affected_series_dirs.contains(&dir)
+                        && let Some(series_info) = inferred_series.get(&dir)
+                            && let Err(e) = self
                                 .link_book_to_inferred_series(library_id, book_id, series_info)
                                 .await
                             {
@@ -383,11 +380,8 @@ impl LibraryScanner {
                                     "Failed to refresh affected inferred series member"
                                 );
                             }
-                        }
-                    }
                     continue;
                 }
-            }
 
             // Only directories in the changed set pay the natural-sort and
             // aggregate-fingerprint cost. The discovery pass itself stays O(N).
@@ -445,9 +439,9 @@ impl LibraryScanner {
                     );
                     state.config_fingerprint = Some(state_config_fingerprint);
                     pending_states.push(state);
-                    if status != ScanStatus::Skipped {
-                        if let Some(series_info) = inferred_series.get(&dir) {
-                            if let Err(e) = self
+                    if status != ScanStatus::Skipped
+                        && let Some(series_info) = inferred_series.get(&dir)
+                            && let Err(e) = self
                                 .link_book_to_inferred_series(library_id, &book_id, series_info)
                                 .await
                             {
@@ -458,22 +452,17 @@ impl LibraryScanner {
                                     "Failed to link book to inferred series"
                                 );
                             }
-                        }
-                    }
-                    if status != ScanStatus::Skipped {
-                        if let Some(child_dirs) = coalesced_range_dirs.get(&dir) {
+                    if status != ScanStatus::Skipped
+                        && let Some(child_dirs) = coalesced_range_dirs.get(&dir) {
                             for child_dir in &child_dirs.child_dirs {
                                 if let Some((child_book_id, manual_corrected, _)) =
                                     book_path_map.get(child_dir)
-                                {
-                                    if child_book_id != &book_id && *manual_corrected == 0 {
+                                    && child_book_id != &book_id && *manual_corrected == 0 {
                                         absorbed_range_book_ids
                                             .insert(child_book_id.clone(), book_id.clone());
                                     }
-                                }
                             }
                         }
-                    }
                     debug!(book_id = %book_id, path = ?dir, status = ?status, "Processed book directory");
                 }
                 Err(e) => {
@@ -547,7 +536,7 @@ impl LibraryScanner {
         // incremental scan still avoids deletion because it did not inspect
         // the complete library.
         let complete_library_listing =
-            mode.is_full() || scan_paths.map_or(true, |paths| paths.is_empty());
+            mode.is_full() || scan_paths.is_none_or(|paths| paths.is_empty());
         if walk_errors == 0
             && (complete_library_listing || scan_paths.is_some_and(|paths| !paths.is_empty()))
         {
@@ -642,8 +631,8 @@ impl LibraryScanner {
             for (book_id, pattern) in manual_corrected_patterns {
                 if !pattern.is_empty() {
                     let dir_name = dir.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                    if let Ok(re) = regex::Regex::new(pattern) {
-                        if re.is_match(dir_name) {
+                    if let Ok(re) = regex::Regex::new(pattern)
+                        && re.is_match(dir_name) {
                             info!(
                                 "New Chapter Protection: Merging {} into existing book {}",
                                 dir_name, book_id
@@ -675,7 +664,6 @@ impl LibraryScanner {
                                 },
                             ));
                         }
-                    }
                 }
             }
         }
@@ -717,16 +705,14 @@ impl LibraryScanner {
                 || (scraper_config.nfo_writing_enabled && !dir.join("book.nfo").exists()));
         let mut skip_metadata_update = false;
         if !mode.is_full() {
-            if let (Some(last_scan), Some(max_mt)) = (last_scanned, max_mtime_utc) {
-                if max_mt <= last_scan && !required_sidecar_missing {
-                    if let Some(book_id) = existing_book_id.as_deref() {
+            if let (Some(last_scan), Some(max_mt)) = (last_scanned, max_mtime_utc)
+                && max_mt <= last_scan && !required_sidecar_missing
+                    && let Some(book_id) = existing_book_id.as_deref() {
                         skip_metadata_update = chapter_counts
                             .get(book_id)
                             .map(|counts| counts.total == files.len())
                             .unwrap_or(false);
                     }
-                }
-            }
 
             if let Some(book_id) = existing_book_id.clone().filter(|_| skip_metadata_update) {
                 return Ok((book_id, ScanStatus::Skipped));
@@ -744,11 +730,10 @@ impl LibraryScanner {
                 .unwrap_or("Unknown Book")
                 .to_string()
         });
-        if let Some(fallback_title) = fallback_title_override {
-            if !fallback_title.trim().is_empty() && source == MetadataSource::Fallback {
+        if let Some(fallback_title) = fallback_title_override
+            && !fallback_title.trim().is_empty() && source == MetadataSource::Fallback {
                 title = fallback_title.to_string();
             }
-        }
         let mut author = scanned_meta.author;
         let mut narrator = scanned_meta.narrator;
         let mut description = scanned_meta.description;
@@ -777,9 +762,9 @@ impl LibraryScanner {
         }
 
         // 3. Apply Manual Correction or Existing Data
-        if is_manual_corrected {
-            if let Some(id) = &existing_book_id {
-                if let Ok(Some(book)) = self.book_repo.find_by_id(id).await {
+        if is_manual_corrected
+            && let Some(id) = &existing_book_id
+                && let Ok(Some(book)) = self.book_repo.find_by_id(id).await {
                     // A metadata lock owns the complete editable metadata shape,
                     // including intentionally empty fields. Preserve those values
                     // instead of filling only missing fields from a later scan.
@@ -795,8 +780,6 @@ impl LibraryScanner {
                     published_year = book.year.map(|year| year.to_string());
                     // theme_color will be recalculated if cover_url changed later
                 }
-            }
-        }
 
         // Theme Color
         let mut theme_color = None;
@@ -958,8 +941,8 @@ impl LibraryScanner {
                 let books = self.series_repo.find_books_by_series(&series.id).await?;
                 if let Some((_, current_order)) = books.iter().find(|(b, _)| b.id == book_id) {
                     // Already linked, update order if explicit order changed
-                    if let Some(o) = explicit_order {
-                        if *current_order != o {
+                    if let Some(o) = explicit_order
+                        && *current_order != o {
                             self.series_repo
                                 .add_book(crate::db::models::SeriesBook {
                                     series_id: series.id.clone(),
@@ -968,7 +951,6 @@ impl LibraryScanner {
                                 })
                                 .await?;
                         }
-                    }
                 } else {
                     // Not linked, insert it
                     let order = if let Some(o) = explicit_order {
@@ -1145,15 +1127,14 @@ impl LibraryScanner {
         if let Ok(mut entries) = std::fs::read_dir(dir) {
             while let Some(Ok(entry)) = entries.next() {
                 let path = entry.path();
-                if path.is_file() {
-                    if let Some(ext) = path.extension() {
+                if path.is_file()
+                    && let Some(ext) = path.extension() {
                         let ext_str = ext.to_string_lossy().to_lowercase();
                         if ["jpg", "jpeg", "png", "webp"].contains(&ext_str.as_str()) {
                             // Return path with forward slashes for better JSON/URL compatibility
                             return Some(path.to_string_lossy().replace('\\', "/"));
                         }
                     }
-                }
             }
         }
         None

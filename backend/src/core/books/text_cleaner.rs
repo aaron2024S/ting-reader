@@ -185,19 +185,17 @@ impl TextCleaner {
     pub fn extract_chapter_number(&self, title: &str) -> Option<i32> {
         // Priority 1: "第xxx集" or "第xxx章"
         let re1 = Regex::new(r"第\s*(\d+)\s*[集回章话]").unwrap();
-        if let Some(caps) = re1.captures(title) {
-            if let Ok(num) = caps[1].parse::<i32>() {
+        if let Some(caps) = re1.captures(title)
+            && let Ok(num) = caps[1].parse::<i32>() {
                 return Some(num);
             }
-        }
 
         // Priority 2: "xxx集" or "xxx章"
         let re2 = Regex::new(r"(\d+)\s*[集回章话]").unwrap();
-        if let Some(caps) = re2.captures(title) {
-            if let Ok(num) = caps[1].parse::<i32>() {
+        if let Some(caps) = re2.captures(title)
+            && let Ok(num) = caps[1].parse::<i32>() {
                 return Some(num);
             }
-        }
 
         // Priority 3: Just numbers, but be careful not to pick up dates or other numbers
         // This is risky, so maybe only if it looks like a chapter number (at start or separated)
@@ -314,7 +312,7 @@ impl TextCleaner {
         self.plugin_rules.push(rule);
         // Sort by priority (higher priority first)
         self.plugin_rules
-            .sort_by(|a, b| b.priority.cmp(&a.priority));
+            .sort_by_key(|a| std::cmp::Reverse(a.priority));
     }
 
     /// Apply all cleaning rules (builtin first, then plugin rules)
@@ -326,7 +324,7 @@ impl TextCleaner {
         let mut all_rules: Vec<&CleaningRule> = self.builtin_rules.iter().collect();
         all_rules.extend(self.plugin_rules.iter());
         all_rules.extend(self.config.custom_rules.iter());
-        all_rules.sort_by(|a, b| b.priority.cmp(&a.priority));
+        all_rules.sort_by_key(|a| std::cmp::Reverse(a.priority));
 
         // Apply each rule
         for rule in all_rules {

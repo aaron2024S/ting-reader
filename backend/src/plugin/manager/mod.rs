@@ -327,11 +327,10 @@ impl PluginManager {
         };
 
         let cache_key = format!("{}:{}", provider.plugin_id, provider.capability.id);
-        if !force_refresh {
-            if let Some(cached) = self.store_cache.get(&cache_key).await {
+        if !force_refresh
+            && let Some(cached) = self.store_cache.get(&cache_key).await {
                 return Ok(cached);
             }
-        }
 
         let invoke = provider
             .capability

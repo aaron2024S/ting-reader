@@ -104,8 +104,8 @@ pub async fn create_series(
     let mut cover_url = req.cover_url;
     let mut description = req.description;
 
-    if !req.book_ids.is_empty() {
-        if let Some(first_book) = state.book_repo.find_by_id(&req.book_ids[0]).await? {
+    if !req.book_ids.is_empty()
+        && let Some(first_book) = state.book_repo.find_by_id(&req.book_ids[0]).await? {
             if author.is_none() {
                 author = first_book.author;
             }
@@ -119,7 +119,6 @@ pub async fn create_series(
                 description = first_book.description;
             }
         }
-    }
 
     let series = Series {
         id: series_id.clone(),

@@ -226,8 +226,8 @@ impl PluginManager {
             cache.get(plugin_id).cloned()
         };
 
-        if let Err(e) = self.unload_plugin(plugin_id).await {
-            if !matches!(e, TingError::PluginNotFound(_)) {
+        if let Err(e) = self.unload_plugin(plugin_id).await
+            && !matches!(e, TingError::PluginNotFound(_)) {
                 tracing::warn!(
                     plugin_id = %plugin_id,
                     error = %e,
@@ -239,7 +239,6 @@ impl PluginManager {
                     "Failed to unload plugin during uninstall"
                 );
             }
-        }
 
         // Clean up plugin configuration
         if let Some(cm) = self.config_manager.read().unwrap().as_ref() {
@@ -297,9 +296,9 @@ impl PluginManager {
             if !found {
                 while let Some(entry) = read_dir.next_entry().await.map_err(TingError::IoError)? {
                     let path = entry.path();
-                    if path.is_dir() && has_plugin_manifest(&path) {
-                        if let Ok(metadata) = self.read_plugin_metadata(&path) {
-                            if &metadata.instance_id() == plugin_id {
+                    if path.is_dir() && has_plugin_manifest(&path)
+                        && let Ok(metadata) = self.read_plugin_metadata(&path)
+                            && &metadata.instance_id() == plugin_id {
                                 info!(
                                     "Found plugin directory for {}: {}",
                                     plugin_id,
@@ -315,8 +314,6 @@ impl PluginManager {
                                 found = true;
                                 break;
                             }
-                        }
-                    }
                 }
             }
 
@@ -455,8 +452,8 @@ impl PluginManager {
             };
 
             // Migrate old config to new version before load so ensure_config finds it.
-            if let Some(ref old_config) = preserved_old_config {
-                if let Some(ref schema) = new_metadata.config_schema {
+            if let Some(ref old_config) = preserved_old_config
+                && let Some(ref schema) = new_metadata.config_schema {
                     let cm_lock = self.config_manager.read().unwrap();
                     if let Some(cm) = cm_lock.as_ref() {
                         let mut merged = extract_defaults_from_schema(schema);
@@ -482,7 +479,6 @@ impl PluginManager {
                         );
                     }
                 }
-            }
 
             match self.load_plugin(&plugin_path).await {
                 Ok(loaded_id) => {
@@ -498,8 +494,8 @@ impl PluginManager {
                             "Failed to unload old plugin version after upgrade"
                         );
                     }
-                    if let Some(gateway) = self.host_gateway_handle().get() {
-                        if let Err(e) = gateway.migrate_plugin_cache(id, &loaded_id).await {
+                    if let Some(gateway) = self.host_gateway_handle().get()
+                        && let Err(e) = gateway.migrate_plugin_cache(id, &loaded_id).await {
                             tracing::warn!(
                                 old_plugin_id = %id,
                                 new_plugin_id = %loaded_id,
@@ -513,7 +509,6 @@ impl PluginManager {
                                 "Failed to migrate plugin cache during reload upgrade"
                             );
                         }
-                    }
                     tracing::info!(
                         old_id = %id,
                         new_id = %loaded_id,
@@ -640,8 +635,8 @@ impl PluginManager {
 
         let plugin_id = installer.install_plugin(package_path, |_| Ok(())).await?;
 
-        if let Some(gateway) = self.host_gateway_handle().get() {
-            if let Some((old_id, stale_cache_ids)) = cache_ids_to_migrate.split_first() {
+        if let Some(gateway) = self.host_gateway_handle().get()
+            && let Some((old_id, stale_cache_ids)) = cache_ids_to_migrate.split_first() {
                 if let Err(e) = gateway.migrate_plugin_cache(old_id, &plugin_id).await {
                     tracing::warn!(
                         old_plugin_id = %old_id,
@@ -672,11 +667,10 @@ impl PluginManager {
                     }
                 }
             }
-        }
 
         // Migrate old config to new version: merge old values over new schema defaults.
-        if let Some(ref old_config) = preserved_old_config {
-            if let Some(ref schema) = metadata.config_schema {
+        if let Some(ref old_config) = preserved_old_config
+            && let Some(ref schema) = metadata.config_schema {
                 let cm_lock = self.config_manager.read().unwrap();
                 if let Some(cm) = cm_lock.as_ref() {
                     let mut merged = extract_defaults_from_schema(schema);
@@ -702,7 +696,6 @@ impl PluginManager {
                     );
                 }
             }
-        }
 
         let plugin_path = self.config.plugin_dir.join(&plugin_id);
         if let Err(e) = self.load_plugin(&plugin_path).await {
@@ -875,11 +868,9 @@ impl PluginManager {
 
             if let (Some(candidate_path), Ok(installed_path)) =
                 (&candidate_path, std::fs::canonicalize(&path))
-            {
-                if &installed_path == candidate_path {
+                && &installed_path == candidate_path {
                     continue;
                 }
-            }
 
             let installed_metadata = match self.read_plugin_metadata(&path) {
                 Ok(installed_metadata) => installed_metadata,
@@ -950,8 +941,8 @@ impl PluginManager {
         };
 
         // Initialize per-plugin config if plugin has a schema and no config exists yet
-        if let Some(ref schema) = config_schema {
-            if let Some(cm) = self.config_manager.read().unwrap().as_ref() {
+        if let Some(ref schema) = config_schema
+            && let Some(cm) = self.config_manager.read().unwrap().as_ref() {
                 let default_config = extract_defaults_from_schema(schema);
                 let _ = cm.ensure_config(
                     plugin_id.clone(),
@@ -960,7 +951,6 @@ impl PluginManager {
                     default_config,
                 );
             }
-        }
 
         let context = self.create_plugin_context(&metadata)?;
         let initializing_fields = serde_json::json!({

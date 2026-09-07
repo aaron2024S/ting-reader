@@ -337,13 +337,12 @@ impl ServerConfig {
             }
         }
 
-        if let Some(socket) = &self.gateway_socket {
-            if socket.as_os_str().is_empty() {
+        if let Some(socket) = &self.gateway_socket
+            && socket.as_os_str().is_empty() {
                 return Err(ConfigError::InvalidServer(
                     "gateway_socket cannot be empty".to_string(),
                 ));
             }
-        }
 
         Ok(())
     }

@@ -260,8 +260,7 @@ impl ProgressRepository {
                 let mut affected = 0;
 
                 if !progress_ids.is_empty() {
-                    let placeholders = std::iter::repeat("?")
-                        .take(progress_ids.len())
+                    let placeholders = std::iter::repeat_n("?", progress_ids.len())
                         .collect::<Vec<_>>()
                         .join(",");
                     let sql = format!(
@@ -280,8 +279,7 @@ impl ProgressRepository {
                 }
 
                 if !chapter_ids.is_empty() {
-                    let placeholders = std::iter::repeat("?")
-                        .take(chapter_ids.len())
+                    let placeholders = std::iter::repeat_n("?", chapter_ids.len())
                         .collect::<Vec<_>>()
                         .join(",");
                     let sql = format!(

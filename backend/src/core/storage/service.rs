@@ -157,21 +157,19 @@ impl StorageService {
         let mut total_size = res.content_length().unwrap_or(0);
 
         // Try to parse Content-Range header to get total size if this is a partial content response
-        if let Some(range_header) = res.headers().get("Content-Range") {
-            if let Ok(range_str) = range_header.to_str() {
+        if let Some(range_header) = res.headers().get("Content-Range")
+            && let Ok(range_str) = range_header.to_str() {
                 // Format: bytes start-end/total
-                if let Some(slash_pos) = range_str.rfind('/') {
-                    if let Ok(total) = range_str[slash_pos + 1..].parse::<u64>() {
+                if let Some(slash_pos) = range_str.rfind('/')
+                    && let Ok(total) = range_str[slash_pos + 1..].parse::<u64>() {
                         total_size = total;
                     }
-                }
             }
-        }
 
         // Convert stream to AsyncRead
         let stream = res
             .bytes_stream()
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e));
+            .map_err(std::io::Error::other);
         let reader = StreamReader::new(stream);
 
         Ok((Box::new(reader), total_size))
@@ -223,19 +221,16 @@ impl StorageService {
 
         let mut total_size = res.content_length().unwrap_or(0);
 
-        if let Some(range_header) = res.headers().get("Content-Range") {
-            if let Ok(range_str) = range_header.to_str() {
-                if let Some(slash_pos) = range_str.rfind('/') {
-                    if let Ok(total) = range_str[slash_pos + 1..].parse::<u64>() {
+        if let Some(range_header) = res.headers().get("Content-Range")
+            && let Ok(range_str) = range_header.to_str()
+                && let Some(slash_pos) = range_str.rfind('/')
+                    && let Ok(total) = range_str[slash_pos + 1..].parse::<u64>() {
                         total_size = total;
                     }
-                }
-            }
-        }
 
         let stream = res
             .bytes_stream()
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e));
+            .map_err(std::io::Error::other);
         let reader = StreamReader::new(stream);
 
         Ok((Box::new(reader), total_size))

@@ -165,7 +165,7 @@ pub fn get_download_url(plugin: &StorePlugin) -> Result<String> {
         }
 
         // Direct package plugins may not have a repo, so provide a clearer error message.
-        if plugin.repo.as_ref().map_or(true, |r| r.is_empty()) {
+        if plugin.repo.as_ref().is_none_or(|r| r.is_empty()) {
             return Err(TingError::PluginLoadError(format!(
                 "Plugin {} is not available for platform '{}'. This plugin uses direct package downloads with limited platform support.",
                 plugin.id, platform_key

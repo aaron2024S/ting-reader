@@ -211,8 +211,7 @@ impl LibraryWatcher {
                 }
             })
             .map_err(|e| {
-                crate::core::error::TingError::IoError(std::io::Error::new(
-                    std::io::ErrorKind::Other,
+                crate::core::error::TingError::IoError(std::io::Error::other(
                     e.to_string(),
                 ))
             })?;
@@ -220,8 +219,7 @@ impl LibraryWatcher {
         watcher
             .watch(&path_buf, RecursiveMode::Recursive)
             .map_err(|e| {
-                crate::core::error::TingError::IoError(std::io::Error::new(
-                    std::io::ErrorKind::Other,
+                crate::core::error::TingError::IoError(std::io::Error::other(
                     e.to_string(),
                 ))
             })?;

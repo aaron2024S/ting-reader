@@ -211,24 +211,19 @@ pub async fn rate_limit_middleware(
 /// For testing purposes, we use a default IP if none can be extracted.
 fn extract_client_ip(request: &Request) -> Result<IpAddr, RateLimitError> {
     // Try X-Forwarded-For header first (comma-separated list, first is client)
-    if let Some(forwarded) = request.headers().get("X-Forwarded-For") {
-        if let Ok(forwarded_str) = forwarded.to_str() {
-            if let Some(first_ip) = forwarded_str.split(',').next() {
-                if let Ok(ip) = first_ip.trim().parse::<IpAddr>() {
+    if let Some(forwarded) = request.headers().get("X-Forwarded-For")
+        && let Ok(forwarded_str) = forwarded.to_str()
+            && let Some(first_ip) = forwarded_str.split(',').next()
+                && let Ok(ip) = first_ip.trim().parse::<IpAddr>() {
                     return Ok(ip);
                 }
-            }
-        }
-    }
 
     // Try X-Real-IP header
-    if let Some(real_ip) = request.headers().get("X-Real-IP") {
-        if let Ok(ip_str) = real_ip.to_str() {
-            if let Ok(ip) = ip_str.parse::<IpAddr>() {
+    if let Some(real_ip) = request.headers().get("X-Real-IP")
+        && let Ok(ip_str) = real_ip.to_str()
+            && let Ok(ip) = ip_str.parse::<IpAddr>() {
                 return Ok(ip);
             }
-        }
-    }
 
     // For testing/development, use a default IP
     // In production, this should be extracted from the connection

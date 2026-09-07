@@ -974,13 +974,11 @@ fn resolve_module_path(base: &std::path::Path) -> Result<std::path::PathBuf, any
         if package_json.is_file() {
             let package: serde_json::Value =
                 serde_json::from_slice(&std::fs::read(&package_json)?)?;
-            if let Some(main) = package.get("main").and_then(serde_json::Value::as_str) {
-                if !main.trim().is_empty() {
-                    if let Ok(path) = resolve_module_path(&base.join(main)) {
+            if let Some(main) = package.get("main").and_then(serde_json::Value::as_str)
+                && !main.trim().is_empty()
+                    && let Ok(path) = resolve_module_path(&base.join(main)) {
                         return Ok(path);
                     }
-                }
-            }
         }
 
         for index in ["index.js", "index.json"] {

@@ -309,8 +309,8 @@ pub fn add_host_functions(linker: &mut Linker<PluginState>) -> Result<(), anyhow
                         _ => reqwest::Method::GET,
                     };
                     let mut req = client.request(http_method, &url_clone);
-                    if !headers_json_clone.is_empty() {
-                        if let Ok(headers_map) = serde_json::from_str::<
+                    if !headers_json_clone.is_empty()
+                        && let Ok(headers_map) = serde_json::from_str::<
                             std::collections::HashMap<String, String>,
                         >(&headers_json_clone)
                         {
@@ -318,7 +318,6 @@ pub fn add_host_functions(linker: &mut Linker<PluginState>) -> Result<(), anyhow
                                 req = req.header(k, v);
                             }
                         }
-                    }
                     if !req_body_clone.is_empty() {
                         req = req.body(req_body_clone);
                     }
@@ -707,15 +706,17 @@ mod tests {
             .json()
             .with_writer(writer.clone())
             .finish();
-        let mut state = PluginState::default();
-        state.plugin_log_context = Some(crate::plugin::types::PluginLogContext {
-            plugin_id: "scraper-id".to_string(),
-            plugin_instance_id: "scraper-id@1.0.0".to_string(),
-            plugin_name: "Scraper".to_string(),
-            plugin_version: "1.0.0".to_string(),
-            runtime: "wasm".to_string(),
-            source: PluginLogSource::Gateway,
-        });
+        let state = PluginState {
+            plugin_log_context: Some(crate::plugin::types::PluginLogContext {
+                plugin_id: "scraper-id".to_string(),
+                plugin_instance_id: "scraper-id@1.0.0".to_string(),
+                plugin_name: "Scraper".to_string(),
+                plugin_version: "1.0.0".to_string(),
+                runtime: "wasm".to_string(),
+                source: PluginLogSource::Gateway,
+            }),
+            ..Default::default()
+        };
 
         tracing::subscriber::with_default(subscriber, || {
             log_http_request(&state, "GET", "https://example.com/search");

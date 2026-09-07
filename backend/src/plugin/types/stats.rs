@@ -81,7 +81,7 @@ impl PluginStats {
             .iter()
             .map(|(k, v)| (k.clone(), *v))
             .collect();
-        distribution.sort_by(|a, b| b.1.cmp(&a.1));
+        distribution.sort_by_key(|a| std::cmp::Reverse(a.1));
         distribution
     }
 
@@ -191,8 +191,8 @@ impl PluginStats {
         if let (Some(avg), Some(max_avg)) = (
             self.avg_execution_time_ms,
             thresholds.max_avg_execution_time_ms,
-        ) {
-            if avg > max_avg as f64 {
+        )
+            && avg > max_avg as f64 {
                 alerts.push(PerformanceAlert {
                     alert_type: AlertType::AvgExecutionTime,
                     current_value: avg,
@@ -203,13 +203,12 @@ impl PluginStats {
                     ),
                 });
             }
-        }
 
         if let (Some(p95), Some(max_p95)) = (
             self.p95_execution_time_ms,
             thresholds.max_p95_execution_time_ms,
-        ) {
-            if p95 > max_p95 {
+        )
+            && p95 > max_p95 {
                 alerts.push(PerformanceAlert {
                     alert_type: AlertType::P95ExecutionTime,
                     current_value: p95 as f64,
@@ -220,12 +219,10 @@ impl PluginStats {
                     ),
                 });
             }
-        }
 
         if let (Some(memory), Some(max_memory)) =
             (self.memory_usage_bytes, thresholds.max_memory_bytes)
-        {
-            if memory > max_memory {
+            && memory > max_memory {
                 alerts.push(PerformanceAlert {
                     alert_type: AlertType::MemoryUsage,
                     current_value: memory as f64,
@@ -236,7 +233,6 @@ impl PluginStats {
                     ),
                 });
             }
-        }
 
         if let Some(min_success) = thresholds.min_success_rate {
             let success_rate = self.success_rate();

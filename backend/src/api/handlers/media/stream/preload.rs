@@ -32,10 +32,10 @@ pub(super) async fn maybe_spawn_auto_preload(
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
 
-            if auto_preload || auto_cache {
-                if let Ok(chapters) = state.chapter_repo.find_by_book(&book.id).await {
-                    if let Some(pos) = chapters.iter().position(|c| c.id == chapter_id) {
-                        if let Some(next_chapter) = chapters.get(pos + 1).cloned() {
+            if (auto_preload || auto_cache)
+                && let Ok(chapters) = state.chapter_repo.find_by_book(&book.id).await
+                    && let Some(pos) = chapters.iter().position(|c| c.id == chapter_id)
+                        && let Some(next_chapter) = chapters.get(pos + 1).cloned() {
                             // Spawn preload task
                             let state_clone = state.clone();
                             let next_chapter_id = next_chapter.id.clone();
@@ -332,9 +332,6 @@ pub(super) async fn maybe_spawn_auto_preload(
                             let mut tasks = state.active_preload_tasks.lock().await;
                             tasks.insert(user.id.clone(), handle);
                         }
-                    }
-                }
-            }
         }
     }
 }

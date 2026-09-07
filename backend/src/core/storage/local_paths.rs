@@ -20,11 +20,10 @@ pub fn discover_authorized_roots(config: &Config) -> Vec<AuthorizedRoot> {
     // Try reading from the .accessible_paths file generated dynamically by config_callback
     let mut accessible_paths = None;
     let paths_file = config.storage.data_dir.join(".accessible_paths");
-    if paths_file.is_file() {
-        if let Ok(content) = std::fs::read_to_string(&paths_file) {
+    if paths_file.is_file()
+        && let Ok(content) = std::fs::read_to_string(&paths_file) {
             accessible_paths = Some(content);
         }
-    }
 
     // Fallback to environment variable if file is missing or empty
     let paths_val = accessible_paths
@@ -439,18 +438,24 @@ mod tests {
         std::fs::create_dir_all(&second).unwrap();
         std::fs::create_dir_all(&storage).unwrap();
         let previous = std::env::var("TRIM_DATA_ACCESSIBLE_PATHS").ok();
-        std::env::set_var(
-            "TRIM_DATA_ACCESSIBLE_PATHS",
-            format!("{}:{}", first.display(), second.display()),
-        );
+        unsafe {
+            std::env::set_var(
+                "TRIM_DATA_ACCESSIBLE_PATHS",
+                format!("{}:{}", first.display(), second.display()),
+            );
+        }
 
         let config = test_config(storage, vec![]);
         let roots = discover_authorized_roots(&config);
 
         if let Some(previous) = previous {
-            std::env::set_var("TRIM_DATA_ACCESSIBLE_PATHS", previous);
+            unsafe {
+                std::env::set_var("TRIM_DATA_ACCESSIBLE_PATHS", previous);
+            }
         } else {
-            std::env::remove_var("TRIM_DATA_ACCESSIBLE_PATHS");
+            unsafe {
+                std::env::remove_var("TRIM_DATA_ACCESSIBLE_PATHS");
+            }
         }
 
         let fnos_roots = roots.iter().filter(|root| root.source == "fnos").count();

@@ -1127,12 +1127,11 @@ impl ScraperService {
 
         // Title from default sources
         for source in &config.default_sources {
-            if let Some(detail) = source_results.get(source) {
-                if !detail.title.is_empty() {
+            if let Some(detail) = source_results.get(source)
+                && !detail.title.is_empty() {
                     final_detail.title = detail.title.clone();
                     break;
                 }
-            }
         }
         if final_detail.title == query {
             for detail in source_results.values() {
@@ -1145,44 +1144,39 @@ impl ScraperService {
 
         // Per-field merge from specific + default sources
         for source in get_effective_sources!(config.author_sources.as_ref()) {
-            if let Some(detail) = source_results.get(source) {
-                if !detail.author.is_empty() {
+            if let Some(detail) = source_results.get(source)
+                && !detail.author.is_empty() {
                     final_detail.author = detail.author.clone();
                     break;
                 }
-            }
         }
         for source in get_effective_sources!(config.narrator_sources.as_ref()) {
-            if let Some(detail) = source_results.get(source) {
-                if detail.narrator.is_some() {
+            if let Some(detail) = source_results.get(source)
+                && detail.narrator.is_some() {
                     final_detail.narrator = detail.narrator.clone();
                     break;
                 }
-            }
         }
         for source in get_effective_sources!(config.cover_sources.as_ref()) {
-            if let Some(detail) = source_results.get(source) {
-                if detail.cover_url.is_some() {
+            if let Some(detail) = source_results.get(source)
+                && detail.cover_url.is_some() {
                     final_detail.cover_url = detail.cover_url.clone();
                     break;
                 }
-            }
         }
         for source in get_effective_sources!(config.intro_sources.as_ref()) {
-            if let Some(detail) = source_results.get(source) {
-                if !detail.intro.is_empty() {
+            if let Some(detail) = source_results.get(source)
+                && !detail.intro.is_empty() {
                     final_detail.intro = detail.intro.clone();
                     break;
                 }
-            }
         }
         for source in get_effective_sources!(config.tags_sources.as_ref()) {
-            if let Some(detail) = source_results.get(source) {
-                if !detail.tags.is_empty() {
+            if let Some(detail) = source_results.get(source)
+                && !detail.tags.is_empty() {
                     final_detail.tags = detail.tags.clone();
                     break;
                 }
-            }
         }
 
         // Remaining fields from default sources

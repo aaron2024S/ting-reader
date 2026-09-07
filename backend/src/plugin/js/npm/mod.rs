@@ -573,14 +573,13 @@ impl NpmManager {
         }
 
         let node_modules = plugin_dir.join("node_modules");
-        if let Ok(metadata) = std::fs::symlink_metadata(&node_modules) {
-            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        if let Ok(metadata) = std::fs::symlink_metadata(&node_modules)
+            && (metadata.file_type().is_symlink() || !metadata.is_dir()) {
                 return Err(TingError::PluginLoadError(
                     "Plugin node_modules must be a real directory".to_string(),
                 )
                 .into());
             }
-        }
 
         // Rewriting through the strict model removes scripts and other untrusted npm fields.
         package_json.write_to_file(&plugin_dir.join("package.json"))?;
@@ -609,8 +608,8 @@ impl NpmManager {
         let mut vulnerabilities = std::collections::HashMap::new();
         let mut total = 0;
 
-        if let Some(metadata) = audit_json.get("metadata") {
-            if let Some(vulns) = metadata.get("vulnerabilities") {
+        if let Some(metadata) = audit_json.get("metadata")
+            && let Some(vulns) = metadata.get("vulnerabilities") {
                 for severity in &["low", "moderate", "high", "critical"] {
                     if let Some(count) = vulns.get(*severity).and_then(|v| v.as_u64()) {
                         let sev = VulnerabilitySeverity::parse(severity).unwrap();
@@ -619,7 +618,6 @@ impl NpmManager {
                     }
                 }
             }
-        }
 
         let passed = vulnerabilities
             .iter()

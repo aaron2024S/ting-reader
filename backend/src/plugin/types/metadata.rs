@@ -678,8 +678,8 @@ fn normalize_config_schema(raw: Option<&Value>) -> Option<Value> {
 
     // Flat format: each top-level key is a property definition
     // Wrap into proper JSON Schema object format
-    if let Some(obj) = schema.as_object() {
-        if !obj.is_empty() {
+    if let Some(obj) = schema.as_object()
+        && !obj.is_empty() {
             let mut properties = serde_json::Map::new();
             for (key, prop_schema) in obj {
                 // Skip non-object values (shouldn't happen in valid flat format)
@@ -696,7 +696,6 @@ fn normalize_config_schema(raw: Option<&Value>) -> Option<Value> {
                 return Some(normalized);
             }
         }
-    }
 
     // Fallback: return as-is
     let mut normalized = schema.clone();
@@ -830,11 +829,10 @@ fn normalize_scraper_capabilities(raw: &Value) -> Value {
         normalize_scraper_result_fields(result_fields, &mut result_field_labels);
     }
 
-    if !result_field_labels.is_empty() {
-        if let Ok(value) = serde_json::to_value(result_field_labels) {
+    if !result_field_labels.is_empty()
+        && let Ok(value) = serde_json::to_value(result_field_labels) {
             scraper_object.insert("result_field_labels".to_string(), value);
         }
-    }
 
     scraper
 }

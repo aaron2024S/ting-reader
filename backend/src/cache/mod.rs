@@ -106,8 +106,8 @@ impl CacheManager {
             let path = entry.path();
 
             // Only process .cache files
-            if path.extension().and_then(|s| s.to_str()) == Some("cache") {
-                if let Some(file_stem) = path.file_stem().and_then(|s| s.to_str()) {
+            if path.extension().and_then(|s| s.to_str()) == Some("cache")
+                && let Some(file_stem) = path.file_stem().and_then(|s| s.to_str()) {
                     let chapter_id = file_stem.to_string();
 
                     let metadata = entry.metadata().await?;
@@ -121,7 +121,6 @@ impl CacheManager {
                         created_at,
                     });
                 }
-            }
         }
 
         Ok(cached_chapters)
@@ -215,7 +214,7 @@ impl CacheManager {
         let mut cached_files = self.list_cached().await?;
 
         // Sort by creation time (oldest first)
-        cached_files.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        cached_files.sort_by_key(|a| a.created_at);
 
         let mut current_count = cached_files.len();
         let mut current_size: u64 = cached_files.iter().map(|f| f.file_size).sum();

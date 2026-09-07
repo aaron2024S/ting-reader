@@ -646,11 +646,10 @@ fn merge_sensitive_placeholders(
             .get(field)
             .map(is_preserve_sensitive_marker)
             .unwrap_or(true);
-        if should_preserve {
-            if let Some(value) = current.and_then(|object| object.get(field)).cloned() {
+        if should_preserve
+            && let Some(value) = current.and_then(|object| object.get(field)).cloned() {
                 incoming.insert(field.clone(), value);
             }
-        }
     }
 
     Value::Object(incoming)

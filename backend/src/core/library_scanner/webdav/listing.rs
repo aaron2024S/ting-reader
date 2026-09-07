@@ -101,13 +101,12 @@ impl LibraryScanner {
             None
         };
 
-        if !mode.is_full() {
-            if let Some(sync_state) = self
+        if !mode.is_full()
+            && let Some(sync_state) = self
                 .scan_state_repo
                 .find(&library.id, &root_url, "webdav_sync")
                 .await?
-            {
-                if let Some(synced_files) = self
+                && let Some(synced_files) = self
                     .try_webdav_sync_collection(
                         library,
                         &root_url,
@@ -122,8 +121,6 @@ impl LibraryScanner {
                 {
                     return Ok(synced_files);
                 }
-            }
-        }
 
         // Capture the collection token before the fallback/full traversal.
         // Saving a token obtained after traversal could miss a change that
@@ -373,7 +370,7 @@ impl LibraryScanner {
                         "webdav_file" => cached_files.get(&state.entry_path),
                         _ => None,
                     };
-                    cached.map_or(true, |cached| !scan_state_payload_matches(cached, state))
+                    cached.is_none_or(|cached| !scan_state_payload_matches(cached, state))
                 })
                 .collect();
 
@@ -601,7 +598,7 @@ impl LibraryScanner {
                     "webdav_file" => cached_files.get(&state.entry_path),
                     _ => None,
                 };
-                cached.map_or(true, |cached| !scan_state_payload_matches(cached, state))
+                cached.is_none_or(|cached| !scan_state_payload_matches(cached, state))
             })
             .cloned()
             .collect();
@@ -716,11 +713,10 @@ impl LibraryScanner {
                         }
                     }
                     b"sync-token" => {
-                        if let Ok(value) = reader.read_text(event.name()) {
-                            if !in_response && !value.trim().is_empty() {
+                        if let Ok(value) = reader.read_text(event.name())
+                            && !in_response && !value.trim().is_empty() {
                                 report.next_token = Some(value.to_string());
                             }
-                        }
                     }
                     _ => {}
                 },
@@ -798,11 +794,10 @@ impl LibraryScanner {
                         current_etag = None;
                     }
                     b"D:href" | b"d:href" | b"href" => {
-                        if in_response {
-                            if let Ok(txt) = reader.read_text(e.name()) {
+                        if in_response
+                            && let Ok(txt) = reader.read_text(e.name()) {
                                 current_href = txt.to_string();
                             }
-                        }
                     }
                     b"D:collection" | b"d:collection" | b"collection" => {
                         if in_response {
@@ -810,27 +805,24 @@ impl LibraryScanner {
                         }
                     }
                     b"D:getlastmodified" | b"d:getlastmodified" | b"getlastmodified" => {
-                        if in_response {
-                            if let Ok(txt) = reader.read_text(e.name()) {
+                        if in_response
+                            && let Ok(txt) = reader.read_text(e.name()) {
                                 current_last_mod = Some(txt.to_string());
                             }
-                        }
                     }
                     b"D:getetag" | b"d:getetag" | b"getetag" => {
-                        if in_response {
-                            if let Ok(txt) = reader.read_text(e.name()) {
+                        if in_response
+                            && let Ok(txt) = reader.read_text(e.name()) {
                                 current_etag = Some(txt.to_string());
                             }
-                        }
                     }
                     _ => {}
                 },
                 Ok(Event::Empty(e)) => match e.name().as_ref() {
-                    b"D:collection" | b"d:collection" | b"collection" => {
-                        if in_response {
+                    b"D:collection" | b"d:collection" | b"collection"
+                        if in_response => {
                             is_collection = true;
                         }
-                    }
                     _ => {}
                 },
                 Ok(Event::End(e)) => {
@@ -873,11 +865,10 @@ impl LibraryScanner {
         }
 
         // Parse base URL to get scheme and host
-        if let Ok(base) = url::Url::parse(base_request_url) {
-            if let Ok(joined) = base.join(href) {
+        if let Ok(base) = url::Url::parse(base_request_url)
+            && let Ok(joined) = base.join(href) {
                 return joined.to_string();
             }
-        }
 
         // Fallback simple join
         href.to_string()
@@ -894,15 +885,13 @@ impl LibraryScanner {
                 let mut i = 0;
 
                 while i < input_bytes.len() {
-                    if input_bytes[i] == b'%' && i + 2 < input_bytes.len() {
-                        if let Ok(slice) = std::str::from_utf8(&input_bytes[i + 1..i + 3]) {
-                            if let Ok(b) = u8::from_str_radix(slice, 16) {
+                    if input_bytes[i] == b'%' && i + 2 < input_bytes.len()
+                        && let Ok(slice) = std::str::from_utf8(&input_bytes[i + 1..i + 3])
+                            && let Ok(b) = u8::from_str_radix(slice, 16) {
                                 bytes.push(b);
                                 i += 3;
                                 continue;
                             }
-                        }
-                    }
                     bytes.push(input_bytes[i]);
                     i += 1;
                 }

@@ -676,7 +676,7 @@ fn decode_fixed_hex<const N: usize>(value: &str, field: &str) -> Result<[u8; N]>
 
 fn hex_decode(value: &str) -> std::result::Result<Vec<u8>, &'static str> {
     let value = value.trim();
-    if value.len() % 2 != 0 {
+    if !value.len().is_multiple_of(2) {
         return Err("odd length");
     }
     let mut bytes = Vec::with_capacity(value.len() / 2);

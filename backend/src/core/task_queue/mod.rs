@@ -318,30 +318,25 @@ impl TaskQueue {
         // 1. Cancel queued tasks
         if let Ok(queued_tasks) = self.task_repo.find_by_status("queued").await {
             for t in queued_tasks {
-                if let Some(payload_str) = &t.payload {
-                    if let Ok(TaskPayload::Custom { data, .. }) =
+                if let Some(payload_str) = &t.payload
+                    && let Ok(TaskPayload::Custom { data, .. }) =
                         serde_json::from_str::<TaskPayload>(payload_str)
-                    {
-                        if let Some(lid) = data.get("library_id").and_then(|v| v.as_str()) {
-                            if lid == library_id {
+                        && let Some(lid) = data.get("library_id").and_then(|v| v.as_str())
+                            && lid == library_id {
                                 info!(task_id = %t.id, library_id = %library_id, "Cancelling queued library task");
                                 let _ = self.cancel(&t.id).await;
                             }
-                        }
-                    }
-                }
             }
         }
 
         // 2. Mark running tasks as cancelled
         if let Ok(running_tasks) = self.task_repo.find_by_status("running").await {
             for t in running_tasks {
-                if let Some(payload_str) = &t.payload {
-                    if let Ok(TaskPayload::Custom { data, .. }) =
+                if let Some(payload_str) = &t.payload
+                    && let Ok(TaskPayload::Custom { data, .. }) =
                         serde_json::from_str::<TaskPayload>(payload_str)
-                    {
-                        if let Some(lid) = data.get("library_id").and_then(|v| v.as_str()) {
-                            if lid == library_id {
+                        && let Some(lid) = data.get("library_id").and_then(|v| v.as_str())
+                            && lid == library_id {
                                 info!(task_id = %t.id, library_id = %library_id, "Marking running library task as cancelled");
 
                                 // Manually update status
@@ -358,9 +353,6 @@ impl TaskQueue {
                                     error!(task_id = %t.id, error = %e, "Failed to mark running task as cancelled");
                                 }
                             }
-                        }
-                    }
-                }
             }
         }
 
@@ -403,8 +395,7 @@ impl TaskQueue {
             ref task_type,
             ref data,
         } = task.payload
-        {
-            if task_type == "library_scan" {
+            && task_type == "library_scan" {
                 // Set a very long timeout for library scans (24 hours) to avoid timeouts on large libraries
                 task.timeout = Duration::from_secs(86400);
 
@@ -415,37 +406,29 @@ impl TaskQueue {
                     // 1. Cancel queued tasks for this library
                     if let Ok(queued_tasks) = self.task_repo.find_by_status("queued").await {
                         for t in queued_tasks {
-                            if t.task_type == "library_scan" {
-                                if let Some(payload_str) = &t.payload {
-                                    if let Ok(TaskPayload::Custom { data: t_data, .. }) =
+                            if t.task_type == "library_scan"
+                                && let Some(payload_str) = &t.payload
+                                    && let Ok(TaskPayload::Custom { data: t_data, .. }) =
                                         serde_json::from_str::<TaskPayload>(payload_str)
-                                    {
-                                        if let Some(lid) =
+                                        && let Some(lid) =
                                             t_data.get("library_id").and_then(|v| v.as_str())
-                                        {
-                                            if lid == library_id {
+                                            && lid == library_id {
                                                 info!(task_id = %t.id, library_id = %library_id, "Cancelling duplicate queued library scan");
                                                 let _ = self.cancel(&t.id).await;
                                             }
-                                        }
-                                    }
-                                }
-                            }
                         }
                     }
 
                     // 2. Mark running tasks as cancelled (best effort since we can't kill the thread easily)
                     if let Ok(running_tasks) = self.task_repo.find_by_status("running").await {
                         for t in running_tasks {
-                            if t.task_type == "library_scan" {
-                                if let Some(payload_str) = &t.payload {
-                                    if let Ok(TaskPayload::Custom { data: t_data, .. }) =
+                            if t.task_type == "library_scan"
+                                && let Some(payload_str) = &t.payload
+                                    && let Ok(TaskPayload::Custom { data: t_data, .. }) =
                                         serde_json::from_str::<TaskPayload>(payload_str)
-                                    {
-                                        if let Some(lid) =
+                                        && let Some(lid) =
                                             t_data.get("library_id").and_then(|v| v.as_str())
-                                        {
-                                            if lid == library_id {
+                                            && lid == library_id {
                                                 info!(task_id = %t.id, library_id = %library_id, "Marking running library scan as cancelled");
 
                                                 // Manually update status since cancel() forbids running tasks
@@ -462,15 +445,10 @@ impl TaskQueue {
                                                     error!(task_id = %t.id, error = %e, "Failed to mark running task as cancelled");
                                                 }
                                             }
-                                        }
-                                    }
-                                }
-                            }
                         }
                     }
                 }
             }
-        }
 
         // Set default retry policy if not set
         if task.retry_policy.max_retries == 0 {

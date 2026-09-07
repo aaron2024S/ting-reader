@@ -192,22 +192,20 @@ impl LibraryScanner {
             let mut regex_idx = None;
             let mut regex_title = None;
 
-            if let Some(re) = &chapter_regex {
-                if let Some(caps) = re.captures(&filename_str) {
-                    if let Some(m) = caps.get(1) {
-                        if let Ok(idx) = m.as_str().parse::<i32>() {
+            if let Some(re) = &chapter_regex
+                && let Some(caps) = re.captures(&filename_str) {
+                    if let Some(m) = caps.get(1)
+                        && let Ok(idx) = m.as_str().parse::<i32>() {
                             regex_idx = Some(idx);
                         }
-                    }
                     if let Some(m) = caps.get(2) {
                         regex_title = Some(m.as_str().to_string());
                     }
                 }
-            }
 
             // Optimization: If chapter exists and file is not modified, skip processing!
-            if let Some(ref ch) = existing_chapter {
-                if !is_modified {
+            if let Some(ref ch) = existing_chapter
+                && !is_modified {
                     // Update index if needed (e.g. reordering files), but skip hashing/metadata
                     // Also respect manual_corrected if we were to update anything else
 
@@ -352,7 +350,6 @@ impl LibraryScanner {
                     processed_chapter_ids.insert(ch.id.clone());
                     continue;
                 }
-            }
 
             // If we are here, either it's a new file OR it's modified.
 
@@ -364,8 +361,8 @@ impl LibraryScanner {
             // If we found by Path, but Hash changed, it's an update.
             // If we didn't find by Path, we check Hash to see if it's a move/rename.
 
-            if existing_chapter.is_none() {
-                if let Ok(Some(ch)) = self.chapter_repo.find_by_hash(&file_hash).await {
+            if existing_chapter.is_none()
+                && let Ok(Some(ch)) = self.chapter_repo.find_by_hash(&file_hash).await {
                     // Found by hash (Rename/Move case)
                     // But we are processing a specific book_id here.
                     // If the found chapter belongs to another book, we might be stealing it?
@@ -376,7 +373,6 @@ impl LibraryScanner {
                     }
                     // If different book, we create a new chapter record (duplicate content allowed across books)
                 }
-            }
 
             // Extract metadata
             // If using JSON chapters, calculate duration from JSON (end - start)

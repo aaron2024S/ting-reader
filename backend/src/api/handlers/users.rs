@@ -23,12 +23,11 @@ fn mask_restricted_settings(response: &mut UserSettingsResponse, is_admin: bool)
     response.auto_cache = false;
     response.widget_css = None;
 
-    if let Some(settings_json) = response.settings_json.as_mut() {
-        if let Some(obj) = settings_json.as_object_mut() {
+    if let Some(settings_json) = response.settings_json.as_mut()
+        && let Some(obj) = settings_json.as_object_mut() {
             obj.remove("auto_cache");
             obj.remove("widget_css");
         }
-    }
 }
 
 /// Handler for GET /api/users - Get all users (admin only)
@@ -133,14 +132,13 @@ pub async fn update_user(
         .ok_or_else(|| TingError::NotFound(format!("User {} not found", user_id)))?;
 
     if let Some(username) = req.username {
-        if let Some(existing) = state.user_repo.find_by_username(&username).await? {
-            if existing.id != user_id {
+        if let Some(existing) = state.user_repo.find_by_username(&username).await?
+            && existing.id != user_id {
                 return Err(TingError::ValidationError(format!(
                     "Username '{}' already exists",
                     username
                 )));
             }
-        }
         user.username = username;
     }
 
@@ -218,26 +216,22 @@ pub async fn get_user_settings(
             let mut response = UserSettingsResponse::from(settings);
 
             if let Some(ref json_val) = response.settings_json {
-                if let Some(val) = json_val.get("sleep_timer_default") {
-                    if let Some(i) = val.as_i64() {
+                if let Some(val) = json_val.get("sleep_timer_default")
+                    && let Some(i) = val.as_i64() {
                         response.sleep_timer_default = i as i32;
                     }
-                }
-                if let Some(val) = json_val.get("auto_preload") {
-                    if let Some(b) = val.as_bool() {
+                if let Some(val) = json_val.get("auto_preload")
+                    && let Some(b) = val.as_bool() {
                         response.auto_preload = b;
                     }
-                }
-                if let Some(val) = json_val.get("auto_cache") {
-                    if let Some(b) = val.as_bool() {
+                if let Some(val) = json_val.get("auto_cache")
+                    && let Some(b) = val.as_bool() {
                         response.auto_cache = b;
                     }
-                }
-                if let Some(val) = json_val.get("widget_css") {
-                    if let Some(s) = val.as_str() {
+                if let Some(val) = json_val.get("widget_css")
+                    && let Some(s) = val.as_str() {
                         response.widget_css = Some(s.to_string());
                     }
-                }
             }
 
             mask_restricted_settings(&mut response, user.role == "admin");
@@ -352,26 +346,22 @@ pub async fn update_user_settings(
 
     let mut response = UserSettingsResponse::from(settings);
     if let Some(ref json_val) = response.settings_json {
-        if let Some(val) = json_val.get("sleep_timer_default") {
-            if let Some(i) = val.as_i64() {
+        if let Some(val) = json_val.get("sleep_timer_default")
+            && let Some(i) = val.as_i64() {
                 response.sleep_timer_default = i as i32;
             }
-        }
-        if let Some(val) = json_val.get("auto_preload") {
-            if let Some(b) = val.as_bool() {
+        if let Some(val) = json_val.get("auto_preload")
+            && let Some(b) = val.as_bool() {
                 response.auto_preload = b;
             }
-        }
-        if let Some(val) = json_val.get("auto_cache") {
-            if let Some(b) = val.as_bool() {
+        if let Some(val) = json_val.get("auto_cache")
+            && let Some(b) = val.as_bool() {
                 response.auto_cache = b;
             }
-        }
-        if let Some(val) = json_val.get("widget_css") {
-            if let Some(s) = val.as_str() {
+        if let Some(val) = json_val.get("widget_css")
+            && let Some(s) = val.as_str() {
                 response.widget_css = Some(s.to_string());
             }
-        }
     }
 
     mask_restricted_settings(&mut response, user.role == "admin");

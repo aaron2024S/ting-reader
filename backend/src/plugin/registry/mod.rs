@@ -102,8 +102,8 @@ impl PluginRegistry {
         }
 
         // Check if other plugins depend on this one
-        if let Some(dependents) = self.dependents.get(id) {
-            if !dependents.is_empty() {
+        if let Some(dependents) = self.dependents.get(id)
+            && !dependents.is_empty() {
                 return Err(TingError::DependencyError(format!(
                     "Cannot unregister plugin {}: {} plugin(s) depend on it: {:?}",
                     id,
@@ -111,7 +111,6 @@ impl PluginRegistry {
                     dependents
                 )));
             }
-        }
 
         // Remove from registry
         self.plugins.remove(id);

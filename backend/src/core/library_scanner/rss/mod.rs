@@ -574,11 +574,10 @@ fn parse_rss_feed(xml: &str, base_url: &Url) -> Result<RssFeed> {
             }
             Ok(Event::End(event)) => {
                 let tag = tag_name(event.name().as_ref());
-                if (tag == "item" || tag == "entry") && current_episode.is_some() {
-                    if let Some(episode) = current_episode.take() {
+                if (tag == "item" || tag == "entry") && current_episode.is_some()
+                    && let Some(episode) = current_episode.take() {
                         feed.episodes.push(episode);
                     }
-                }
                 stack.pop();
             }
             Ok(Event::Eof) => break,
@@ -642,8 +641,8 @@ fn handle_attrs(
         }
         "link" if in_episode => {
             let rel = attr_value(event, &["rel"]).unwrap_or_default();
-            if rel.eq_ignore_ascii_case("enclosure") {
-                if let Some(episode) = current_episode.as_mut() {
+            if rel.eq_ignore_ascii_case("enclosure")
+                && let Some(episode) = current_episode.as_mut() {
                     set_episode_media(
                         episode,
                         attr_value(event, &["href"])
@@ -652,7 +651,6 @@ fn handle_attrs(
                         attr_value(event, &["length"]).and_then(|value| value.parse::<u64>().ok()),
                     );
                 }
-            }
         }
         "itunes:image" | "image" | "media:thumbnail" if !in_episode => {
             if feed.image.is_none() {
@@ -758,11 +756,10 @@ fn handle_text(
                 push_unique(&mut feed.categories, value);
             }
         }
-        "url" => {
-            if feed.image.is_none() && stack.iter().rev().skip(1).any(|parent| parent == "image") {
+        "url"
+            if feed.image.is_none() && stack.iter().rev().skip(1).any(|parent| parent == "image") => {
                 feed.image = clean_text(raw_value);
             }
-        }
         _ => {}
     }
 }

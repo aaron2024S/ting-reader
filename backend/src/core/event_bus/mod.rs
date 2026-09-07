@@ -155,7 +155,7 @@ impl EventBus {
     pub async fn unsubscribe(&self, subscription_id: &str) -> Result<()> {
         let mut subscribers = self.subscribers.write().await;
 
-        for (_, subs) in subscribers.iter_mut() {
+        for subs in subscribers.values_mut() {
             if let Some(pos) = subs.iter().position(|s| s.id == subscription_id) {
                 subs.remove(pos);
                 return Ok(());

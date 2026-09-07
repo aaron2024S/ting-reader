@@ -216,11 +216,9 @@ impl LibraryScanner {
                     if let Ok((mut reader, _)) = storage
                         .get_webdav_reader(library, meta_url, None, key)
                         .await
-                    {
-                        if let Ok(mut file) = tokio::fs::File::create(&temp_path).await {
+                        && let Ok(mut file) = tokio::fs::File::create(&temp_path).await {
                             let _ = tokio::io::copy(&mut reader, &mut file).await;
                         }
-                    }
                 }
             }
         }
@@ -228,15 +226,14 @@ impl LibraryScanner {
         // Read metadata.json if downloaded
         let mut json_chapters: Option<Vec<crate::core::metadata_writer::AudiobookshelfChapter>> =
             None;
-        if has_metadata_json {
-            if let Ok(Some(json_meta)) =
+        if has_metadata_json
+            && let Ok(Some(json_meta)) =
                 crate::core::metadata_writer::read_metadata_json(&temp_book_dir)
             {
-                if let Some(t) = json_meta.title {
-                    if !t.trim().is_empty() {
+                if let Some(t) = json_meta.title
+                    && !t.trim().is_empty() {
                         local_album = Some(t);
                     }
-                }
                 if !json_meta.authors.is_empty() {
                     local_author = Some(json_meta.authors[0].clone());
                 }
@@ -261,14 +258,13 @@ impl LibraryScanner {
 
                 published_year = json_meta.published_year;
             }
-        }
 
         // Read book.nfo if downloaded (merge, lower priority than json usually, but let's check)
         // If metadata.json was present, we prefer it.
         // If not, we check nfo.
         let nfo_path = temp_book_dir.join("book.nfo");
-        if nfo_path.exists() {
-            if let Ok(nfo_meta) = self.nfo_manager.read_book_nfo(&nfo_path) {
+        if nfo_path.exists()
+            && let Ok(nfo_meta) = self.nfo_manager.read_book_nfo(&nfo_path) {
                 if local_album.is_none() && !nfo_meta.title.is_empty() {
                     local_album = Some(nfo_meta.title);
                 }
@@ -288,13 +284,12 @@ impl LibraryScanner {
                     local_genre = Some(nfo_meta.genre.items.join(","));
                 }
             }
-        }
 
         // Also check if there's a local cover image directly in the webdav folder
         // Download it to temp_book_dir so the proxy can serve it as a local file.
         // Storing the raw WebDAV URL doesn't work because the frontend/proxy lacks WebDAV auth.
-        if local_cover_url.is_none() {
-            if let Some(storage) = &self.storage_service {
+        if local_cover_url.is_none()
+            && let Some(storage) = &self.storage_service {
                 let key = self.encryption_key.as_deref().unwrap_or(&[0u8; 32]);
                 for meta_url in metadata_files {
                     let filename = meta_url
@@ -314,12 +309,11 @@ impl LibraryScanner {
                         // Download cover image to temp_book_dir
                         let original_ext = meta_url.split('.').next_back().unwrap_or("jpg");
                         let temp_cover_path = temp_book_dir.join(format!("cover.{}", original_ext));
-                        if !temp_cover_path.exists() {
-                            if let Ok((mut reader, _)) = storage
+                        if !temp_cover_path.exists()
+                            && let Ok((mut reader, _)) = storage
                                 .get_webdav_reader(library, meta_url, None, key)
                                 .await
-                            {
-                                if let Ok(mut file) =
+                                && let Ok(mut file) =
                                     tokio::fs::File::create(&temp_cover_path).await
                                 {
                                     let _ = tokio::io::copy(&mut reader, &mut file).await;
@@ -328,8 +322,6 @@ impl LibraryScanner {
                                         temp_cover_path
                                     );
                                 }
-                            }
-                        }
                         if temp_cover_path.exists() {
                             local_cover_url =
                                 Some(temp_cover_path.to_string_lossy().replace('\\', "/"));
@@ -338,7 +330,6 @@ impl LibraryScanner {
                     }
                 }
             }
-        }
 
         let local_rank = configured_metadata_rank(scraper_config, "local_metadata");
         let audio_rank = configured_metadata_rank(scraper_config, "audio_metadata");
@@ -427,8 +418,8 @@ impl LibraryScanner {
 
         // If manual corrected, we should preserve existing fields.
         // We need to fetch the existing book to do that properly if we are updating.
-        if manual_corrected {
-            if let Ok(Some(existing_book)) = self.book_repo.find_by_id(&book_id).await {
+        if manual_corrected
+            && let Ok(Some(existing_book)) = self.book_repo.find_by_id(&book_id).await {
                 book.title = existing_book.title;
                 book.author = existing_book.author;
                 book.narrator = existing_book.narrator;
@@ -438,11 +429,10 @@ impl LibraryScanner {
                 book.theme_color = existing_book.theme_color;
                 book.chapter_regex = existing_book.chapter_regex;
             }
-        }
 
         // Run scraper if enabled and NOT manual corrected
-        if !manual_corrected {
-            if let Some(scraper_service) = &self.scraper_service {
+        if !manual_corrected
+            && let Some(scraper_service) = &self.scraper_service {
                 let chapter_candidates = file_urls
                     .iter()
                     .enumerate()
@@ -536,11 +526,9 @@ impl LibraryScanner {
                             .published_year
                             .as_deref()
                             .and_then(|value| value.parse::<i32>().ok())
-                        {
-                            if book.year.is_none() || scraper_rank < local_rank {
+                            && (book.year.is_none() || scraper_rank < local_rank) {
                                 book.year = Some(year);
                             }
-                        }
                         chapter_title_template = detail.chapter_title_template;
                         if !detail.chapter_titles.is_empty() {
                             ai_chapter_titles = detail.chapter_titles;
@@ -551,7 +539,6 @@ impl LibraryScanner {
                     }
                 }
             }
-        }
 
         // Calculate theme color if cover exists
         // If cover is from scraper (http), we fetch it.
@@ -561,8 +548,8 @@ impl LibraryScanner {
         // We need to implement find_cover_image for WebDAV.
 
         // For now, if scraper provided cover_url, we try to calculate color.
-        if !manual_corrected {
-            if let Some(ref url) = book.cover_url {
+        if !manual_corrected
+            && let Some(ref url) = book.cover_url {
                 let cover_path = if url.starts_with("//") {
                     format!("https:{}", url)
                 } else {
@@ -577,18 +564,16 @@ impl LibraryScanner {
                     book.theme_color = Some(color);
                 }
             }
-        }
 
         let mut status = ScanStatus::Created;
         // Check if existing book (by ID check above)
         if existing_info.is_some() {
             if !manual_corrected {
                 // Preserve chapter_regex from existing book if not set in metadata
-                if book.chapter_regex.is_none() {
-                    if let Ok(Some(existing)) = self.book_repo.find_by_id(&book_id).await {
+                if book.chapter_regex.is_none()
+                    && let Ok(Some(existing)) = self.book_repo.find_by_id(&book_id).await {
                         book.chapter_regex = existing.chapter_regex;
                     }
-                }
                 self.book_repo.update(&book).await?;
                 status = ScanStatus::Updated;
             } else {
@@ -695,18 +680,16 @@ impl LibraryScanner {
             let mut regex_idx = None;
             let mut regex_title = None;
 
-            if let Some(re) = &chapter_regex {
-                if let Some(caps) = re.captures(&filename) {
-                    if let Some(m) = caps.get(1) {
-                        if let Ok(idx) = m.as_str().parse::<i32>() {
+            if let Some(re) = &chapter_regex
+                && let Some(caps) = re.captures(&filename) {
+                    if let Some(m) = caps.get(1)
+                        && let Ok(idx) = m.as_str().parse::<i32>() {
                             regex_idx = Some(idx);
                         }
-                    }
                     if let Some(m) = caps.get(2) {
                         regex_title = Some(m.as_str().to_string());
                     }
                 }
-            }
 
             // Check if chapter exists to avoid duplicates
             let mut ch_hasher = Sha256::new();
@@ -853,8 +836,8 @@ impl LibraryScanner {
         }
 
         // Only a full scan has enough information to prove a remote chapter was deleted.
-        if full_scan {
-            if let Ok(existing_chapters) = self.chapter_repo.find_by_book(&book_id).await {
+        if full_scan
+            && let Ok(existing_chapters) = self.chapter_repo.find_by_book(&book_id).await {
                 for ch in existing_chapters {
                     if !processed_chapter_ids.contains(&ch.id) {
                         info!("Removing missing chapter from DB: {:?}", ch.path);
@@ -866,7 +849,6 @@ impl LibraryScanner {
                     }
                 }
             }
-        }
 
         // Process Series
         if !json_series.is_empty() {
@@ -907,8 +889,8 @@ impl LibraryScanner {
                 let books = self.series_repo.find_books_by_series(&series.id).await?;
                 if let Some((_, current_order)) = books.iter().find(|(b, _)| b.id == book_id) {
                     // Already linked, update order if explicit order changed
-                    if let Some(o) = explicit_order {
-                        if *current_order != o {
+                    if let Some(o) = explicit_order
+                        && *current_order != o {
                             self.series_repo
                                 .add_book(crate::db::models::SeriesBook {
                                     series_id: series.id.clone(),
@@ -917,7 +899,6 @@ impl LibraryScanner {
                                 })
                                 .await?;
                         }
-                    }
                 } else {
                     // Not linked, insert it
                     let order = if let Some(o) = explicit_order {

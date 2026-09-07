@@ -192,11 +192,10 @@ impl PluginHostGateway {
         let target = root.join(&relative);
 
         if for_write {
-            if let Some(parent) = target.parent() {
-                if parent.exists() {
+            if let Some(parent) = target.parent()
+                && parent.exists() {
                     ensure_canonical_child(&root, parent)?;
                 }
-            }
         } else {
             let canonical = std::fs::canonicalize(&target)?;
             ensure_path_inside(&root, &canonical)?;
@@ -247,11 +246,10 @@ impl PluginHostGateway {
         let target = book_dir.join(&relative);
         let relative_path = target.to_string_lossy().replace('\\', "/");
 
-        if let Some(parent) = target.parent() {
-            if parent.exists() {
+        if let Some(parent) = target.parent()
+            && parent.exists() {
                 ensure_canonical_child(&root, parent)?;
             }
-        }
 
         Ok((library, root, target, relative_path))
     }

@@ -63,7 +63,7 @@ pub async fn proxy_cover(
                     .unwrap_or("application/octet-stream")
                     .to_string();
                 let bytes = resp.bytes().await.map_err(|e| {
-                    TingError::IoError(std::io::Error::new(std::io::ErrorKind::Other, e))
+                    TingError::IoError(std::io::Error::other(e))
                 })?;
                 return Ok((
                     StatusCode::OK,
@@ -135,17 +135,16 @@ async fn resolve_cover_path(state: &AppState, params: &ProxyCoverQuery) -> Resul
     if !image_path.is_absolute() {
         let relative = normalize_cover_relative_path(&normalized_path)?;
 
-        if let Some(book_id) = params.book_id.as_deref() {
-            if let Some(book) = state.book_repo.find_by_id(book_id).await? {
+        if let Some(book_id) = params.book_id.as_deref()
+            && let Some(book) = state.book_repo.find_by_id(book_id).await? {
                 let candidate = Path::new(&book.path).join(&relative);
                 if candidate.exists() {
                     return Ok(candidate);
                 }
             }
-        }
 
-        if let Some(library_id) = params.library_id.as_deref() {
-            if let Some(library) = state.library_repo.find_by_id(library_id).await? {
+        if let Some(library_id) = params.library_id.as_deref()
+            && let Some(library) = state.library_repo.find_by_id(library_id).await? {
                 let root_path = library.root_path.trim();
                 if !root_path.is_empty() {
                     let candidate = Path::new(root_path).join(&relative);
@@ -154,7 +153,6 @@ async fn resolve_cover_path(state: &AppState, params: &ProxyCoverQuery) -> Resul
                     }
                 }
             }
-        }
 
         if let Ok(cwd) = std::env::current_dir() {
             let candidate = cwd.join(&relative);

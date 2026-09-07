@@ -263,15 +263,14 @@ async fn wait_for_first_segment(temp_dir: &std::path::Path, is_strm: bool) {
     for _ in 0..(max_wait * 20) {
         // 增加检查频率到每 50ms
         // 检查播放列表是否存在（FFmpeg 会先创建播放列表）
-        if playlist.exists() && first_segment.exists() {
-            if let Ok(metadata) = tokio::fs::metadata(&first_segment).await {
+        if playlist.exists() && first_segment.exists()
+            && let Ok(metadata) = tokio::fs::metadata(&first_segment).await {
                 // 降低文件大小要求到 512 字节（约 0.03 秒的音频）
                 if metadata.len() > 512 {
                     tracing::info!("First segment generated: {} bytes", metadata.len());
                     return;
                 }
             }
-        }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
 

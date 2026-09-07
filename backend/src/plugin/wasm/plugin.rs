@@ -333,14 +333,13 @@ impl WasmPlugin {
         self.clear_host_invocation_context().await;
         let result_json = result?;
 
-        if let Ok(err_obj) = serde_json::from_str::<serde_json::Value>(&result_json) {
-            if let Some(err_msg) = err_obj.get("error").and_then(|v| v.as_str()) {
+        if let Ok(err_obj) = serde_json::from_str::<serde_json::Value>(&result_json)
+            && let Some(err_msg) = err_obj.get("error").and_then(|v| v.as_str()) {
                 return Err(TingError::PluginExecutionError(format!(
                     "WASM error: {}",
                     err_msg
                 )));
             }
-        }
 
         Ok(result_json)
     }

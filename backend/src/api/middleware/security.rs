@@ -68,8 +68,8 @@ pub async fn security_headers_middleware(request: Request, next: Next) -> Respon
     );
 
     // Add HSTS header if HTTPS is enabled
-    if let Some(config) = security_config {
-        if config.enable_hsts {
+    if let Some(config) = security_config
+        && config.enable_hsts {
             let hsts_value = format!("max-age={}; includeSubDomains", config.hsts_max_age);
             parts.headers.insert(
                 "Strict-Transport-Security",
@@ -78,7 +78,6 @@ pub async fn security_headers_middleware(request: Request, next: Next) -> Respon
                 }),
             );
         }
-    }
 
     Response::from_parts(parts, body)
 }

@@ -79,34 +79,23 @@ pub async fn ws_handler(
 async fn authenticate_ws_token(
     state: &AppState,
     token: Option<String>,
-) -> Result<String, axum::response::Response> {
-    let token = token.ok_or_else(|| {
-        TingError::AuthenticationError("Missing token parameter".to_string()).into_response()
-    })?;
+) -> Result<String, TingError> {
+    let token = token
+        .ok_or_else(|| TingError::AuthenticationError("Missing token parameter".to_string()))?;
 
     let claims = if let Some(key_manager) = &state.jwt_key_manager {
         let secrets = key_manager.get_validation_secrets().await;
-        match jwt::validate_token_with_secrets(&token, &secrets) {
-            Ok(c) => c,
-            Err(e) => return Err(e.into_response()),
-        }
+        jwt::validate_token_with_secrets(&token, &secrets)?
     } else {
-        match jwt::validate_token(&token, &state.jwt_secret) {
-            Ok(c) => c,
-            Err(e) => return Err(e.into_response()),
-        }
+        jwt::validate_token(&token, &state.jwt_secret)?
     };
 
     // Verify user exists in DB
-    let user = state
-        .user_repo
-        .find_by_id(&claims.user_id)
-        .await
-        .map_err(|e| e.into_response())?;
+    let user = state.user_repo.find_by_id(&claims.user_id).await?;
 
     match user {
         Some(_) => Ok(claims.user_id),
-        None => Err(TingError::AuthenticationError("User not found".to_string()).into_response()),
+        None => Err(TingError::AuthenticationError("User not found".to_string())),
     }
 }
 

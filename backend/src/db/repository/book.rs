@@ -87,8 +87,7 @@ impl BookRepository {
         let book_ids = book_ids.to_vec();
         self.db
             .execute(move |conn| {
-                let placeholders = std::iter::repeat("?")
-                    .take(book_ids.len())
+                let placeholders = std::iter::repeat_n("?", book_ids.len())
                     .collect::<Vec<_>>()
                     .join(",");
                 let query = format!(
