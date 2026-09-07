@@ -10,9 +10,3 @@
 *.toml linguist-language=TOML
 *.md linguist-language=Markdown
 *.json linguist-language=JSON
-
-# Export ignore (exclude files from git archive)
-.github/ export-ignore
-.gitignore export-ignore
-.dockerignore export-ignore
-.gitattributes export-ignore
