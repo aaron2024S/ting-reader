@@ -153,11 +153,11 @@ jobs:
           # Always copy as ting-reader (hyphen) to match scripts
           cp "$BINARY_PATH" .github/ting-reader-fpk-native/app/server/ting-reader
           mkdir -p .github/ting-reader-fpk-native/app/server/bin
-          cp "$RUNNER_TEMP/ting-media/bin/"{ffmpeg,ffprobe} \
+          install -m 755 "$RUNNER_TEMP/ting-media/bin/"{ffmpeg,ffprobe} \
             .github/ting-reader-fpk-native/app/server/bin/
           .github/ting-reader-fpk-native/app/server/bin/ffmpeg -hide_banner -encoders \
-            | grep -q 'libmp3lame'
-          chmod +x .github/ting-reader-fpk-native/app/server/bin/{ffmpeg,ffprobe}
+            | grep 'libmp3lame'
+          .github/ting-reader-fpk-native/app/server/bin/ffprobe -version
 
           cp backend/config.toml .github/ting-reader-fpk-native/app/server/
           cp -r frontend/dist .github/ting-reader-fpk-native/app/server/static
