@@ -61,10 +61,15 @@ start_process() {
     log_msg "TEMP_DIR: $TEMP_DIR"
     log_msg "PORT: $TING_SERVER__PORT"
     log_msg "SERVER_DIR: ${TRIM_APPDEST}/server"
+
+    if ! "$CMD" --help > /dev/null 2>> "${LOG_FILE:-/dev/null}"; then
+        log_msg "Server startup check failed; see the error above."
+        return 1
+    fi
     
     (
         cd "${TRIM_APPDEST}/server" || exit 1
-        $CMD > /dev/null 2>&1 &
+        "$CMD" > /dev/null 2>&1 &
         printf "%s" "$!" > "${PID_FILE}"
     ) || {
         log_msg "Failed to start process from ${TRIM_APPDEST}/server"

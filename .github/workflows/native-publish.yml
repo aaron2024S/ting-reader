@@ -15,6 +15,10 @@ env:
 jobs:
   native:
     runs-on: ${{ matrix.runner }}
+    container: rust:bookworm
+    defaults:
+      run:
+        shell: bash
     permissions:
       contents: write
     strategy:
@@ -24,12 +28,10 @@ jobs:
             arch: x86
             fpk_suffix: x86_64
             runner: ubuntu-latest
-            use_cross: false
           - target: aarch64-unknown-linux-gnu
             arch: arm
             fpk_suffix: arm64
             runner: ubuntu-24.04-arm
-            use_cross: false
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -59,14 +61,12 @@ jobs:
           cache: 'npm'
           cache-dependency-path: frontend/package-lock.json
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-
-      - name: Install Cross
-        if: matrix.use_cross
-        run: cargo install cross
+      - name: Install backend build dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends cmake clang binutils
+          rustup target add ${{ matrix.target }}
+          getconf GNU_LIBC_VERSION
 
       - name: Install Dependencies
         run: |
@@ -94,15 +94,7 @@ jobs:
       - name: Build Backend
         run: |
           cd backend
-          if [ "${{ matrix.use_cross }}" = "true" ]; then
-            # Create Cross.toml to install openssl dependencies in the container for ARM
-            if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
-              printf "[target.aarch64-unknown-linux-gnu]\npre-build = [\n    \"dpkg --add-architecture arm64\",\n    \"apt-get update && apt-get install -y libssl-dev:arm64\"\n]\n" > Cross.toml
-            fi
-            cross build --release --target ${{ matrix.target }}
-          else
-            cargo build --release --target ${{ matrix.target }}
-          fi
+          cargo build --release --target ${{ matrix.target }}
 
       - name: Download pinned FFmpeg and FFprobe for server package
         run: |
@@ -166,6 +158,23 @@ jobs:
             --output .github/ting-reader-fpk-native/app/server/preinstalled-plugins/ting-reader-plugin-store.tr
           chmod +x .github/ting-reader-fpk-native/app/server/ting-reader
           chmod +x .github/ting-reader-fpk-native/cmd/*
+
+      - name: Verify packaged server on Debian 12
+        run: |
+          set -euo pipefail
+          SERVER_DIR=".github/ting-reader-fpk-native/app/server"
+          for binary in "$SERVER_DIR/ting-reader" "$SERVER_DIR/bin/ffmpeg" "$SERVER_DIR/bin/ffprobe"; do
+            required_glibc=$(readelf --version-info "$binary" \
+              | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sort -Vu | tail -n 1)
+            echo "$binary requires $required_glibc"
+            if [ "$(printf '%s\n' "$required_glibc" GLIBC_2.36 | sort -V | tail -n 1)" != "GLIBC_2.36" ]; then
+              echo "::error::$binary requires a newer glibc than the fnOS Debian 12 baseline."
+              exit 1
+            fi
+          done
+          "$SERVER_DIR/ting-reader" --help
+          "$SERVER_DIR/bin/ffmpeg" -hide_banner -version
+          "$SERVER_DIR/bin/ffprobe" -hide_banner -version
 
       - name: Setup fnpack
         uses: ./.github/actions/setup-fnpack
