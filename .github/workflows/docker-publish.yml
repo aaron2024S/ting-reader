@@ -2,6 +2,15 @@ name: Docker Build, Push and FPK Release
 
 on:
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Existing release tag for deployment package rebuild, e.g. v2.0.0'
+        type: string
+        default: ''
+      deployment_packages_only:
+        description: 'Rebuild and publish only frontend/backend deployment archives'
+        type: boolean
+        default: false
   push:
     tags:
       - 'v*'
@@ -10,6 +19,7 @@ env:
   FNPACK_VERSION: "1.2.3"
   FYGOPACK_VERSION: "1.2.3"
   TING_PLUGIN_STORE_VERSION: "2.0.0"
+  FFMPEG_BUILD_VERSION: "8.1.2-2"
 
 jobs:
   prepare:
@@ -23,8 +33,16 @@ jobs:
 
       - name: Resolve release context
         id: get_version
+        env:
+          REQUESTED_TAG: ${{ inputs.release_tag }}
+          PACKAGES_ONLY: ${{ inputs.deployment_packages_only }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "$REQUESTED_TAG" ]; then
+            [[ "$REQUESTED_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || exit 1
+            [ "$PACKAGES_ONLY" = true ] || exit 1
+            TARGET="formal"
+            VERSION="${REQUESTED_TAG#v}"
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             TARGET="beta"
             VERSION="beta"
           elif [ "${{ github.ref_type }}" = "tag" ]; then
@@ -42,6 +60,7 @@ jobs:
 
   docker:
     needs: prepare
+    if: inputs.deployment_packages_only != true
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -153,6 +172,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -195,6 +216,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
 
       - name: Install build dependencies
         run: |
@@ -214,9 +237,33 @@ jobs:
           curl --fail --location --retry 3 \
             "https://github.com/dqsq2e2/ting-reader-plugin-store/releases/download/v${TING_PLUGIN_STORE_VERSION}/ting-reader-plugin-store-${TING_PLUGIN_STORE_VERSION}.tr" \
             --output package/preinstalled-plugins/ting-reader-plugin-store.tr
+          case "${{ matrix.arch }}" in
+            amd64)
+              FFMPEG_ARCH=x86_64
+              FFMPEG_SHA256=58246304b840d40f600e7a03673695061d51ee864b11b35dbaa0983aa6506bc6
+              ;;
+            arm64)
+              FFMPEG_ARCH=arm64
+              FFMPEG_SHA256=c12dca8818065a1ad04023eecec3d2d44542b9c1095f13eb9b028fd224ac3d28
+              ;;
+            *) exit 1 ;;
+          esac
+          FFMPEG_ROOT="ffmpeg-8.1.2-audio-encode-${FFMPEG_ARCH}-linux-gnu"
+          curl --fail --location --retry 3 \
+            "https://github.com/dqsq2e2/ffmpeg-build/releases/download/v${FFMPEG_BUILD_VERSION}/${FFMPEG_ROOT}.tar.gz" \
+            --output /tmp/ffmpeg.tar.gz
+          echo "${FFMPEG_SHA256}  /tmp/ffmpeg.tar.gz" | sha256sum --check --status
+          mkdir -p package/bin
+          tar -xzf /tmp/ffmpeg.tar.gz --strip-components=2 -C package/bin \
+            "${FFMPEG_ROOT}/bin/ffmpeg" "${FFMPEG_ROOT}/bin/ffprobe"
+          chmod 755 package/bin/ffmpeg package/bin/ffprobe
+          package/bin/ffmpeg -hide_banner -encoders | grep libmp3lame
+          package/bin/ffprobe -version
           chmod +x package/ting-reader
           tar -C package -czf "../ting-reader-backend-linux-${{ matrix.arch }}-${VERSION}.tar.gz" \
-            ting-reader config.toml preinstalled-plugins
+            ting-reader config.toml preinstalled-plugins bin
+          tar -tzf "../ting-reader-backend-linux-${{ matrix.arch }}-${VERSION}.tar.gz" | grep '^bin/ffmpeg$'
+          tar -tzf "../ting-reader-backend-linux-${{ matrix.arch }}-${VERSION}.tar.gz" | grep '^bin/ffprobe$'
 
       - name: Upload backend package
         uses: actions/upload-artifact@v4
@@ -354,3 +401,33 @@ jobs:
             release-assets/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  publish-deployment-packages:
+    needs: [prepare, frontend-package, backend-package]
+    if: inputs.deployment_packages_only == true && needs.prepare.outputs.target == 'formal'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download deployment archives
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          pattern: '*-package*'
+          merge-multiple: true
+      - name: Verify bundled tools and replace Release archives
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          gh release view "v$VERSION" >/dev/null
+          for arch in amd64 arm64; do
+            archive="release-assets/ting-reader-backend-linux-$arch-$VERSION.tar.gz"
+            tar -tzf "$archive" > "$RUNNER_TEMP/archive-$arch.txt"
+            grep -qx 'bin/ffmpeg' "$RUNNER_TEMP/archive-$arch.txt"
+            grep -qx 'bin/ffprobe' "$RUNNER_TEMP/archive-$arch.txt"
+          done
+          gh release upload "v$VERSION" release-assets/*.tar.gz --clobber
+
