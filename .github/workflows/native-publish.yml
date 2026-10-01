@@ -243,7 +243,7 @@ jobs:
           git push origin beta --force
 
       - name: Release Beta FPK
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         if: steps.release_context.outputs.target == 'beta'
         with:
           tag_name: beta
@@ -258,11 +258,24 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Extract Release Notes
+        if: steps.release_context.outputs.target == 'formal'
+        run: |
+          set -euo pipefail
+          awk -v header="## [${VERSION}]" '
+            index($0, header " - ") == 1 { found = 1; print; next }
+            found && /^## \[/ { exit }
+            found { print }
+            END { if (!found) exit 1 }
+          ' CHANGELOG.md > RELEASE_NOTES.md
+          test -s RELEASE_NOTES.md
+
       - name: Release Formal FPK
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         if: steps.release_context.outputs.target == 'formal'
         with:
           tag_name: v${{ env.VERSION }}
+          body_path: RELEASE_NOTES.md
           files: |
             ting-reader-native-${{ matrix.fpk_suffix }}-${{ env.VERSION }}.fpk
             ting-reader-native-fygo-${{ matrix.fpk_suffix }}-${{ env.VERSION }}.fpk

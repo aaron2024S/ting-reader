@@ -309,7 +309,7 @@ jobs:
           git push origin beta --force
 
       - name: Release Beta FPK
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         if: needs.prepare.outputs.target == 'beta'
         with:
           tag_name: beta
@@ -329,17 +329,18 @@ jobs:
         id: extract_notes
         if: needs.prepare.outputs.target == 'formal'
         run: |
+          set -euo pipefail
           VERSION="${{ needs.prepare.outputs.version }}"
-          START_LINE=$(grep -n "## \[$VERSION\]" CHANGELOG.md | cut -d: -f1)
-          if [ -n "$START_LINE" ]; then
-            tail -n +$START_LINE CHANGELOG.md | sed -n '1p; 2,${/## \[/q; p}' > RELEASE_NOTES.md
-          else
-            echo "Version $VERSION not found in CHANGELOG.md"
-            echo "Full changelog available in CHANGELOG.md" > RELEASE_NOTES.md
-          fi
+          awk -v header="## [${VERSION}]" '
+            index($0, header " - ") == 1 { found = 1; print; next }
+            found && /^## \[/ { exit }
+            found { print }
+            END { if (!found) exit 1 }
+          ' CHANGELOG.md > RELEASE_NOTES.md
+          test -s RELEASE_NOTES.md
 
       - name: Create Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         if: needs.prepare.outputs.target == 'formal'
         with:
           tag_name: v${{ needs.prepare.outputs.version }}
