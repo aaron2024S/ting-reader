@@ -358,6 +358,9 @@ impl LibraryScanner {
             let state_config_fingerprint =
                 format!("{}:lock={}", scan_config_fingerprint, existing_lock_state);
             if let Some((book_id, _, _)) = existing_info.as_ref()
+                && chapter_counts
+                    .get(book_id)
+                    .is_some_and(|counts| counts.missing_duration == 0)
                 && cached_states.get(&dir_path_string).is_some_and(|state| {
                     !files_changed
                         && state.config_fingerprint.as_deref()
@@ -715,7 +718,7 @@ impl LibraryScanner {
             {
                 skip_metadata_update = chapter_counts
                     .get(book_id)
-                    .map(|counts| counts.total == files.len())
+                    .map(|counts| counts.total == files.len() && counts.missing_duration == 0)
                     .unwrap_or(false);
             }
 

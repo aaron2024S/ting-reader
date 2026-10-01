@@ -505,25 +505,21 @@ impl LibraryScanner {
     ) {
         // Returns: (album, title, author, narrator, cover_url, duration)
 
-        // Try NFO
-        let nfo_path = path.with_extension("nfo");
-        if let Ok(meta) = self.nfo_manager.read_chapter_nfo(&nfo_path) {
-            return (
-                String::new(),
-                meta.title,
-                None,
-                None,
-                None,
-                meta.duration.unwrap_or(0) as i32,
-            );
-        }
-
-        // Check if it is a standard audio file
         let ext = path
             .extension()
             .map(|e| e.to_string_lossy().to_lowercase())
             .unwrap_or_default();
         let is_standard = STANDARD_EXTENSIONS.contains(&ext.as_str());
+
+        // A sidecar without a duration still needs the source file's duration.
+        let nfo_path = path.with_extension("nfo");
+        if let Ok(meta) = self.nfo_manager.read_chapter_nfo(&nfo_path) {
+            let mut duration = meta.duration.unwrap_or(0) as i32;
+            if duration <= 0 && is_standard && ext != "strm" {
+                duration = self.probe_local_audio_duration(path).await;
+            }
+            return (String::new(), meta.title, None, None, None, duration);
+        }
 
         // Handle .strm files explicitly
         if ext == "strm" {
@@ -807,6 +803,12 @@ impl LibraryScanner {
             }
         }
 
+        // Standard containers such as ASF/WMA are not all handled by Symphonia.
+        // Keep the bundled FFprobe fallback that provided their duration before.
+        if duration <= 0 && is_standard {
+            duration = self.probe_local_audio_duration(path).await;
+        }
+
         // 3. 返回提取的元数据
         if !title.is_empty() || !album.is_empty() || duration > 0 {
             return (album, title, author, narrator, cover_url, duration);
@@ -814,6 +816,28 @@ impl LibraryScanner {
 
         // 4. 如果都失败了，返回空值
         (String::new(), String::new(), None, None, None, 0)
+    }
+
+    async fn probe_local_audio_duration(&self, path: &Path) -> i32 {
+        match crate::core::audio::AudioService::probe_duration(path).await {
+            Ok(Some(duration)) => {
+                tracing::debug!(
+                    path = %path.display(),
+                    duration,
+                    "Read local audio duration with bundled FFprobe"
+                );
+                duration.round() as i32
+            }
+            Ok(None) => 0,
+            Err(error) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %error,
+                    "Could not read local audio duration with bundled FFprobe"
+                );
+                0
+            }
+        }
     }
 
     /// Get ID3 duration from audio file

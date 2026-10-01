@@ -285,15 +285,27 @@ impl LibraryScanner {
                 let mut should_update = false;
                 let mut new_title = ch.title.clone();
                 let mut new_idx = ch.chapter_index;
-                let json_duration = if json_chapters_matched_by_title {
+                let needs_duration = ch.duration.unwrap_or(0) <= 0
+                    && !file_path
+                        .extension()
+                        .and_then(|ext| ext.to_str())
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("strm"));
+                let mut recovered_duration = if json_chapters_matched_by_title || needs_duration {
                     json_chapters
                         .as_ref()
+                        .filter(|_| use_json_chapters)
                         .and_then(|chapters| chapters.get(index))
                         .map(|chapter| ((chapter.end - chapter.start).round() as i32).max(0))
+                        .filter(|duration| *duration > 0)
                 } else {
                     None
                 };
-                let duration_changed = json_duration
+                if needs_duration && recovered_duration.is_none() {
+                    let (_, _, _, _, _, duration) =
+                        self.extract_chapter_metadata(file_path, cloud_mode).await;
+                    recovered_duration = (duration > 0).then_some(duration);
+                }
+                let duration_changed = recovered_duration
                     .map(|duration| ch.duration != Some(duration))
                     .unwrap_or(false);
                 let mut new_is_extra = if extract_extra_chapters {
@@ -345,7 +357,7 @@ impl LibraryScanner {
                 {
                     let mut updated_ch = ch.clone();
                     updated_ch.path = scanned_path;
-                    if let Some(duration) = json_duration {
+                    if let Some(duration) = recovered_duration {
                         updated_ch.duration = Some(duration);
                     }
                     if ch.manual_corrected == 0 {
@@ -384,38 +396,23 @@ impl LibraryScanner {
                 // If different book, we create a new chapter record (duplicate content allowed across books)
             }
 
-            // Extract metadata
-            // If using JSON chapters, calculate duration from JSON (end - start)
-            let duration = if use_json_chapters {
-                if let Some(ref chapters) = json_chapters {
-                    if index < chapters.len() {
-                        let chapter = &chapters[index];
-                        ((chapter.end - chapter.start).round() as i32).max(0)
-                    } else {
-                        // Fallback to file extraction
-                        let (_, _, _, _, _, d) =
-                            self.extract_chapter_metadata(file_path, cloud_mode).await;
-                        d
-                    }
-                } else {
-                    // Fallback to file extraction
-                    let (_, _, _, _, _, d) =
-                        self.extract_chapter_metadata(file_path, cloud_mode).await;
-                    d
-                }
+            // Zero-length sidecar chapter entries are unknown durations, not a
+            // reason to skip probing the audio. Extract once for duration/title.
+            let json_duration = json_chapters
+                .as_ref()
+                .filter(|_| use_json_chapters)
+                .and_then(|chapters| chapters.get(index))
+                .map(|chapter| ((chapter.end - chapter.start).round() as i32).max(0))
+                .filter(|duration| *duration > 0);
+            let extracted = if json_duration.is_none() || !use_json_chapters {
+                Some(self.extract_chapter_metadata(file_path, cloud_mode).await)
             } else {
-                // Extract from file
-                let (_, _, _, _, _, d) = self.extract_chapter_metadata(file_path, cloud_mode).await;
-                d
+                None
             };
-
-            // Extract title (only if not using JSON chapters)
-            let extracted_title = if !use_json_chapters {
-                let (_, t, _, _, _, _) = self.extract_chapter_metadata(file_path, cloud_mode).await;
-                t
-            } else {
-                String::new()
-            };
+            let duration = json_duration
+                .or_else(|| extracted.as_ref().map(|metadata| metadata.5))
+                .unwrap_or(0);
+            let extracted_title = extracted.map(|metadata| metadata.1).unwrap_or_default();
 
             // metadata.json is the fallback title source. Explicit chapter regex
             // and filename-based titles still override it and go through cleaner.

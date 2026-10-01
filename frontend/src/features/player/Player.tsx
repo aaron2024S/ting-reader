@@ -208,6 +208,7 @@ const Player: React.FC = () => {
   const [hlsSeekOffset, setHlsSeekOffset] = useState(0);
   const [hlsUnavailable, setHlsUnavailable] = useState(false);
   const isInitialLoadRef = useRef(true);
+  const transcodeFallbackChapterRef = useRef<string | null>(null);
   const hlsRequestIdRef = useRef(0);
   // 防止 skip-outro 在同一章节内多次触发 nextChapter。
   const skipOutroChapterRef = useRef<string | null>(null);
@@ -252,7 +253,11 @@ const Player: React.FC = () => {
     isUsingHlsForCurrentChapter ? hlsSeekOffset : getTranscodeStartOffset();
 
   const tryTranscodeFallback = () => {
-    if (shouldTranscode || retryCount >= 3) return;
+    if (!currentChapter || retryCount >= 3) return false;
+    if (shouldTranscode && !shouldUseHlsForCurrentChapter) return false;
+    if (!shouldTranscode && transcodeFallbackChapterRef.current === currentChapter.id) {
+      return true;
+    }
     const chapterStartOffset =
       streamStartOffset.chapterId === currentChapter?.id
         ? streamStartOffset.offset
@@ -263,11 +268,14 @@ const Player: React.FC = () => {
     );
     setSeekOffset(fallbackOffset);
     setCurrentTime(fallbackOffset);
-    // Silently retry with transcoding, no need to show error message
-    // Keep the retry silent while switching to a compatible audio stream.
+    if (shouldUseHlsForCurrentChapter) {
+      setHlsUnavailable(true);
+    }
+    transcodeFallbackChapterRef.current = currentChapter.id;
     setShouldTranscode(true);
     setRetryCount((prev) => prev + 1);
     isInitialLoadRef.current = true;
+    return true;
   };
 
   // Fetch settings for auto_preload and user preferences
@@ -366,6 +374,7 @@ const Player: React.FC = () => {
       setHlsUnavailable(false);
       setBufferedTime(0);
       setRetryCount(0);
+      transcodeFallbackChapterRef.current = null;
       if (currentChapter?.duration && currentChapter.duration > 0) {
         setDuration(currentChapter.duration);
         console.log(
@@ -487,7 +496,9 @@ const Player: React.FC = () => {
         return;
       }
       console.error("Playback failed", err);
-      // Don't set user-visible error yet, let onError handler try to recover first
+      if (!tryTranscodeFallback()) {
+        setError(t("player.audioLoadError"));
+      }
     });
   };
 
@@ -524,9 +535,9 @@ const Player: React.FC = () => {
     chapterId: currentChapter?.id,
     shouldTranscode,
     retryCount,
-    onStuck: isStrmPath(currentChapter?.path)
-      ? () => setError(t("player.strmDirectError"))
-      : tryTranscodeFallback,
+    onStuck: () => {
+      if (!tryTranscodeFallback()) setError(t("player.audioLoadError"));
+    },
   });
 
   // Preload and Server-side Cache next chapter logic
@@ -1032,32 +1043,17 @@ const Player: React.FC = () => {
           });
 
           if (audio && audio.error) {
-            // Ignore aborted errors (code 4) ONLY if we are not already trying to recover
-            // Actually code 4 is MEDIA_ERR_SRC_NOT_SUPPORTED, which is exactly what we want to catch for WMA
-            // Code 1 is MEDIA_ERR_ABORTED
-
             if (audio.error.code === 1) {
               console.log("Playback aborted by user action");
               return;
             }
 
-            // A network error (or an ambiguous unsupported error on a remote .strm)
-            // must not silently turn a direct stream into a server download.
-            if (!shouldTranscode && retryCount < 3 &&
-                (!isStrmPath(currentChapter?.path) || audio.error.code === 3)) {
-              tryTranscodeFallback();
-              return;
-            }
             console.error("Audio element error", audio.error);
           } else {
-            if (!isStrmPath(currentChapter?.path) && !shouldTranscode && retryCount < 3) {
-              tryTranscodeFallback();
-              return;
-            }
             console.error("Audio element error (unknown)", e);
           }
-          setError(t(isStrmPath(currentChapter?.path)
-            ? "player.strmDirectError" : "player.audioLoadError"));
+          if (tryTranscodeFallback()) return;
+          setError(t("player.audioLoadError"));
         }}
       />
 

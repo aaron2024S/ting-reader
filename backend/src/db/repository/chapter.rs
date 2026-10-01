@@ -31,6 +31,8 @@ pub struct ChapterCounts {
     pub total: usize,
     pub main: usize,
     pub extra: usize,
+    /// Chapters with no usable duration, excluding URL-reference STRM files.
+    pub missing_duration: usize,
 }
 
 impl ChapterRepository {
@@ -132,15 +134,17 @@ impl ChapterRepository {
         let book_id = book_id.to_string();
         self.db
             .execute(move |conn| {
-                let (total, main, extra): (i64, i64, i64) = conn
+                let (total, main, extra, missing_duration): (i64, i64, i64, i64) = conn
                     .query_row(
                         "SELECT \
                          COUNT(*) AS total, \
                          COALESCE(SUM(CASE WHEN is_extra = 0 THEN 1 ELSE 0 END), 0) AS main, \
-                         COALESCE(SUM(CASE WHEN is_extra != 0 THEN 1 ELSE 0 END), 0) AS extra \
+                         COALESCE(SUM(CASE WHEN is_extra != 0 THEN 1 ELSE 0 END), 0) AS extra, \
+                         COALESCE(SUM(CASE WHEN COALESCE(duration, 0) <= 0 \
+                             AND LOWER(path) NOT LIKE '%.strm' THEN 1 ELSE 0 END), 0) AS missing_duration \
                          FROM chapters WHERE book_id = ?",
                         [&book_id],
-                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
                     )
                     .map_err(TingError::DatabaseError)?;
 
@@ -148,6 +152,7 @@ impl ChapterRepository {
                     total: total.max(0) as usize,
                     main: main.max(0) as usize,
                     extra: extra.max(0) as usize,
+                    missing_duration: missing_duration.max(0) as usize,
                 })
             })
             .await
@@ -168,7 +173,9 @@ impl ChapterRepository {
                         "SELECT c.book_id,
                                 COUNT(*) AS total,
                                 COALESCE(SUM(CASE WHEN c.is_extra = 0 THEN 1 ELSE 0 END), 0) AS main,
-                                COALESCE(SUM(CASE WHEN c.is_extra != 0 THEN 1 ELSE 0 END), 0) AS extra
+                                COALESCE(SUM(CASE WHEN c.is_extra != 0 THEN 1 ELSE 0 END), 0) AS extra,
+                                COALESCE(SUM(CASE WHEN COALESCE(c.duration, 0) <= 0
+                                    AND LOWER(c.path) NOT LIKE '%.strm' THEN 1 ELSE 0 END), 0) AS missing_duration
                            FROM chapters c
                            JOIN books b ON b.id = c.book_id
                           WHERE b.library_id = ?
@@ -181,12 +188,14 @@ impl ChapterRepository {
                         let total: i64 = row.get(1)?;
                         let main: i64 = row.get(2)?;
                         let extra: i64 = row.get(3)?;
+                        let missing_duration: i64 = row.get(4)?;
                         Ok((
                             row.get::<_, String>(0)?,
                             ChapterCounts {
                                 total: total.max(0) as usize,
                                 main: main.max(0) as usize,
                                 extra: extra.max(0) as usize,
+                                missing_duration: missing_duration.max(0) as usize,
                             },
                         ))
                     })
@@ -408,6 +417,44 @@ impl Repository<Chapter> for ChapterRepository {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn missing_duration_counts_exclude_strm_references() {
+        let db = Arc::new(DatabaseManager::new_in_memory().unwrap());
+        db.execute(|conn| {
+            conn.execute_batch(
+                "PRAGMA foreign_keys = OFF;
+                 INSERT INTO books (id, library_id, path, hash)
+                 VALUES ('book-1', 'library-1', '/book', 'book-hash');",
+            )
+            .map_err(TingError::DatabaseError)?;
+            for (id, path, duration) in [
+                ("known", "/book/known.wma", Some(700)),
+                ("zero", "/book/zero.wma", Some(0)),
+                ("missing", "/book/missing.mp3", None),
+                ("negative", "/book/negative.m4a", Some(-1)),
+                ("strm-zero", "/book/remote.STRM", Some(0)),
+                ("strm-missing", "/book/remote.strm", None),
+            ] {
+                conn.execute(
+                    "INSERT INTO chapters (id, book_id, path, duration)
+                     VALUES (?1, 'book-1', ?2, ?3)",
+                    rusqlite::params![id, path, duration],
+                )
+                .map_err(TingError::DatabaseError)?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let repository = ChapterRepository::new(db);
+        let counts = repository.count_by_book("book-1").await.unwrap();
+        assert_eq!(counts.total, 6);
+        assert_eq!(counts.missing_duration, 3);
+        let counts = repository.count_by_library("library-1").await.unwrap();
+        assert_eq!(counts["book-1"].missing_duration, 3);
+    }
 
     #[tokio::test]
     async fn find_by_book_with_progress_groups_main_chapters_before_extras() {
