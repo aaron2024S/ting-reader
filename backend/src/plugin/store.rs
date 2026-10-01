@@ -1,4 +1,4 @@
-use crate::core::error::{Result, TingError};
+use crate::core::app::error::{Result, TingError};
 use futures::StreamExt;
 use reqwest::{Url, header::LOCATION};
 use serde::{Deserialize, Serialize};

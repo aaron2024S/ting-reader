@@ -1,5 +1,5 @@
 use super::super::{LibraryScanner, ScanMode};
-use crate::core::error::{Result, TingError};
+use crate::core::app::error::{Result, TingError};
 use crate::db::repository::LibraryScanState;
 use quick_xml::events::Event;
 use quick_xml::reader::Reader;
@@ -85,7 +85,7 @@ impl LibraryScanner {
         // Decrypt password
         let password = if let Some(ref enc_pass) = library.password {
             if let Some(key) = &self.encryption_key {
-                match crate::core::crypto::decrypt(enc_pass, key) {
+                match crate::core::security::crypto::decrypt(enc_pass, key) {
                     Ok(p) => Some(p),
                     Err(_) => Some(enc_pass.clone()), // Fallback to raw if decrypt fails
                 }

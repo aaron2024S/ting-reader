@@ -10,7 +10,7 @@ use ting_plugin_contract::manifest::PluginManifest;
 use super::{
     LocalizedText, PluginCapability, PluginDependency, PluginMetadata, ScraperCapabilities,
 };
-use crate::core::error::TingError;
+use crate::core::app::error::TingError;
 #[cfg(test)]
 use ting_plugin_contract::manifest::Permission;
 
@@ -88,7 +88,7 @@ fn metadata_from_manifest(
         manifest_label,
     )?;
     for capability in &manifest.capabilities {
-        crate::plugin::schema::validate_capability_schemas(capability)?;
+        crate::plugin::types::schema::validate_capability_schemas(capability)?;
     }
     let description_i18n = manifest.description;
     let description = display_text(&description_i18n);

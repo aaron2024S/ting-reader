@@ -5,7 +5,7 @@
 //! - Resource usage limits
 //! - File system and network access restrictions
 
-use crate::core::error::Result;
+use crate::core::app::error::Result;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -68,10 +68,9 @@ impl Sandbox {
         });
 
         if !is_allowed {
-            return Err(crate::core::error::TingError::PermissionDenied(format!(
-                "File access denied: {:?}",
-                path
-            )));
+            return Err(crate::core::app::error::TingError::PermissionDenied(
+                format!("File access denied: {:?}", path),
+            ));
         }
 
         // Check if the specific access type is permitted
@@ -92,10 +91,9 @@ impl Sandbox {
         };
 
         if !has_permission {
-            return Err(crate::core::error::TingError::PermissionDenied(format!(
-                "File {:?} access denied: {:?}",
-                access, path
-            )));
+            return Err(crate::core::app::error::TingError::PermissionDenied(
+                format!("File {:?} access denied: {:?}", access, path),
+            ));
         }
 
         Ok(())
@@ -171,10 +169,9 @@ impl Sandbox {
             .any(|pattern| Self::domain_matches(&domain, pattern));
 
         if !is_allowed {
-            return Err(crate::core::error::TingError::PermissionDenied(format!(
-                "Network access denied: {}",
-                url
-            )));
+            return Err(crate::core::app::error::TingError::PermissionDenied(
+                format!("Network access denied: {}", url),
+            ));
         }
 
         Ok(())
@@ -188,7 +185,7 @@ impl Sandbox {
     /// Check if memory usage is within limits
     pub fn check_memory_limit(&self, current_bytes: usize) -> Result<()> {
         if current_bytes > self.resource_limits.max_memory_bytes {
-            return Err(crate::core::error::TingError::ResourceLimitExceeded(
+            return Err(crate::core::app::error::TingError::ResourceLimitExceeded(
                 format!(
                     "Memory limit exceeded: {} bytes (limit: {} bytes)",
                     current_bytes, self.resource_limits.max_memory_bytes
@@ -201,7 +198,7 @@ impl Sandbox {
     /// Check if CPU time is within limits
     pub fn check_cpu_time(&self, elapsed: Duration) -> Result<()> {
         if elapsed > self.resource_limits.max_cpu_time {
-            return Err(crate::core::error::TingError::Timeout(format!(
+            return Err(crate::core::app::error::TingError::Timeout(format!(
                 "CPU time limit exceeded: {:?} (limit: {:?})",
                 elapsed, self.resource_limits.max_cpu_time
             )));

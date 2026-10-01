@@ -3,7 +3,7 @@
 //! 基于机器特征自动生成主密钥，无需用户配置。
 //! 使用多种机器特征确保密钥的唯一性和稳定性。
 
-use crate::core::error::{Result, TingError};
+use crate::core::app::error::{Result, TingError};
 use sha2::{Digest, Sha256};
 use std::path::Path;
 

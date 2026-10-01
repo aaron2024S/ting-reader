@@ -1,7 +1,7 @@
 //! API utility helpers
 
 use crate::auth::AuthUser;
-use crate::core::error::{Result, TingError};
+use crate::core::app::error::{Result, TingError};
 use axum::http::{HeaderMap, header};
 use std::net::{IpAddr, SocketAddr};
 

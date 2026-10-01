@@ -173,11 +173,11 @@ async fn invoke_host_request(
     plugin_id: String,
     permissions: Vec<ting_plugin_contract::manifest::Permission>,
     user: Option<crate::plugin::PluginHostUser>,
-    resources: Option<std::sync::Arc<crate::plugin::resources::ResourceScope>>,
+    resources: Option<std::sync::Arc<crate::plugin::host_api::resources::ResourceScope>>,
     gateway: std::sync::Arc<crate::plugin::PluginHostGateway>,
     method: String,
     params: serde_json::Value,
-) -> crate::core::error::Result<serde_json::Value> {
+) -> crate::core::app::error::Result<serde_json::Value> {
     crate::plugin::host_api::invoke(
         &plugin_id,
         Some(&permissions),
@@ -199,19 +199,21 @@ fn resource_error_status(code: ting_plugin_contract::protocol::PluginErrorCode) 
     }
 }
 
-fn host_error_status(error: crate::core::error::TingError) -> i32 {
+fn host_error_status(error: crate::core::app::error::TingError) -> i32 {
     match error {
-        crate::core::error::TingError::PermissionDenied(_)
-        | crate::core::error::TingError::SecurityViolation(_) => {
+        crate::core::app::error::TingError::PermissionDenied(_)
+        | crate::core::app::error::TingError::SecurityViolation(_) => {
             NativeStatus::PermissionDenied as i32
         }
-        crate::core::error::TingError::ResourceLimitExceeded(_) => {
+        crate::core::app::error::TingError::ResourceLimitExceeded(_) => {
             NativeStatus::ResourceLimit as i32
         }
-        crate::core::error::TingError::NotFound(_)
-        | crate::core::error::TingError::PluginNotFound(_) => NativeStatus::NotFound as i32,
-        crate::core::error::TingError::InvalidRequest(_)
-        | crate::core::error::TingError::ValidationError(_) => NativeStatus::InvalidInput as i32,
+        crate::core::app::error::TingError::NotFound(_)
+        | crate::core::app::error::TingError::PluginNotFound(_) => NativeStatus::NotFound as i32,
+        crate::core::app::error::TingError::InvalidRequest(_)
+        | crate::core::app::error::TingError::ValidationError(_) => {
+            NativeStatus::InvalidInput as i32
+        }
         _ => NativeStatus::InternalError as i32,
     }
 }

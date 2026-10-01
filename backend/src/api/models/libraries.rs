@@ -124,10 +124,10 @@ pub struct StorageRootInfo {
     pub writable: bool,
 }
 
-impl From<crate::core::local_paths::AuthorizedRoot> for StorageRootInfo {
-    fn from(root: crate::core::local_paths::AuthorizedRoot) -> Self {
+impl From<crate::core::storage::local_paths::AuthorizedRoot> for StorageRootInfo {
+    fn from(root: crate::core::storage::local_paths::AuthorizedRoot) -> Self {
         Self {
-            path: crate::core::local_paths::path_to_display_string(&root.path),
+            path: crate::core::storage::local_paths::path_to_display_string(&root.path),
             source: root.source,
             readable: root.readable,
             writable: root.writable,

@@ -1,4 +1,4 @@
-use crate::core::error::{Result, TingError};
+use crate::core::app::error::{Result, TingError};
 use std::path::Path;
 
 /// Calculate the dominant color from image bytes

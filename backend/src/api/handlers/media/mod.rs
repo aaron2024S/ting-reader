@@ -1,5 +1,6 @@
 //! Media handlers: audio streaming, caching, and cover proxying
 
+pub mod audit;
 pub mod cache;
 pub mod proxy;
 pub mod stream;

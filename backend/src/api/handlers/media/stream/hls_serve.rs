@@ -1,5 +1,5 @@
 use crate::api::handlers::AppState;
-use crate::core::error::{Result, TingError};
+use crate::core::app::error::{Result, TingError};
 use crate::db::repository::Repository;
 use axum::{
     extract::{Path, Query, State},

@@ -9,8 +9,8 @@
 //! - 使用系统派生的主密钥加密
 //! - 支持密钥轮换和平滑过渡
 
-use crate::core::crypto::{decrypt, encrypt};
-use crate::core::error::{Result, TingError};
+use crate::core::app::error::{Result, TingError};
+use crate::core::security::crypto::{decrypt, encrypt};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;

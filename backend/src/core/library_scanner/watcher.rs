@@ -1,6 +1,8 @@
-use crate::core::config::Config;
-use crate::core::error::Result;
-use crate::core::local_paths::{path_to_display_string, resolve_existing_local_library_root};
+use crate::core::app::config::Config;
+use crate::core::app::error::Result;
+use crate::core::storage::local_paths::{
+    path_to_display_string, resolve_existing_local_library_root,
+};
 use crate::core::task_queue::TaskQueue;
 use crate::db::repository::{LibraryRepository, LibraryScanState, LibraryScanStateRepository};
 use notify::event::ModifyKind;
@@ -78,7 +80,7 @@ impl LibraryWatcher {
     pub async fn watch_library(&self, library_id: &str, path: &str) -> Result<()> {
         let path_buf = PathBuf::from(path);
         if !path_buf.exists() || !path_buf.is_dir() {
-            return Err(crate::core::error::TingError::NotFound(format!(
+            return Err(crate::core::app::error::TingError::NotFound(format!(
                 "Directory not found: {}",
                 path
             )));
@@ -211,13 +213,13 @@ impl LibraryWatcher {
                 }
             })
             .map_err(|e| {
-                crate::core::error::TingError::IoError(std::io::Error::other(e.to_string()))
+                crate::core::app::error::TingError::IoError(std::io::Error::other(e.to_string()))
             })?;
 
         watcher
             .watch(&path_buf, RecursiveMode::Recursive)
             .map_err(|e| {
-                crate::core::error::TingError::IoError(std::io::Error::other(e.to_string()))
+                crate::core::app::error::TingError::IoError(std::io::Error::other(e.to_string()))
             })?;
 
         self.watchers.write().await.insert(lib_id.clone(), watcher);

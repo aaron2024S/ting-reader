@@ -1,4 +1,4 @@
-use crate::core::error::{Result, TingError};
+use crate::core::app::error::{Result, TingError};
 use crate::db::{manager::DatabaseManager, models::Progress};
 use rusqlite::{OptionalExtension, ToSql, params_from_iter};
 use std::sync::Arc;

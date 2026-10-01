@@ -2,7 +2,7 @@
 //! Dropping an incomplete frame quarantines it and clears all Host context.
 
 use super::plugin::{WasmPlugin, WasmPluginInner};
-use crate::core::error::{Result, TingError};
+use crate::core::app::error::{Result, TingError};
 use crate::plugin::types::PluginInvocationContext;
 use std::ops::{Deref, DerefMut};
 use wasmtime::Memory;

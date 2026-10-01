@@ -1,10 +1,10 @@
-use crate::plugin::schema::validate_payload;
+use crate::plugin::types::schema::validate_payload;
 use serde_json::Value;
 use std::time::{Duration, Instant};
 
 use super::PluginManager;
-use crate::core::error::{Result, TingError};
-use crate::plugin::logger::{PluginLogLevel, emit_plugin_event};
+use crate::core::app::error::{Result, TingError};
+use crate::plugin::host_api::logger::{PluginLogLevel, emit_plugin_event};
 use crate::plugin::types::{
     PluginCapability, PluginId, PluginInvocationContext, PluginLogSource, PluginState,
 };
@@ -24,8 +24,8 @@ impl PluginManager {
         id: &PluginId,
         context: &PluginInvocationContext,
         staging_dir: std::path::PathBuf,
-        limits: crate::plugin::resources::ResourceLimits,
-    ) -> Result<std::sync::Arc<crate::plugin::resources::ResourceScope>> {
+        limits: crate::plugin::host_api::resources::ResourceLimits,
+    ) -> Result<std::sync::Arc<crate::plugin::host_api::resources::ResourceScope>> {
         let registry = self.registry.read().await;
         let entry = registry
             .get(id)
@@ -35,7 +35,7 @@ impl PluginManager {
                 "Plugin is unavailable".into(),
             ));
         }
-        let scope = std::sync::Arc::new(crate::plugin::resources::ResourceScope::new(
+        let scope = std::sync::Arc::new(crate::plugin::host_api::resources::ResourceScope::new(
             id.clone(),
             entry.generation,
             context.user.as_ref().map(|user| user.id.clone()),
@@ -103,7 +103,7 @@ impl PluginManager {
                     id,
                     context,
                     self.config.plugin_dir.join("staging"),
-                    crate::plugin::resources::ResourceLimits::default(),
+                    crate::plugin::host_api::resources::ResourceLimits::default(),
                 )
                 .await?,
             );

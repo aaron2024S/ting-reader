@@ -6,7 +6,7 @@
 use super::super::types::{Plugin, PluginContext, PluginInvocationContext, PluginMetadata};
 use super::host_api::NativeHostInvocationContext;
 use super::loader::NativeLoader;
-use crate::core::error::{Result, TingError};
+use crate::core::app::error::{Result, TingError};
 use crate::plugin::PluginHostGatewayHandle;
 use serde_json::Value;
 use std::sync::{Arc, RwLock};

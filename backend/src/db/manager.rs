@@ -7,7 +7,7 @@
 //! - Database backup functionality
 //! - Error handling integration with TingError
 
-use crate::core::error::{Result, TingError};
+use crate::core::app::error::{Result, TingError};
 use r2d2::{Pool, PooledConnection};
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::Connection;

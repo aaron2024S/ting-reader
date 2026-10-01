@@ -1,4 +1,4 @@
-use crate::core::error::{Result, TingError};
+use crate::core::app::error::{Result, TingError};
 use crate::db::models::NotificationWebhook;
 use crate::db::repository::NotificationWebhookRepository;
 use crate::plugin::manager::PluginManager;

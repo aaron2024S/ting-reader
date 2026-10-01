@@ -3,7 +3,7 @@
 use crate::api::handlers::AppState;
 use crate::api::ws::manager::WsSessionManager;
 use crate::auth::jwt;
-use crate::core::error::TingError;
+use crate::core::app::error::TingError;
 use crate::db::models::Progress;
 use crate::db::repository::Repository;
 use axum::{
@@ -222,7 +222,7 @@ async fn handle_client_message(
             }
 
             if let Some(playback_start) = playback_start {
-                crate::api::playback_audit::record_playback_start(
+                crate::api::handlers::media::audit::record_playback_start(
                     state,
                     user_id,
                     &book_id,

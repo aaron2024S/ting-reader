@@ -1,9 +1,9 @@
 use crate::core::StorageService;
-use crate::core::error::{Result, TingError};
-use crate::core::metadata_writer::{
+use crate::core::app::error::{Result, TingError};
+use crate::core::books::metadata_writer::{
     AudiobookshelfMetadata, remote_metadata_dir, write_metadata_json,
 };
-use crate::core::nfo_manager::{BookMetadata, NfoManager};
+use crate::core::books::nfo_manager::{BookMetadata, NfoManager};
 use crate::db::models::{Book, Library, ScraperConfig};
 use std::path::{Path, PathBuf};
 use tokio::io::AsyncReadExt;

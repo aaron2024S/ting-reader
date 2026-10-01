@@ -11,7 +11,7 @@ use serde_json::Value;
 use tracing::{debug, error, info, warn};
 
 use super::super::types::{PluginLogContext, PluginLogSource, PluginLogger};
-use crate::plugin::logger::{DefaultPluginLogger, PluginLogLevel};
+use crate::plugin::host_api::logger::{DefaultPluginLogger, PluginLogLevel};
 use crate::plugin::{PluginHostGatewayHandle, PluginHostUser};
 
 // ============================================================================
@@ -62,7 +62,7 @@ struct JsPluginLogState {
 #[derive(Clone, Default)]
 pub struct JsHostInvocationContext {
     pub user: Option<PluginHostUser>,
-    pub resources: Option<std::sync::Arc<crate::plugin::resources::ResourceScope>>,
+    pub resources: Option<std::sync::Arc<crate::plugin::host_api::resources::ResourceScope>>,
 }
 
 /// Helper to create a JavaScript runtime with plugin bindings

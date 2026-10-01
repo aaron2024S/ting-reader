@@ -1,4 +1,4 @@
-use crate::core::error::Result;
+use crate::core::app::error::Result;
 use async_trait::async_trait;
 
 /// Generic repository trait for CRUD operations

@@ -1,6 +1,6 @@
 //! JWT token generation and validation
 
-use crate::core::error::{Result, TingError};
+use crate::core::app::error::{Result, TingError};
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use serde::{Deserialize, Serialize};
 

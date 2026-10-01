@@ -5,7 +5,7 @@ use crate::api::models::{
     UpdateUserSettingsRequest, UserActionResponse, UserInfoResponse, UserSettingsResponse,
 };
 use crate::api::require_admin;
-use crate::core::error::{Result, TingError};
+use crate::core::app::error::{Result, TingError};
 use crate::db::repository::Repository;
 use axum::{
     Json,
@@ -615,7 +615,7 @@ pub async fn update_progress(
     state.progress_repo.upsert(&progress).await?;
 
     if let Some(playback_start) = req.playback_start {
-        crate::api::playback_audit::record_playback_start(
+        crate::api::handlers::media::audit::record_playback_start(
             &state,
             &user.id,
             &req.book_id,

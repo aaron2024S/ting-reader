@@ -11,7 +11,7 @@
 #[cfg(test)]
 mod tests;
 
-use crate::core::error::{Result, TingError};
+use crate::core::app::error::{Result, TingError};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

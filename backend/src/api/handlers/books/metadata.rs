@@ -1,6 +1,6 @@
 use super::AppState;
-use crate::core::error::Result;
-use crate::core::metadata_writer::{
+use crate::core::app::error::Result;
+use crate::core::books::metadata_writer::{
     build_audiobookshelf_chapters, read_metadata_json, remote_metadata_dir,
 };
 use crate::db::models::Book;
@@ -30,8 +30,12 @@ pub(crate) async fn save_webdav_metadata(state: &AppState, book: &Book) -> Resul
             .unwrap_or(series.title);
         metadata.series.push(title);
     }
-    crate::core::webdav_metadata::write_cached_sidecars(book, &metadata, &state.nfo_manager)?;
-    crate::core::webdav_metadata::sync_to_remote(
+    crate::core::books::webdav_metadata::write_cached_sidecars(
+        book,
+        &metadata,
+        &state.nfo_manager,
+    )?;
+    crate::core::books::webdav_metadata::sync_to_remote(
         &state.storage_service,
         &library,
         book,

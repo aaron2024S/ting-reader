@@ -12,7 +12,7 @@
 //! - 低耦合：插件只需实现解密接口，不关心缓存
 //! - 可扩展：支持任意加密格式（XM, QMC, NCM 等）
 
-use crate::core::error::{Result, TingError};
+use crate::core::app::error::{Result, TingError};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};

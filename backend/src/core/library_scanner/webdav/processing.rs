@@ -3,7 +3,7 @@ use super::super::shared::{
     clean_or_preserve_chapter_title,
 };
 use super::super::{LibraryScanner, MetadataSource, ScanStatus};
-use crate::core::error::Result;
+use crate::core::app::error::Result;
 use crate::db::repository::Repository;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
@@ -96,7 +96,7 @@ impl LibraryScanner {
 
         // Prepare temp directory for WebDAV book metadata and cover
         // Structure: temp/{book_hash}/
-        let temp_book_dir = crate::core::metadata_writer::remote_metadata_dir(&path)?;
+        let temp_book_dir = crate::core::books::metadata_writer::remote_metadata_dir(&path)?;
         if !temp_book_dir.exists() {
             std::fs::create_dir_all(&temp_book_dir).ok();
         }
@@ -218,7 +218,7 @@ impl LibraryScanner {
                     if manual_corrected && temp_path.is_file() {
                         continue;
                     }
-                    if let Err(error) = crate::core::webdav_metadata::cache_remote_file(
+                    if let Err(error) = crate::core::books::webdav_metadata::cache_remote_file(
                         storage,
                         library,
                         meta_url,
@@ -235,11 +235,12 @@ impl LibraryScanner {
         }
 
         // Read metadata.json if downloaded
-        let mut json_chapters: Option<Vec<crate::core::metadata_writer::AudiobookshelfChapter>> =
-            None;
+        let mut json_chapters: Option<
+            Vec<crate::core::books::metadata_writer::AudiobookshelfChapter>,
+        > = None;
         if has_metadata_json
             && let Ok(Some(json_meta)) =
-                crate::core::metadata_writer::read_metadata_json(&temp_book_dir)
+                crate::core::books::metadata_writer::read_metadata_json(&temp_book_dir)
         {
             if let Some(t) = json_meta.title
                 && !t.trim().is_empty()
@@ -328,7 +329,7 @@ impl LibraryScanner {
                     let original_ext = meta_url.split('.').next_back().unwrap_or("jpg");
                     let temp_cover_path = temp_book_dir.join(format!("cover.{}", original_ext));
                     if !(manual_corrected && temp_cover_path.is_file())
-                        && let Err(error) = crate::core::webdav_metadata::cache_remote_file(
+                        && let Err(error) = crate::core::books::webdav_metadata::cache_remote_file(
                             storage,
                             library,
                             meta_url,
@@ -342,7 +343,8 @@ impl LibraryScanner {
                     }
                     if temp_cover_path.is_file()
                         && local_cover_url.as_deref().is_none_or(|cover| {
-                            !crate::core::webdav_metadata::is_cover_url(cover) || cover == meta_url
+                            !crate::core::books::webdav_metadata::is_cover_url(cover)
+                                || cover == meta_url
                         })
                     {
                         local_cover_url =
@@ -572,7 +574,7 @@ impl LibraryScanner {
             } else {
                 url.clone()
             };
-            if let Ok(Some(color)) = crate::core::color::calculate_theme_color_with_client(
+            if let Ok(Some(color)) = crate::core::books::color::calculate_theme_color_with_client(
                 &cover_path,
                 &self.http_client,
             )
@@ -669,7 +671,7 @@ impl LibraryScanner {
                 .collect();
             if let Some(chapters) = json_chapters.take() {
                 let (aligned, matched_by_title) =
-                    crate::core::metadata_writer::align_chapters_to_file_stems(
+                    crate::core::books::metadata_writer::align_chapters_to_file_stems(
                         chapters,
                         &file_stems,
                     );
@@ -971,13 +973,14 @@ impl LibraryScanner {
         if !temp_book_dir.join("metadata.json").is_file()
             || !temp_book_dir.join("book.nfo").is_file()
         {
-            let mut metadata = crate::core::metadata_writer::read_metadata_json(&temp_book_dir)?
-                .unwrap_or_default();
+            let mut metadata =
+                crate::core::books::metadata_writer::read_metadata_json(&temp_book_dir)?
+                    .unwrap_or_default();
             metadata.update_book_fields(&book);
-            metadata.chapters = crate::core::metadata_writer::build_audiobookshelf_chapters(
+            metadata.chapters = crate::core::books::metadata_writer::build_audiobookshelf_chapters(
                 self.chapter_repo.find_by_book(&book_id).await?,
             );
-            crate::core::webdav_metadata::ensure_cached_sidecars(
+            crate::core::books::webdav_metadata::ensure_cached_sidecars(
                 &book,
                 &metadata,
                 &self.nfo_manager,

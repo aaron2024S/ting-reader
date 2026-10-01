@@ -127,7 +127,7 @@ impl LibraryScanner {
         library_id: &str,
         book_id: &str,
         series_info: &InferredSeriesInfo,
-    ) -> crate::core::error::Result<()> {
+    ) -> crate::core::app::error::Result<()> {
         let title = series_info.title.trim();
         if title.is_empty() {
             return Ok(());
@@ -805,7 +805,7 @@ pub(crate) fn strip_likely_file_extension(value: &str) -> &str {
 }
 
 pub(crate) fn clean_or_preserve_chapter_title(
-    text_cleaner: &crate::core::text_cleaner::TextCleaner,
+    text_cleaner: &crate::core::books::text_cleaner::TextCleaner,
     title: &str,
     book_title: Option<&str>,
     preserve_raw: bool,

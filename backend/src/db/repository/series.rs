@@ -1,4 +1,4 @@
-use crate::core::error::{Result, TingError};
+use crate::core::app::error::{Result, TingError};
 use crate::db::manager::DatabaseManager;
 use crate::db::models::{Book, Series, SeriesBook};
 use crate::db::repository::base::Repository;

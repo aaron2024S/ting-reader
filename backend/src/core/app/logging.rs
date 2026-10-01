@@ -6,7 +6,7 @@
 //! - Log rotation with size limits
 //! - Integration with tracing ecosystem
 
-use crate::core::config::LoggingConfig;
+use crate::core::app::config::LoggingConfig;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::Path;

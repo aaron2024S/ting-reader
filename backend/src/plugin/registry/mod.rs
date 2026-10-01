@@ -8,7 +8,7 @@ mod graph;
 mod tests;
 
 use super::types::{Plugin, PluginId, PluginMetadata, PluginState, PluginStats};
-use crate::core::error::{Result, TingError};
+use crate::core::app::error::{Result, TingError};
 use std::collections::HashMap;
 use std::sync::Arc;
 

@@ -1,6 +1,6 @@
 use super::AppState;
 use crate::auth::middleware::AuthUser;
-use crate::core::error::{Result, TingError};
+use crate::core::app::error::{Result, TingError};
 use crate::db::repository::{Repository, reading::ReadingRepository};
 use axum::{
     Json,

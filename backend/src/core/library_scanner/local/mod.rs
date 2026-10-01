@@ -2,12 +2,12 @@ mod chapters;
 mod metadata;
 
 use super::{LibraryScanner, LocalLibraryScanContext, MetadataSource, ScanResult, ScanStatus};
-use crate::core::error::Result;
+use crate::core::app::error::Result;
+use crate::core::books::nfo_manager::BookMetadata;
 use crate::core::library_scanner::shared::{
     ChapterRangeDir, CoalescedRangeDirs, SeriesDirectoryCandidate, infer_series_directories,
     parse_chapter_range_dir_name, select_mergeable_range_groups,
 };
-use crate::core::nfo_manager::BookMetadata;
 use crate::db::repository::Repository;
 use chapters::ChapterProcessingOptions;
 use sha2::{Digest, Sha256};
@@ -823,7 +823,7 @@ impl LibraryScanner {
                     cover_path
                 };
 
-            if let Ok(Some(color)) = crate::core::color::calculate_theme_color_with_client(
+            if let Ok(Some(color)) = crate::core::books::color::calculate_theme_color_with_client(
                 &normalized_path,
                 &self.http_client,
             )
@@ -1042,8 +1042,8 @@ impl LibraryScanner {
             debug!("Writing metadata.json for book: {}", book_id);
             let chapters = self.chapter_repo.find_by_book(&book_id).await?;
             let abs_chapters =
-                crate::core::metadata_writer::build_audiobookshelf_chapters(chapters);
-            let extended_meta = crate::core::metadata_writer::ExtendedMetadata {
+                crate::core::books::metadata_writer::build_audiobookshelf_chapters(chapters);
+            let extended_meta = crate::core::books::metadata_writer::ExtendedMetadata {
                 subtitle,
                 published_year,
                 published_date,
@@ -1081,13 +1081,15 @@ impl LibraryScanner {
                 }
             }
 
-            let metadata_json = crate::core::metadata_writer::AudiobookshelfMetadata::new(
+            let metadata_json = crate::core::books::metadata_writer::AudiobookshelfMetadata::new(
                 &book,
                 abs_chapters,
                 extended_meta,
                 series_titles,
             );
-            if let Err(e) = crate::core::metadata_writer::write_metadata_json(dir, &metadata_json) {
+            if let Err(e) =
+                crate::core::books::metadata_writer::write_metadata_json(dir, &metadata_json)
+            {
                 warn!(
                     target: "audit::metadata",
                     path = %dir.display(),

@@ -148,7 +148,7 @@ async fn preload_chapter(
     chapter: &Chapter,
     auto_preload: bool,
     auto_cache: bool,
-) -> crate::core::error::Result<()> {
+) -> crate::core::app::error::Result<()> {
     // Format extensions may cache ciphertext or require a streaming transform.
     // Only prefetch raw bytes for formats served directly by the core.
     let auto_preload = auto_preload
@@ -181,7 +181,7 @@ async fn preload_chapter(
                 tokio::io::copy(&mut reader.take(disk_limit.saturating_add(1)), &mut writer)
                     .await?;
             if written > disk_limit {
-                return Err(crate::core::error::TingError::InvalidRequest(
+                return Err(crate::core::app::error::TingError::InvalidRequest(
                     "Preload exceeds disk cache limit".to_string(),
                 ));
             }
@@ -195,7 +195,9 @@ async fn preload_chapter(
                 .enforce_limits(50, config.storage.max_disk_usage)
                 .await
                 .map_err(|error| {
-                    crate::core::error::TingError::IoError(std::io::Error::other(error.to_string()))
+                    crate::core::app::error::TingError::IoError(std::io::Error::other(
+                        error.to_string(),
+                    ))
                 })?;
         }
         if auto_preload {
@@ -251,7 +253,7 @@ async fn chapter_reader(
     state: &AppState,
     library: &Library,
     chapter: &Chapter,
-) -> crate::core::error::Result<(Box<dyn AsyncRead + Send + Unpin>, u64)> {
+) -> crate::core::app::error::Result<(Box<dyn AsyncRead + Send + Unpin>, u64)> {
     if library.library_type.eq_ignore_ascii_case("local") {
         let (file, size) = state
             .storage_service
@@ -290,16 +292,16 @@ pub(super) async fn cached_chapter(state: &AppState, chapter_id: &str) -> Option
 
 pub(super) fn prefix_response<F, Fut>(
     entry: PreloadedChapter,
-    streamer: &crate::core::audio_streamer::AudioStreamer,
+    streamer: &crate::core::audio::AudioStreamer,
     range_header: Option<&str>,
     mime_type: String,
     is_head: bool,
     open_tail: F,
-) -> crate::core::error::Result<Option<axum::response::Response>>
+) -> crate::core::app::error::Result<Option<axum::response::Response>>
 where
     F: FnOnce(u64, u64) -> Fut + Send + 'static,
     Fut: std::future::Future<
-            Output = crate::core::error::Result<(Box<dyn AsyncRead + Send + Unpin>, u64)>,
+            Output = crate::core::app::error::Result<(Box<dyn AsyncRead + Send + Unpin>, u64)>,
         > + Send
         + 'static,
 {
@@ -524,7 +526,7 @@ mod tests {
     #[tokio::test]
     async fn prefix_playback_preserves_full_bytes_and_range_headers() {
         let source = bytes::Bytes::from_static(b"abcdefghijklmnop");
-        let streamer = crate::core::audio_streamer::AudioStreamer::new(Default::default());
+        let streamer = crate::core::audio::AudioStreamer::new(Default::default());
         for (range, expected, tail_offset) in [
             (None, 0..16, Some(5)),
             (Some("bytes=0-2"), 0..3, None),
@@ -589,7 +591,7 @@ mod tests {
     #[tokio::test]
     async fn dropping_prefix_response_and_head_never_start_tail_download() {
         use futures::StreamExt;
-        let streamer = crate::core::audio_streamer::AudioStreamer::new(Default::default());
+        let streamer = crate::core::audio::AudioStreamer::new(Default::default());
         for is_head in [false, true] {
             let calls = Arc::new(AtomicUsize::new(0));
             let recorded = calls.clone();
@@ -622,7 +624,7 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_length_prefix_streams_remainder_without_false_content_length() {
-        let streamer = crate::core::audio_streamer::AudioStreamer::new(Default::default());
+        let streamer = crate::core::audio::AudioStreamer::new(Default::default());
         for tail in [b"def".as_slice(), b"".as_slice()] {
             let response = prefix_response(
                 entry(bytes::Bytes::from_static(b"abc"), None),
@@ -648,7 +650,7 @@ mod tests {
 
     #[tokio::test]
     async fn changed_source_length_fails_instead_of_splicing_a_different_file() {
-        let streamer = crate::core::audio_streamer::AudioStreamer::new(Default::default());
+        let streamer = crate::core::audio::AudioStreamer::new(Default::default());
         let response = prefix_response(
             entry(bytes::Bytes::from_static(b"abc"), Some(10)),
             &streamer,
@@ -673,7 +675,7 @@ mod tests {
 
     #[test]
     fn invalid_cached_ranges_return_416_without_reading_the_source() {
-        let streamer = crate::core::audio_streamer::AudioStreamer::new(Default::default());
+        let streamer = crate::core::audio::AudioStreamer::new(Default::default());
         for range in ["bytes=16-", "bytes=8-7", "bytes=-0", "bytes=0-1,3-4"] {
             let response = prefix_response(
                 entry(bytes::Bytes::from_static(b"abcde"), Some(16)),

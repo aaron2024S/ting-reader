@@ -1,5 +1,5 @@
 use super::{LibraryScanner, ScanMode, ScanResult, ScanStatus};
-use crate::core::error::{Result, TingError};
+use crate::core::app::error::{Result, TingError};
 use crate::db::models::{Book, Chapter, Library};
 use crate::db::repository::{LibraryScanState, Repository};
 use chrono::{DateTime, Utc};
@@ -513,7 +513,7 @@ async fn fill_rss_theme_color(
         cover_url.to_string()
     };
 
-    match crate::core::color::calculate_theme_color_with_client(&cover_path, client).await {
+    match crate::core::books::color::calculate_theme_color_with_client(&cover_path, client).await {
         Ok(Some(color)) => {
             book.theme_color = Some(color);
         }

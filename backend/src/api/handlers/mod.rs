@@ -28,12 +28,12 @@ use crate::api::handlers::media::stream::HlsSessionManager;
 use crate::api::ws::manager::WsSessionManager;
 use crate::cache::CacheManager;
 use crate::core::StorageService;
-use crate::core::audio_streamer::AudioStreamer;
-use crate::core::config::Config;
-use crate::core::library_watcher::LibraryWatcher;
-use crate::core::merge_service::MergeService;
-use crate::core::nfo_manager::NfoManager;
-use crate::core::services::{BookService, ScraperService};
+use crate::core::app::config::Config;
+use crate::core::audio::AudioStreamer;
+use crate::core::books::merge_service::MergeService;
+use crate::core::books::nfo_manager::NfoManager;
+use crate::core::books::{BookService, ScraperService};
+use crate::core::library_scanner::watcher::LibraryWatcher;
 use crate::core::task_queue::TaskQueue;
 use crate::db::repository::{
     BookRepository, ChapterRepository, FavoriteRepository, LibraryRepository,
@@ -64,7 +64,7 @@ pub struct AppState {
     pub plugin_manager: Arc<PluginManager>,
     pub plugin_cache: Arc<PluginCache>,
     pub plugin_host_gateway: Arc<PluginHostGateway>,
-    pub plugin_route_revocations: Arc<crate::core::signing::PluginRouteRevocations>,
+    pub plugin_route_revocations: Arc<crate::core::security::signing::PluginRouteRevocations>,
     pub config_manager: Arc<PluginConfigManager>,
     pub task_queue: Arc<TaskQueue>,
     pub config: Arc<tokio::sync::RwLock<Config>>,

@@ -5,7 +5,7 @@ use crate::api::models::{
     CacheInfoResponse, CacheListResponse, CacheOperationResponse, ClearCacheResponse,
 };
 use crate::api::require_admin;
-use crate::core::error::{Result, TingError};
+use crate::core::app::error::{Result, TingError};
 use crate::db::repository::Repository;
 use axum::{
     Json,

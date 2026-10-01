@@ -1,7 +1,7 @@
 use super::AppState;
 use crate::api::models::{BookResponse, ScrapeApplyRequest, ScrapeDiffRequest, ScrapeDiffResponse};
-use crate::core::error::{Result, TingError};
-use crate::core::nfo_manager::BookMetadata;
+use crate::core::app::error::{Result, TingError};
+use crate::core::books::nfo_manager::BookMetadata;
 use crate::db::models::ScraperConfig;
 use crate::db::repository::{ChapterRepository, Repository};
 use axum::{
@@ -111,7 +111,7 @@ pub async fn scrape_book_diff(
 
     let best_match = &search_results.items[0];
     // We use search result directly as it now contains full metadata
-    let mut detail = crate::plugin::scraper::BookDetail {
+    let mut detail = crate::plugin::types::scraper::BookDetail {
         id: best_match.id.clone(),
         title: best_match.title.clone(),
         author: best_match.author.clone(),
@@ -498,7 +498,7 @@ pub async fn apply_scrape_result(
             }
 
             // Recalculate theme color for new cover
-            match crate::core::color::calculate_theme_color(url).await {
+            match crate::core::books::color::calculate_theme_color(url).await {
                 Ok(Some(color)) => {
                     tracing::info!("Updated theme color for book {}: {}", book.id, color);
                     book.theme_color = Some(color);
@@ -522,7 +522,8 @@ pub async fn apply_scrape_result(
                             .await
                             .is_ok()
                             && let Ok(Some(color)) =
-                                crate::core::color::calculate_theme_color_from_bytes(&buffer).await
+                                crate::core::books::color::calculate_theme_color_from_bytes(&buffer)
+                                    .await
                         {
                             book.theme_color = Some(color);
                         }
@@ -597,7 +598,7 @@ pub async fn apply_scrape_result(
             if config.metadata_writing_enabled {
                 // Read existing metadata.json to preserve extended fields
                 let mut metadata_json =
-                    crate::core::metadata_writer::read_metadata_json(&target_dir)
+                    crate::core::books::metadata_writer::read_metadata_json(&target_dir)
                         .unwrap_or(None)
                         .unwrap_or_default();
 
@@ -623,7 +624,9 @@ pub async fn apply_scrape_result(
                 let chapter_repo = ChapterRepository::new(state.book_repo.db().clone());
                 if let Ok(chapters) = chapter_repo.find_by_book(&book.id).await {
                     metadata_json.chapters =
-                        crate::core::metadata_writer::build_audiobookshelf_chapters(chapters);
+                        crate::core::books::metadata_writer::build_audiobookshelf_chapters(
+                            chapters,
+                        );
                 }
 
                 // Sync series from DB
@@ -675,9 +678,10 @@ pub async fn apply_scrape_result(
                     metadata_json.abridged = true;
                 }
 
-                if let Err(e) =
-                    crate::core::metadata_writer::write_metadata_json(&target_dir, &metadata_json)
-                {
+                if let Err(e) = crate::core::books::metadata_writer::write_metadata_json(
+                    &target_dir,
+                    &metadata_json,
+                ) {
                     tracing::error!(
                         target: "audit::metadata",
                         book_title = %book.title.as_deref().unwrap_or("?"),
@@ -795,7 +799,7 @@ async fn recalculate_cover_theme_color(
         internal_url = internal_url[..idx].to_string();
     }
 
-    match crate::core::color::calculate_theme_color(url).await {
+    match crate::core::books::color::calculate_theme_color(url).await {
         Ok(Some(color)) => {
             book.theme_color = Some(color);
         }
@@ -812,7 +816,7 @@ async fn recalculate_cover_theme_color(
                     .await
                     .is_ok()
                     && let Ok(Some(color)) =
-                        crate::core::color::calculate_theme_color_from_bytes(&buffer).await
+                        crate::core::books::color::calculate_theme_color_from_bytes(&buffer).await
                 {
                     book.theme_color = Some(color);
                 }
@@ -910,9 +914,10 @@ async fn sync_basic_scrape_outputs(state: &AppState, book: &crate::db::models::B
     }
 
     if config.metadata_writing_enabled {
-        let mut metadata_json = crate::core::metadata_writer::read_metadata_json(&target_dir)
-            .unwrap_or(None)
-            .unwrap_or_default();
+        let mut metadata_json =
+            crate::core::books::metadata_writer::read_metadata_json(&target_dir)
+                .unwrap_or(None)
+                .unwrap_or_default();
 
         metadata_json.title = book.title.clone();
         metadata_json.authors = book.author.clone().map(|s| vec![s]).unwrap_or_default();
@@ -943,7 +948,7 @@ async fn sync_basic_scrape_outputs(state: &AppState, book: &crate::db::models::B
         let chapter_repo = ChapterRepository::new(state.book_repo.db().clone());
         if let Ok(chapters) = chapter_repo.find_by_book(&book.id).await {
             metadata_json.chapters =
-                crate::core::metadata_writer::build_audiobookshelf_chapters(chapters);
+                crate::core::books::metadata_writer::build_audiobookshelf_chapters(chapters);
         }
 
         let series_list = state
@@ -966,7 +971,7 @@ async fn sync_basic_scrape_outputs(state: &AppState, book: &crate::db::models::B
         metadata_json.series = series_titles;
 
         if let Err(e) =
-            crate::core::metadata_writer::write_metadata_json(&target_dir, &metadata_json)
+            crate::core::books::metadata_writer::write_metadata_json(&target_dir, &metadata_json)
         {
             tracing::error!(
                 target: "audit::metadata",
@@ -1009,7 +1014,7 @@ async fn sync_scrape_extended_metadata(
     }
 
     let target_dir = if webdav {
-        let dir = crate::core::metadata_writer::remote_metadata_dir(&book.path)?;
+        let dir = crate::core::books::metadata_writer::remote_metadata_dir(&book.path)?;
         tokio::fs::create_dir_all(&dir).await?;
         dir
     } else {
@@ -1063,9 +1068,10 @@ async fn sync_scrape_extended_metadata(
     }
 
     if config.metadata_writing_enabled || webdav {
-        let mut metadata_json = crate::core::metadata_writer::read_metadata_json(&target_dir)
-            .unwrap_or(None)
-            .unwrap_or_default();
+        let mut metadata_json =
+            crate::core::books::metadata_writer::read_metadata_json(&target_dir)
+                .unwrap_or(None)
+                .unwrap_or_default();
 
         if extended.subtitle.is_some() {
             metadata_json.subtitle = extended.subtitle.clone();
@@ -1096,7 +1102,7 @@ async fn sync_scrape_extended_metadata(
         }
 
         if let Err(e) =
-            crate::core::metadata_writer::write_metadata_json(&target_dir, &metadata_json)
+            crate::core::books::metadata_writer::write_metadata_json(&target_dir, &metadata_json)
         {
             tracing::error!(
                 target: "audit::metadata",

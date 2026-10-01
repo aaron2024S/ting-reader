@@ -1,6 +1,6 @@
 //! Native ABI v2 transport. Context is an explicit per-call borrowed pointer.
 
-use crate::plugin::resources::{ResourceError, ResourceScope};
+use crate::plugin::host_api::resources::{ResourceError, ResourceScope};
 use crate::plugin::wasm::sandbox::Permission;
 use crate::plugin::{PluginHostGateway, PluginHostUser};
 use std::ffi::c_void;

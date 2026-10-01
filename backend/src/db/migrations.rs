@@ -2,7 +2,7 @@
 //!
 //! This module provides database schema migration functionality with automatic backup and rollback.
 
-use crate::core::error::{Result, TingError};
+use crate::core::app::error::{Result, TingError};
 use chrono::Local;
 use rusqlite::Connection;
 use std::fs;

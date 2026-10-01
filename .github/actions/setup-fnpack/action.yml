@@ -26,7 +26,7 @@ runs:
             suffix="linux-amd64"
             ;;
           Linux-ARM64)
-            suffix="linux-arm64"
+            suffix="linux-arm"
             ;;
           macOS-X64)
             suffix="darwin-amd64"

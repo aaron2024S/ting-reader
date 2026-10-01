@@ -1,5 +1,5 @@
 use crate::api::handlers::AppState;
-use crate::core::error::{Result, TingError};
+use crate::core::app::error::{Result, TingError};
 use crate::db::models::{Book, Chapter, Library};
 use axum::{
     http::StatusCode,
@@ -327,7 +327,8 @@ fn build_webdav_url(
     // 添加认证信息
     if let (Some(username), Some(password)) = (&library.username, &library.password) {
         let decrypted_password = if let Some(key) = encryption_key {
-            crate::core::crypto::decrypt(password, key).unwrap_or_else(|_| password.clone())
+            crate::core::security::crypto::decrypt(password, key)
+                .unwrap_or_else(|_| password.clone())
         } else {
             password.clone()
         };

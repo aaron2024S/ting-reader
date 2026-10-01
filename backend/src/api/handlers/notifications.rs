@@ -1,6 +1,6 @@
 use super::AppState;
 use crate::api::require_admin;
-use crate::core::error::{Result, TingError};
+use crate::core::app::error::{Result, TingError};
 use crate::db::models::NotificationWebhook;
 use axum::{
     Json,

@@ -4,7 +4,7 @@ use crate::api::models::{
     PlaylistResponse, SeriesResponse, UpdatePlaylistRequest,
 };
 use crate::auth::middleware::AuthUser;
-use crate::core::error::{Result, TingError};
+use crate::core::app::error::{Result, TingError};
 use crate::db::models::{Playlist, PlaylistItem};
 use crate::db::repository::Repository;
 use axum::{

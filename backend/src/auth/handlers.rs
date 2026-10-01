@@ -8,7 +8,7 @@ use crate::auth::models::{
     TokenLoginRequest, UpdateUserRequest, UserInfo,
 };
 use crate::auth::password::{hash_password, verify_password};
-use crate::core::error::{Result, TingError};
+use crate::core::app::error::{Result, TingError};
 use crate::db::models::User;
 use crate::db::repository::Repository;
 use axum::{

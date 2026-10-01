@@ -21,7 +21,7 @@ use tracing::info;
 use super::super::types::PluginMetadata;
 use super::super::types::metadata::read_plugin_metadata;
 use super::runtime::JsRuntimeWrapper;
-use crate::core::error::TingError;
+use crate::core::app::error::TingError;
 use crate::plugin::PluginHostGatewayHandle;
 
 /// JavaScript plugin loader

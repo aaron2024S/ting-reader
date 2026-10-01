@@ -8,10 +8,10 @@
 mod rollback;
 #[cfg(test)]
 mod tests;
+pub mod tr_package;
 
-use crate::core::error::{Result, TingError};
+use crate::core::app::error::{Result, TingError};
 use crate::plugin::fs_utils;
-use crate::plugin::tr_package;
 use crate::plugin::types::metadata::{
     parse_plugin_metadata_content, read_plugin_metadata, validate_plugin_instance_id,
 };

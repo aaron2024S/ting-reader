@@ -1,7 +1,7 @@
 //! Bounded binary imports. Resource semantics remain in the shared Host scope.
 
 use super::plugin::PluginState;
-use crate::plugin::resources::{ResourceError, ResourceScope};
+use crate::plugin::host_api::resources::{ResourceError, ResourceScope};
 use std::sync::Arc;
 use ting_plugin_contract::format_calls::{ChunkRef, MAX_MEDIA_CHUNK_BYTES, ResourceId};
 use ting_plugin_contract::native_abi::NativeStatus;

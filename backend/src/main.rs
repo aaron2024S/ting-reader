@@ -15,7 +15,7 @@ async fn main() -> Result<()> {
     deno_core::JsRuntime::init_platform(None);
 
     // Load configuration (handles CLI args, env vars, and config file)
-    let config = match core::config::Config::load() {
+    let config = match core::app::config::Config::load() {
         Ok(cfg) => cfg,
         Err(e) => {
             // Print error to stderr since logging isn't initialized yet
@@ -115,7 +115,7 @@ async fn main() -> Result<()> {
     // Derive the shared encryption key before plugin discovery so plugin
     // configuration can be loaded before plugin initialization.
     let encryption_key =
-        core::master_key::MasterKeyManager::derive_master_key(&config.database.path)
+        core::security::master_key::MasterKeyManager::derive_master_key(&config.database.path)
             .map_err(|e| anyhow::anyhow!("Failed to derive master key: {}", e))?;
 
     info!(
@@ -203,13 +203,13 @@ async fn ensure_admin_user(
 
         // FPK uses the host OS time zone as the initial display preference.
         // This is intentionally done only while creating the first admin.
-        if let Some(time_zone) = core::time::initial_time_zone_from_os() {
+        if let Some(time_zone) = core::app::time::initial_time_zone_from_os() {
             system_settings_repo
                 .set_application_time_zone(&time_zone)
                 .await?;
         }
 
-        if let Some(language) = core::fnos::initial_admin_language().await {
+        if let Some(language) = core::app::fnos::initial_admin_language().await {
             let settings = UserSettings {
                 user_id: admin_user.id.clone(),
                 playback_speed: 1.0,

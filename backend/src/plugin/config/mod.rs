@@ -7,7 +7,7 @@ mod encryption;
 mod tests;
 
 use super::types::PluginId;
-use crate::core::error::{Result, TingError};
+use crate::core::app::error::{Result, TingError};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;

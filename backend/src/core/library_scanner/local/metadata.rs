@@ -22,7 +22,8 @@ pub(crate) struct ScannedMetadata {
     pub(crate) abridged: bool,
     pub(crate) json_tags: Vec<String>,
     pub(crate) json_series: Vec<String>,
-    pub(crate) json_chapters: Option<Vec<crate::core::metadata_writer::AudiobookshelfChapter>>,
+    pub(crate) json_chapters:
+        Option<Vec<crate::core::books::metadata_writer::AudiobookshelfChapter>>,
     pub(crate) chapter_title_template: Option<String>,
     pub(crate) chapter_titles: Vec<String>,
 }
@@ -319,7 +320,7 @@ impl LibraryScanner {
     }
 
     fn extract_from_json(&self, dir: &Path) -> Option<ScannedMetadata> {
-        match crate::core::metadata_writer::read_metadata_json(dir) {
+        match crate::core::books::metadata_writer::read_metadata_json(dir) {
             Ok(Some(meta)) => {
                 let mut m = ScannedMetadata {
                     title: meta.title,

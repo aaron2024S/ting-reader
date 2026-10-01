@@ -1,6 +1,6 @@
 //! Password hashing and verification using bcrypt
 
-use crate::core::error::{Result, TingError};
+use crate::core::app::error::{Result, TingError};
 
 /// Hash a password using bcrypt
 pub fn hash_password(password: &str) -> Result<String> {

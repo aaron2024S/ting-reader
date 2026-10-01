@@ -1,6 +1,6 @@
 use super::AppState;
 use crate::api::models::{BookResponse, CreateSeriesRequest, SeriesResponse, UpdateSeriesRequest};
-use crate::core::error::{Result, TingError};
+use crate::core::app::error::{Result, TingError};
 use crate::db::models::{Series, SeriesBook};
 use crate::db::repository::Repository;
 use axum::{
@@ -416,7 +416,9 @@ async fn update_book_metadata_series(state: &AppState, book_id: &str) -> Result<
         let path = std::path::Path::new(&book.path);
 
         // Read existing metadata
-        if let Ok(Some(mut metadata)) = crate::core::metadata_writer::read_metadata_json(path) {
+        if let Ok(Some(mut metadata)) =
+            crate::core::books::metadata_writer::read_metadata_json(path)
+        {
             // Fetch all series for this book
             let series_list = state.series_repo.find_series_by_book(book_id).await?;
             let mut series_titles = Vec::new();
@@ -443,7 +445,9 @@ async fn update_book_metadata_series(state: &AppState, book_id: &str) -> Result<
             metadata.series = series_titles;
 
             // Write back
-            if let Err(e) = crate::core::metadata_writer::write_metadata_json(path, &metadata) {
+            if let Err(e) =
+                crate::core::books::metadata_writer::write_metadata_json(path, &metadata)
+            {
                 tracing::warn!(
                     error = %e,
                     message_key = "metadata.json.write_failed",

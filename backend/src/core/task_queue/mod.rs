@@ -4,13 +4,13 @@
 //! task persistence, and automatic retry mechanisms.
 
 use crate::core::StorageService;
-use crate::core::audio_streamer::AudioStreamer;
-use crate::core::config::TaskQueueConfig;
-use crate::core::error::{Result, TingError};
-use crate::core::merge_service::MergeService;
-use crate::core::nfo_manager::NfoManager;
-use crate::core::services::ScraperService;
-use crate::core::text_cleaner::TextCleaner;
+use crate::core::app::config::TaskQueueConfig;
+use crate::core::app::error::{Result, TingError};
+use crate::core::audio::AudioStreamer;
+use crate::core::books::ScraperService;
+use crate::core::books::merge_service::MergeService;
+use crate::core::books::nfo_manager::NfoManager;
+use crate::core::books::text_cleaner::TextCleaner;
 use crate::db::manager::DatabaseManager;
 use crate::db::models::TaskRecord;
 use crate::db::repository::{

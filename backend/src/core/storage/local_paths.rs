@@ -1,5 +1,5 @@
-use crate::core::config::Config;
-use crate::core::error::{Result, TingError};
+use crate::core::app::config::Config;
+use crate::core::app::error::{Result, TingError};
 use crate::db::models::Library;
 use serde::Serialize;
 use std::collections::HashSet;
@@ -290,7 +290,7 @@ fn looks_like_windows_path(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::config::{
+    use crate::core::app::config::{
         AudioConfig, Config, DatabaseConfig, LoggingConfig, PluginConfig, SecurityConfig,
         ServerConfig, StorageConfig, TaskQueueConfig,
     };

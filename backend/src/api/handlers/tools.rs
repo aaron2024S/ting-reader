@@ -1,5 +1,5 @@
 use crate::api::models::tools::{GenerateRegexRequest, GenerateRegexResponse};
-use crate::core::error::Result;
+use crate::core::app::error::Result;
 use axum::{Json, response::IntoResponse};
 
 pub async fn generate_regex(Json(req): Json<GenerateRegexRequest>) -> Result<impl IntoResponse> {

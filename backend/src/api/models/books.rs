@@ -1,6 +1,6 @@
 use super::common::deserialize_tags_or_string;
 use crate::db::models::Book;
-use crate::plugin::scraper::{BookDetail, BookItem};
+use crate::plugin::types::scraper::{BookDetail, BookItem};
 use crate::plugin::types::{LocalizedText, ScraperSearchField};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;

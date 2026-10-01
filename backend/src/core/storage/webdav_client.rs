@@ -1,4 +1,4 @@
-use crate::core::error::{Result, TingError};
+use crate::core::app::error::{Result, TingError};
 use reqwest::Client;
 use std::sync::Arc;
 use std::time::{Duration, Instant};

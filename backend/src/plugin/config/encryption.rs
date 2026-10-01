@@ -1,6 +1,6 @@
 //! AES-256-GCM encryption for sensitive plugin configuration values
 
-use crate::core::error::{Result, TingError};
+use crate::core::app::error::{Result, TingError};
 use serde_json::Value;
 
 /// Encrypt a value using AES-256-GCM

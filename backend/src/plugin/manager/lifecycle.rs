@@ -5,12 +5,12 @@ use std::time::Duration;
 use tracing::{error, info, warn};
 
 use super::{FailedPlugin, PluginEntry, PluginManager};
-use crate::core::error::{Result, TingError};
+use crate::core::app::error::{Result, TingError};
+use crate::plugin::host_api::logger::{PluginLogLevel, emit_plugin_event};
 use crate::plugin::installer::PluginInstaller;
+use crate::plugin::installer::tr_package::{self, TrPackageSignatureIdentity};
 use crate::plugin::js::{JavaScriptPluginLoader, JavaScriptPluginWrapper};
-use crate::plugin::logger::{PluginLogLevel, emit_plugin_event};
 use crate::plugin::native::{NativeLoader, NativePlugin};
-use crate::plugin::tr_package::{self, TrPackageSignatureIdentity};
 use crate::plugin::types::metadata::has_plugin_manifest;
 use crate::plugin::types::{
     Plugin, PluginContext, PluginId, PluginLogSource, PluginMetadata, PluginState,
@@ -999,12 +999,12 @@ impl PluginManager {
                 .get_mut(plugin_id)
                 .ok_or_else(|| TingError::PluginNotFound(plugin_id.clone()))?;
             entry.set_state(PluginState::Initializing);
-            let scope = Arc::new(crate::plugin::resources::ResourceScope::new(
+            let scope = Arc::new(crate::plugin::host_api::resources::ResourceScope::new(
                 plugin_id.clone(),
                 entry.generation,
                 None,
                 self.config.plugin_dir.join("staging"),
-                crate::plugin::resources::ResourceLimits::default(),
+                crate::plugin::host_api::resources::ResourceLimits::default(),
             ));
             entry.track_resource_scope(&scope)?;
             (entry.instance.clone(), scope)
@@ -1107,9 +1107,9 @@ impl PluginManager {
             config,
             data_dir: self.config.plugin_dir.join("data").join(&metadata.name),
             resources: None,
-            logger: Arc::new(crate::plugin::logger::DefaultPluginLogger::from_metadata(
-                metadata,
-            )),
+            logger: Arc::new(
+                crate::plugin::host_api::logger::DefaultPluginLogger::from_metadata(metadata),
+            ),
             event_bus: self.event_bus.clone(),
         })
     }

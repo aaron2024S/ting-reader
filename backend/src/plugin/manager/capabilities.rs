@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use ting_plugin_contract::capability::{ToolDeclaration, route_parameter};
 
 use super::{PluginManager, PluginRegistry};
-use crate::core::error::{Result, TingError};
+use crate::core::app::error::{Result, TingError};
 use crate::plugin::types::PluginMetadata;
 use crate::plugin::types::{PluginCapability, PluginId, PluginState};
 

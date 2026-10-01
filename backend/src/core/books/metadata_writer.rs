@@ -1,4 +1,4 @@
-use crate::core::error::{Result, TingError};
+use crate::core::app::error::{Result, TingError};
 use crate::db::models::Chapter;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};

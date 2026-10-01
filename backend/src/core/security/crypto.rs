@@ -3,7 +3,7 @@
 //! This module provides encryption and decryption functions for sensitive data
 //! such as WebDAV credentials. It uses AES-256-GCM for authenticated encryption.
 
-use crate::core::error::{Result, TingError};
+use crate::core::app::error::{Result, TingError};
 use aes_gcm::{
     Aes256Gcm, Nonce,
     aead::{Aead, KeyInit, OsRng},

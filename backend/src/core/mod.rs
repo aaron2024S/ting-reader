@@ -10,73 +10,26 @@
 //! - Text cleaning and normalization
 //! - Audio streaming and metadata reading
 
-#[path = "books/color.rs"]
-pub mod color;
-#[path = "app/config.rs"]
-pub mod config;
-#[path = "security/crypto.rs"]
-pub mod crypto;
-#[path = "security/decryption_cache.rs"]
-pub mod decryption_cache;
-#[path = "app/error.rs"]
-pub mod error;
-#[path = "app/fnos.rs"]
-pub mod fnos;
-#[path = "library_scanner/scheduler.rs"]
-pub mod library_sync_scheduler;
-#[path = "library_scanner/watcher.rs"]
-pub mod library_watcher;
-#[path = "storage/local_paths.rs"]
-pub mod local_paths;
-#[path = "app/logging.rs"]
-pub mod logging;
-#[path = "security/master_key.rs"]
-pub mod master_key;
-#[path = "books/merge_service.rs"]
-pub mod merge_service;
-#[path = "books/metadata_writer.rs"]
-pub mod metadata_writer;
-#[path = "security/signing.rs"]
-pub mod signing;
-#[path = "storage/service.rs"]
-pub mod storage;
-#[path = "books/text_cleaner.rs"]
-pub mod text_cleaner;
-#[path = "app/time.rs"]
-pub mod time;
-#[path = "storage/webdav_client.rs"]
-pub mod webdav_client;
-#[path = "books/webdav_metadata.rs"]
-pub mod webdav_metadata;
-
-#[path = "common/lru_cache.rs"]
-pub mod lru_cache;
-#[path = "common/utils.rs"]
-pub mod utils;
-
+pub mod app;
 pub mod audio;
-pub mod audio_streamer;
+pub mod books;
+pub mod common;
 pub mod event_bus;
 pub mod library_scanner;
-pub mod nfo_manager;
 pub mod notifications;
-pub mod services;
+pub mod security;
+pub mod storage;
 pub mod task_queue;
 
-pub use audio::AudioService;
-pub use audio_streamer::{AudioFormat, AudioMetadata, AudioStreamer, StreamerConfig};
-pub use config::Config;
-pub use decryption_cache::{CacheStats, DecryptionCacheConfig, DecryptionCacheService};
-pub use error::{ErrorContext, ErrorResponse, Result, TingError};
+pub use app::{Config, ErrorContext, ErrorResponse, Logger, Result, TingError};
+pub use audio::{AudioFormat, AudioMetadata, AudioService, AudioStreamer, StreamerConfig};
+pub use books::{
+    BookMetadata, BookService, ChapterMetadata, CleanerConfig, CleaningResult, CleaningRule,
+    MergeService, NfoManager, ScraperService, TextCleaner,
+};
+pub use common::{LruCache, release_memory};
 pub use event_bus::{Event, EventBus, EventType};
 pub use library_scanner::{LibraryScanner, ScanResult};
-pub use logging::Logger;
-pub use lru_cache::LruCache;
-pub use merge_service::MergeService;
-pub use nfo_manager::{BookMetadata, ChapterMetadata, NfoManager};
-pub use services::{BookService, ScraperService};
-pub use storage::StorageService;
+pub use security::{CacheStats, DecryptionCacheConfig, DecryptionCacheService};
+pub use storage::{StorageService, WebDavClient};
 pub use task_queue::{Task, TaskQueue, TaskStatus};
-pub use text_cleaner::{CleanerConfig, CleaningResult, CleaningRule, TextCleaner};
-pub use utils::release_memory;
-pub use webdav_client::WebDavClient;

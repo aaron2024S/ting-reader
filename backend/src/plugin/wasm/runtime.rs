@@ -5,7 +5,7 @@
 
 use super::plugin::{PluginState, StoreLimits, WasmExports, WasmPlugin, WasmPluginInner};
 use super::sandbox::{Permission, ResourceLimits, Sandbox};
-use crate::core::error::{Result, TingError};
+use crate::core::app::error::{Result, TingError};
 use crate::plugin::PluginHostGatewayHandle;
 use crate::plugin::types::{PluginCapability, PluginId, PluginMetadata};
 use std::collections::HashMap;
@@ -501,12 +501,12 @@ mod declared_export_tests {
                 .instantiate(module, &fixture_metadata())
                 .await
                 .unwrap();
-            let scope = Arc::new(crate::plugin::resources::ResourceScope::new(
+            let scope = Arc::new(crate::plugin::host_api::resources::ResourceScope::new(
                 fixture_metadata().instance_id(),
                 uuid::Uuid::new_v4(),
                 None,
                 std::env::temp_dir(),
-                crate::plugin::resources::ResourceLimits::default(),
+                crate::plugin::host_api::resources::ResourceLimits::default(),
             ));
             let context = PluginInvocationContext {
                 user: None,
@@ -755,10 +755,10 @@ mod declared_export_tests {
         let context = PluginContext::new(
             json!({"source": "test"}),
             std::env::temp_dir(),
-            Arc::new(crate::plugin::logger::DefaultPluginLogger::from_metadata(
-                &metadata,
-            )),
-            Arc::new(crate::plugin::events::DefaultPluginEventBus::new()),
+            Arc::new(
+                crate::plugin::host_api::logger::DefaultPluginLogger::from_metadata(&metadata),
+            ),
+            Arc::new(crate::plugin::manager::event_bus::DefaultPluginEventBus::new()),
         );
         Plugin::initialize(&plugin, &context).await.unwrap();
         let result = Plugin::invoke(

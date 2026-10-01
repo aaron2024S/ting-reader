@@ -4,8 +4,8 @@ use std::sync::Arc;
 use tracing::{error, info, warn};
 
 use super::{FailedPlugin, PluginEntry, PluginManager};
-use crate::core::error::{Result, TingError};
-use crate::plugin::tr_package::{self, TrPackageSignatureIdentity};
+use crate::core::app::error::{Result, TingError};
+use crate::plugin::installer::tr_package::{self, TrPackageSignatureIdentity};
 use crate::plugin::types::metadata::has_plugin_manifest;
 use crate::plugin::types::{Plugin, PluginMetadata, PluginState};
 

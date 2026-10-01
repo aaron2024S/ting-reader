@@ -272,9 +272,9 @@ impl PluginStats {
         alerts
     }
 
-    pub fn export_json(&self) -> crate::core::error::Result<String> {
+    pub fn export_json(&self) -> crate::core::app::error::Result<String> {
         serde_json::to_string_pretty(self)
-            .map_err(|e| crate::core::error::TingError::SerializationError(e.to_string()))
+            .map_err(|e| crate::core::app::error::TingError::SerializationError(e.to_string()))
     }
 
     pub fn export_csv(&self) -> String {

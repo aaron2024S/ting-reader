@@ -1,5 +1,5 @@
 use super::{Task, TaskPayload, TaskQueue};
-use crate::core::error::{Result, TingError};
+use crate::core::app::error::{Result, TingError};
 use crate::db::repository::Repository;
 use id3::frame::{Picture, PictureType as Id3PictureType};
 use id3::{Tag, TagLike, Version};
@@ -22,7 +22,7 @@ impl TaskQueue {
         match &task.payload {
             TaskPayload::ScraperSearch { plugin_id, query } => {
                 let scraper_service = self.scraper_service.as_ref().ok_or_else(|| {
-                    crate::core::error::TingError::TaskError(
+                    crate::core::app::error::TingError::TaskError(
                         "Scraper service not configured".to_string(),
                     )
                 })?;
@@ -40,7 +40,7 @@ impl TaskQueue {
                 params,
             } => {
                 let plugin_manager = self.plugin_manager.as_ref().ok_or_else(|| {
-                    crate::core::error::TingError::TaskError(
+                    crate::core::app::error::TingError::TaskError(
                         "Plugin manager not configured".to_string(),
                     )
                 })?;
@@ -88,7 +88,9 @@ impl TaskQueue {
         task_id: &str,
     ) -> Result<()> {
         let plugin_manager = self.plugin_manager.as_ref().ok_or_else(|| {
-            crate::core::error::TingError::TaskError("Plugin manager not configured".to_string())
+            crate::core::app::error::TingError::TaskError(
+                "Plugin manager not configured".to_string(),
+            )
         })?;
         let owner = data
             .get("_ting_task_owner")
@@ -99,7 +101,7 @@ impl TaskQueue {
             .find(|handler| owner.is_none_or(|owner| handler.registration.plugin_id == owner))
         else {
             warn!(task_type = %task_type, "Unknown task type");
-            return Err(crate::core::error::TingError::TaskError(format!(
+            return Err(crate::core::app::error::TingError::TaskError(format!(
                 "Unknown task type: {}",
                 task_type
             )));
@@ -138,10 +140,10 @@ impl TaskQueue {
     /// Handle library scan task
     async fn handle_library_scan(&self, data: &serde_json::Value, task_id: &str) -> Result<()> {
         let library_id = data["library_id"].as_str().ok_or_else(|| {
-            crate::core::error::TingError::TaskError("Missing library_id".to_string())
+            crate::core::app::error::TingError::TaskError("Missing library_id".to_string())
         })?;
         let library_path = data["library_path"].as_str().ok_or_else(|| {
-            crate::core::error::TingError::TaskError("Missing library_path".to_string())
+            crate::core::app::error::TingError::TaskError("Missing library_path".to_string())
         })?;
         let scan_mode = data["mode"]
             .as_str()
@@ -164,37 +166,48 @@ impl TaskQueue {
 
         // Get repositories
         let book_repo = self.book_repo.as_ref().ok_or_else(|| {
-            crate::core::error::TingError::TaskError("Book repository not configured".to_string())
+            crate::core::app::error::TingError::TaskError(
+                "Book repository not configured".to_string(),
+            )
         })?;
         let chapter_repo = self.chapter_repo.as_ref().ok_or_else(|| {
-            crate::core::error::TingError::TaskError(
+            crate::core::app::error::TingError::TaskError(
                 "Chapter repository not configured".to_string(),
             )
         })?;
         let series_repo = self.series_repo.as_ref().ok_or_else(|| {
-            crate::core::error::TingError::TaskError("Series repository not configured".to_string())
+            crate::core::app::error::TingError::TaskError(
+                "Series repository not configured".to_string(),
+            )
         })?;
         let library_repo = self.library_repo.as_ref().ok_or_else(|| {
-            crate::core::error::TingError::TaskError(
+            crate::core::app::error::TingError::TaskError(
                 "Library repository not configured".to_string(),
             )
         })?;
         let library = library_repo.find_by_id(library_id).await?.ok_or_else(|| {
-            crate::core::error::TingError::NotFound(format!("Library {} not found", library_id))
+            crate::core::app::error::TingError::NotFound(format!(
+                "Library {} not found",
+                library_id
+            ))
         })?;
 
         // Get services
         let text_cleaner = self.text_cleaner.as_ref().ok_or_else(|| {
-            crate::core::error::TingError::TaskError("Text cleaner not configured".to_string())
+            crate::core::app::error::TingError::TaskError("Text cleaner not configured".to_string())
         })?;
         let nfo_manager = self.nfo_manager.as_ref().ok_or_else(|| {
-            crate::core::error::TingError::TaskError("NFO manager not configured".to_string())
+            crate::core::app::error::TingError::TaskError("NFO manager not configured".to_string())
         })?;
         let audio_streamer = self.audio_streamer.as_ref().ok_or_else(|| {
-            crate::core::error::TingError::TaskError("Audio streamer not configured".to_string())
+            crate::core::app::error::TingError::TaskError(
+                "Audio streamer not configured".to_string(),
+            )
         })?;
         let plugin_manager = self.plugin_manager.as_ref().ok_or_else(|| {
-            crate::core::error::TingError::TaskError("Plugin manager not configured".to_string())
+            crate::core::app::error::TingError::TaskError(
+                "Plugin manager not configured".to_string(),
+            )
         })?;
 
         // Create library scanner
@@ -319,31 +332,38 @@ impl TaskQueue {
     /// Handle write metadata task
     async fn handle_write_metadata(&self, data: &serde_json::Value, task_id: &str) -> Result<()> {
         let book_id = data["book_id"].as_str().ok_or_else(|| {
-            crate::core::error::TingError::TaskError("Missing book_id".to_string())
+            crate::core::app::error::TingError::TaskError("Missing book_id".to_string())
         })?;
 
         info!(book_id = %book_id, "Handling write metadata task");
 
         // Get repositories
         let book_repo = self.book_repo.as_ref().ok_or_else(|| {
-            crate::core::error::TingError::TaskError("Book repository not configured".to_string())
+            crate::core::app::error::TingError::TaskError(
+                "Book repository not configured".to_string(),
+            )
         })?;
         let library_repo = self.library_repo.as_ref().ok_or_else(|| {
-            crate::core::error::TingError::TaskError(
+            crate::core::app::error::TingError::TaskError(
                 "Library repository not configured".to_string(),
             )
         })?;
         let chapter_repo = self.chapter_repo.as_ref().ok_or_else(|| {
-            crate::core::error::TingError::TaskError(
+            crate::core::app::error::TingError::TaskError(
                 "Chapter repository not configured".to_string(),
             )
         })?;
         let plugin_manager = self.plugin_manager.as_ref().ok_or_else(|| {
-            crate::core::error::TingError::TaskError("Plugin manager not configured".to_string())
+            crate::core::app::error::TingError::TaskError(
+                "Plugin manager not configured".to_string(),
+            )
         })?;
 
         let book = book_repo.find_by_id(book_id).await?.ok_or_else(|| {
-            crate::core::error::TingError::NotFound(format!("Book with id {} not found", book_id))
+            crate::core::app::error::TingError::NotFound(format!(
+                "Book with id {} not found",
+                book_id
+            ))
         })?;
 
         // Recheck the setting when executing a previously queued task.
@@ -351,7 +371,7 @@ impl TaskQueue {
             .find_by_id(&book.library_id)
             .await?
             .ok_or_else(|| {
-                crate::core::error::TingError::NotFound(format!(
+                crate::core::app::error::TingError::NotFound(format!(
                     "Library with id {} not found",
                     book.library_id
                 ))
@@ -377,7 +397,7 @@ impl TaskQueue {
         let mut temp_cover_path = None;
 
         if let Some(ref url) = book.cover_url {
-            if crate::core::webdav_metadata::is_cover_url(url) {
+            if crate::core::books::webdav_metadata::is_cover_url(url) {
                 if remote {
                     // URL covers remain references; the explicit audio write
                     // only embeds file covers already held in the book cache.
@@ -388,7 +408,7 @@ impl TaskQueue {
                     if !temp_dir.exists() {
                         tokio::fs::create_dir_all(&temp_dir)
                             .await
-                            .map_err(crate::core::error::TingError::IoError)?;
+                            .map_err(crate::core::app::error::TingError::IoError)?;
                     }
 
                     let mut fetch_url = url.clone();
@@ -434,7 +454,7 @@ impl TaskQueue {
                     cover_path_str = Some(url.clone());
                 } else {
                     let book_path = if remote {
-                        crate::core::metadata_writer::remote_metadata_dir(&book.path)?
+                        crate::core::books::metadata_writer::remote_metadata_dir(&book.path)?
                     } else {
                         PathBuf::from(&book.path)
                     };
@@ -662,7 +682,7 @@ impl TaskQueue {
 
                         tag.write_to_path(&path_clone, Version::Id3v23)
                             .map_err(|e| {
-                                crate::core::error::TingError::IoError(std::io::Error::other(
+                                crate::core::app::error::TingError::IoError(std::io::Error::other(
                                     e.to_string(),
                                 ))
                             })?;

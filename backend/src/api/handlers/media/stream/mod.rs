@@ -7,8 +7,10 @@ mod strm;
 
 use crate::api::handlers::AppState;
 use crate::auth::middleware::AuthUser;
-use crate::core::error::{Result, TingError};
-use crate::core::signing::{constant_time_eq, sign_media_stream_request, signature_has_expired};
+use crate::core::app::error::{Result, TingError};
+use crate::core::security::signing::{
+    constant_time_eq, sign_media_stream_request, signature_has_expired,
+};
 use crate::db::models::{Chapter, Library};
 use crate::db::repository::Repository;
 use axum::{
@@ -373,7 +375,7 @@ pub async fn stream_chapter(
             // Add authentication to URL if present
             if let (Some(username), Some(password)) = (&library.username, &library.password) {
                 let decrypted_password =
-                    crate::core::crypto::decrypt(password, state.encryption_key.as_ref())
+                    crate::core::security::crypto::decrypt(password, state.encryption_key.as_ref())
                         .unwrap_or_else(|_| password.clone());
                 webdav_url.set_username(username).ok();
                 webdav_url.set_password(Some(&decrypted_password)).ok();

@@ -1,8 +1,8 @@
 use super::{AppState, update_book};
 use crate::api::models::UpdateBookRequest;
 use crate::auth::middleware::AuthUser;
-use crate::core::error::{Result, TingError};
-use crate::core::local_paths::{
+use crate::core::app::error::{Result, TingError};
+use crate::core::storage::local_paths::{
     ensure_path_inside_root, path_to_display_string, resolve_existing_local_library_root,
 };
 use crate::db::repository::Repository;
@@ -115,7 +115,7 @@ pub async fn upload_book_cover(
             }
             canonical
         }
-        "webdav" | "rss" => crate::core::metadata_writer::remote_metadata_dir(&book.path)?,
+        "webdav" | "rss" => crate::core::books::metadata_writer::remote_metadata_dir(&book.path)?,
         _ => {
             return Err(TingError::InvalidRequest(
                 "This library does not support cover uploads".to_string(),

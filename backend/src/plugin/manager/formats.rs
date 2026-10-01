@@ -2,8 +2,8 @@
 //! declared extensions and probe results; special file parsing stays in plugins.
 
 use super::PluginManager;
-use crate::core::error::{Result, TingError};
-use crate::plugin::resources::{ResourceLimits, ResourceScope, ResourceSource};
+use crate::core::app::error::{Result, TingError};
+use crate::plugin::host_api::resources::{ResourceLimits, ResourceScope, ResourceSource};
 use crate::plugin::types::{PluginCapability, PluginInvocationContext};
 use std::path::Path;
 use std::sync::Arc;

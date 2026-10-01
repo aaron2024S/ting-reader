@@ -29,7 +29,7 @@ impl LibrarySyncScheduler {
         }
     }
 
-    async fn enqueue_due_libraries(&self) -> crate::core::error::Result<()> {
+    async fn enqueue_due_libraries(&self) -> crate::core::app::error::Result<()> {
         let now = Utc::now();
         for library in self.library_repo.find_all().await? {
             if !matches!(library.library_type.as_str(), "rss" | "webdav") {

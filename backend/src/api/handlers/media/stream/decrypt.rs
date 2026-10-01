@@ -2,10 +2,12 @@
 //! resources, while plugins own format detection and decoding algorithms.
 
 use crate::api::handlers::AppState;
-use crate::core::error::{Result, TingError};
+use crate::core::app::error::{Result, TingError};
 use crate::db::models::{Chapter, Library};
+use crate::plugin::host_api::resources::{
+    ResourceError, ResourceResult, ResourceScope, ResourceSource,
+};
 use crate::plugin::manager::formats::SelectedFormat;
-use crate::plugin::resources::{ResourceError, ResourceResult, ResourceScope, ResourceSource};
 use crate::plugin::types::PluginInvocationContext;
 use futures::StreamExt;
 use std::sync::Arc;

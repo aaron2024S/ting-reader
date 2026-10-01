@@ -3,6 +3,7 @@
 pub mod capabilities;
 pub mod discovery;
 pub mod dispatch;
+pub mod event_bus;
 pub mod formats;
 pub mod lifecycle;
 
@@ -13,9 +14,9 @@ use std::sync::Arc;
 use tokio::sync::{RwLock, Semaphore};
 use tracing::info;
 
-use crate::core::error::{Result, TingError};
+use crate::core::app::error::{Result, TingError};
 use crate::plugin::config::PluginConfigManager;
-use crate::plugin::host_gateway::{PluginHostGateway, PluginHostGatewayHandle};
+use crate::plugin::host_api::{PluginHostGateway, PluginHostGatewayHandle};
 use crate::plugin::types::{
     LocalizedText, Permission, Plugin, PluginCapability, PluginContext, PluginDependency, PluginId,
     PluginMetadata, PluginState, PluginStats, ScraperCapabilities,
@@ -37,7 +38,7 @@ pub(crate) struct PluginEntry {
     pub(crate) instance: Arc<dyn Plugin>,
     pub(crate) generation: uuid::Uuid,
     resource_scopes:
-        std::sync::Mutex<Vec<std::sync::Weak<crate::plugin::resources::ResourceScope>>>,
+        std::sync::Mutex<Vec<std::sync::Weak<crate::plugin::host_api::resources::ResourceScope>>>,
     pub(crate) state: PluginState,
     pub(crate) load_error: Option<String>,
     pub(crate) stats: PluginStats,
@@ -64,7 +65,7 @@ impl PluginEntry {
 
     pub(crate) fn track_resource_scope(
         &self,
-        scope: &Arc<crate::plugin::resources::ResourceScope>,
+        scope: &Arc<crate::plugin::host_api::resources::ResourceScope>,
     ) -> Result<()> {
         let mut scopes = self.resource_scopes.lock().map_err(|_| {
             TingError::PluginExecutionError("Resource scope registry unavailable".into())
@@ -233,7 +234,7 @@ pub struct PluginManager {
     pub(crate) store_cache: Arc<crate::plugin::store::PluginCache>,
     pub(crate) config_manager: std::sync::RwLock<Option<Arc<PluginConfigManager>>>,
     pub(crate) host_gateway_handle: PluginHostGatewayHandle,
-    pub(crate) event_bus: Arc<crate::plugin::events::DefaultPluginEventBus>,
+    pub(crate) event_bus: Arc<crate::plugin::manager::event_bus::DefaultPluginEventBus>,
 }
 
 impl PluginManager {
@@ -263,7 +264,7 @@ impl PluginManager {
             store_cache: Arc::new(crate::plugin::store::PluginCache::new()),
             config_manager: std::sync::RwLock::new(None),
             host_gateway_handle: PluginHostGatewayHandle::default(),
-            event_bus: Arc::new(crate::plugin::events::DefaultPluginEventBus::new()),
+            event_bus: Arc::new(crate::plugin::manager::event_bus::DefaultPluginEventBus::new()),
         })
     }
 
@@ -302,7 +303,7 @@ impl PluginManager {
         }
 
         tokio::task::spawn_blocking(|| {
-            crate::core::utils::release_memory();
+            crate::core::common::utils::release_memory();
         })
         .await
         .unwrap_or_else(|e| {

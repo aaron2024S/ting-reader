@@ -1,6 +1,6 @@
 use super::{StreamQuery, handle_hls_request};
 use crate::api::handlers::AppState;
-use crate::core::error::{Result, TingError};
+use crate::core::app::error::{Result, TingError};
 use crate::db::models::{Book, Chapter, Library};
 use crate::db::repository::Repository;
 use axum::{

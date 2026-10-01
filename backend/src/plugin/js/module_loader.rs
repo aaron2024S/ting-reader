@@ -250,12 +250,12 @@ export async function list_plugins() {
             }))
             .unwrap(),
         );
-        let scope = std::sync::Arc::new(crate::plugin::resources::ResourceScope::new(
+        let scope = std::sync::Arc::new(crate::plugin::host_api::resources::ResourceScope::new(
             metadata.instance_id(),
             uuid::Uuid::new_v4(),
             None,
             package.path().join("stage"),
-            crate::plugin::resources::ResourceLimits::default(),
+            crate::plugin::host_api::resources::ResourceLimits::default(),
         ));
         let mut runtime = super::super::runtime::JsRuntimeWrapper::new(
             package.path().join("plugin.js"),

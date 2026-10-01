@@ -1,4 +1,4 @@
-use crate::core::error::Result;
+use crate::core::app::error::Result;
 use crate::db::manager::DatabaseManager;
 use rusqlite::{OptionalExtension, named_params};
 use serde::Serialize;

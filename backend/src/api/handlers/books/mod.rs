@@ -13,9 +13,11 @@ use crate::api::models::{
     CreateBookRequest, MergeBooksRequest, MoveChaptersRequest, SearchQuery, SearchResponse,
     StatsResponse, UpdateBookCorrectionRequest, UpdateBookRequest, UpdateChapterRequest,
 };
-use crate::core::error::{Result, TingError};
-use crate::core::local_paths::{ensure_path_inside_root, resolve_existing_local_library_root};
-use crate::core::nfo_manager::BookMetadata;
+use crate::core::app::error::{Result, TingError};
+use crate::core::books::nfo_manager::BookMetadata;
+use crate::core::storage::local_paths::{
+    ensure_path_inside_root, resolve_existing_local_library_root,
+};
 use crate::core::task_queue::{Priority, Task, TaskPayload};
 use crate::db::models::Book;
 use crate::db::repository::{ChapterRepository, Repository};
@@ -140,7 +142,8 @@ pub async fn create_book(
             }
         };
 
-        if let Ok(Some(color)) = crate::core::color::calculate_theme_color(&cover_path).await {
+        if let Ok(Some(color)) = crate::core::books::color::calculate_theme_color(&cover_path).await
+        {
             theme_color = Some(color);
         }
     }
@@ -256,7 +259,7 @@ pub async fn update_book(
                 }
             };
 
-            match crate::core::color::calculate_theme_color(&cover_path).await {
+            match crate::core::books::color::calculate_theme_color(&cover_path).await {
                 Ok(Some(color)) => {
                     theme_color = Some(color);
                 }
@@ -277,7 +280,8 @@ pub async fn update_book(
                             .await
                             .is_ok()
                             && let Ok(Some(color)) =
-                                crate::core::color::calculate_theme_color_from_bytes(&buffer).await
+                                crate::core::books::color::calculate_theme_color_from_bytes(&buffer)
+                                    .await
                         {
                             theme_color = Some(color);
                         }
@@ -310,7 +314,7 @@ pub async fn update_book(
                     }
                 };
 
-                match crate::core::color::calculate_theme_color(&cover_path).await {
+                match crate::core::books::color::calculate_theme_color(&cover_path).await {
                     Ok(Some(color)) => {
                         theme_color = Some(color);
                     }
@@ -336,8 +340,10 @@ pub async fn update_book(
                                 .await
                                 .is_ok()
                                 && let Ok(Some(color)) =
-                                    crate::core::color::calculate_theme_color_from_bytes(&buffer)
-                                        .await
+                                    crate::core::books::color::calculate_theme_color_from_bytes(
+                                        &buffer,
+                                    )
+                                    .await
                             {
                                 theme_color = Some(color);
                             }
@@ -455,9 +461,10 @@ pub async fn update_book(
         // Handle metadata.json writing
         if config.metadata_writing_enabled {
             // Preserve extended fields from existing local/cached metadata.
-            let mut metadata_json = crate::core::metadata_writer::read_metadata_json(&target_dir)
-                .unwrap_or(None)
-                .unwrap_or_default();
+            let mut metadata_json =
+                crate::core::books::metadata_writer::read_metadata_json(&target_dir)
+                    .unwrap_or(None)
+                    .unwrap_or_default();
 
             // Update fields from book record
             metadata_json.title = updated_book.title.clone();
@@ -488,7 +495,7 @@ pub async fn update_book(
             let chapter_repo = ChapterRepository::new(state.book_repo.db().clone());
             if let Ok(chapters) = chapter_repo.find_by_book(&updated_book.id).await {
                 metadata_json.chapters =
-                    crate::core::metadata_writer::build_audiobookshelf_chapters(chapters);
+                    crate::core::books::metadata_writer::build_audiobookshelf_chapters(chapters);
             }
 
             // Sync series from DB
@@ -520,9 +527,10 @@ pub async fn update_book(
             // Subtitle is now in metadata.json but not in Book struct, so we preserve what was read.
             // If request had extended fields (not supported in UpdateBookRequest yet), we would update them here.
 
-            if let Err(e) =
-                crate::core::metadata_writer::write_metadata_json(&target_dir, &metadata_json)
-            {
+            if let Err(e) = crate::core::books::metadata_writer::write_metadata_json(
+                &target_dir,
+                &metadata_json,
+            ) {
                 tracing::error!(
                     target: "audit::metadata",
                     book_title = %updated_book.title.as_deref().unwrap_or("?"),
@@ -974,14 +982,15 @@ pub async fn update_chapter(
             // Determine path
             let target_dir = std::path::PathBuf::from(&book.path);
 
-            let mut metadata_json = crate::core::metadata_writer::read_metadata_json(&target_dir)
-                .unwrap_or(None)
-                .unwrap_or_default();
+            let mut metadata_json =
+                crate::core::books::metadata_writer::read_metadata_json(&target_dir)
+                    .unwrap_or(None)
+                    .unwrap_or_default();
 
             // Sync chapters from DB
             if let Ok(chapters) = chapter_repo.find_by_book(&book.id).await {
                 metadata_json.chapters =
-                    crate::core::metadata_writer::build_audiobookshelf_chapters(chapters);
+                    crate::core::books::metadata_writer::build_audiobookshelf_chapters(chapters);
             }
 
             // Sync series from DB
@@ -1009,9 +1018,10 @@ pub async fn update_chapter(
             }
             metadata_json.series = series_titles;
 
-            if let Err(e) =
-                crate::core::metadata_writer::write_metadata_json(&target_dir, &metadata_json)
-            {
+            if let Err(e) = crate::core::books::metadata_writer::write_metadata_json(
+                &target_dir,
+                &metadata_json,
+            ) {
                 tracing::error!(
                     target: "audit::metadata",
                     chapter_title = %updated_chapter.title.as_deref().unwrap_or("?"),
@@ -1195,14 +1205,15 @@ pub async fn batch_update_chapters(
             // Determine path
             let target_dir = std::path::PathBuf::from(&book.path);
 
-            let mut metadata_json = crate::core::metadata_writer::read_metadata_json(&target_dir)
-                .unwrap_or(None)
-                .unwrap_or_default();
+            let mut metadata_json =
+                crate::core::books::metadata_writer::read_metadata_json(&target_dir)
+                    .unwrap_or(None)
+                    .unwrap_or_default();
 
             // Sync chapters from DB
             if let Ok(chapters) = chapter_repo.find_by_book(&book.id).await {
                 metadata_json.chapters =
-                    crate::core::metadata_writer::build_audiobookshelf_chapters(chapters);
+                    crate::core::books::metadata_writer::build_audiobookshelf_chapters(chapters);
             }
 
             // Sync series from DB
@@ -1225,9 +1236,10 @@ pub async fn batch_update_chapters(
             }
             metadata_json.series = series_titles;
 
-            if let Err(e) =
-                crate::core::metadata_writer::write_metadata_json(&target_dir, &metadata_json)
-            {
+            if let Err(e) = crate::core::books::metadata_writer::write_metadata_json(
+                &target_dir,
+                &metadata_json,
+            ) {
                 tracing::error!(
                     target: "audit::metadata",
                     book_title = %book.title.as_deref().unwrap_or("?"),

@@ -4,12 +4,12 @@
 //! and discover audiobook files, creating book and chapter records.
 
 use crate::core::StorageService;
-use crate::core::audio_streamer::AudioStreamer;
-use crate::core::error::{Result, TingError};
-use crate::core::merge_service::MergeService;
-use crate::core::nfo_manager::NfoManager;
-use crate::core::services::ScraperService;
-use crate::core::text_cleaner::TextCleaner;
+use crate::core::app::error::{Result, TingError};
+use crate::core::audio::AudioStreamer;
+use crate::core::books::ScraperService;
+use crate::core::books::merge_service::MergeService;
+use crate::core::books::nfo_manager::NfoManager;
+use crate::core::books::text_cleaner::TextCleaner;
 use crate::db::repository::{
     BookRepository, ChapterRepository, LibraryRepository, LibraryScanStateRepository, Repository,
     SeriesRepository, TaskRepository,
@@ -22,7 +22,9 @@ use tracing::{info, warn};
 
 pub mod local;
 pub mod rss;
+pub mod scheduler;
 pub mod shared;
+pub mod watcher;
 pub mod webdav;
 
 /// Supported audio file extensions

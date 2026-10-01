@@ -4,8 +4,8 @@ use crate::api::models::{
     StorageRootInfo, TestWebDavRequest, TestWebDavResponse, UpdateLibraryRequest,
 };
 use crate::api::require_admin;
-use crate::core::error::{Result, TingError};
-use crate::core::local_paths::{
+use crate::core::app::error::{Result, TingError};
+use crate::core::storage::local_paths::{
     discover_authorized_roots, ensure_path_inside_root, path_to_display_string,
     resolve_existing_local_library_root, resolve_local_library_path, resolve_storage_folder_target,
 };
@@ -163,7 +163,7 @@ pub async fn create_library(
     let encrypted_password = if library_type == "webdav" {
         if let Some(ref password) = req.webdav_password {
             if !password.is_empty() {
-                Some(crate::core::crypto::encrypt(
+                Some(crate::core::security::crypto::encrypt(
                     password,
                     &state.encryption_key,
                 )?)
@@ -387,7 +387,8 @@ pub async fn update_library(
         }
 
         if let Some(password) = req.webdav_password {
-            let encrypted = crate::core::crypto::encrypt(&password, &state.encryption_key)?;
+            let encrypted =
+                crate::core::security::crypto::encrypt(&password, &state.encryption_key)?;
             library.password = Some(encrypted);
         }
     }

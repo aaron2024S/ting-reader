@@ -14,7 +14,7 @@ use crate::api::middleware::{
 };
 use crate::api::routes::build_api_routes;
 use crate::core::Config;
-use crate::core::config::ServerConfig;
+use crate::core::app::config::ServerConfig;
 use crate::db::manager::DatabaseManager;
 use crate::db::repository::BookRepository;
 use axum::{
@@ -179,39 +179,39 @@ impl ApiServer {
         plugin_manager.set_config_manager(config_manager.clone());
 
         // Create services
-        let book_service = Arc::new(crate::core::services::BookService::new(book_repo.clone()));
-        let scraper_service = Arc::new(crate::core::services::ScraperService::new(
+        let book_service = Arc::new(crate::core::books::BookService::new(book_repo.clone()));
+        let scraper_service = Arc::new(crate::core::books::ScraperService::new(
             plugin_manager.clone(),
         ));
-        let merge_service = Arc::new(crate::core::merge_service::MergeService::new(
+        let merge_service = Arc::new(crate::core::books::merge_service::MergeService::new(
             book_repo.clone(),
             chapter_repo.clone(),
         ));
 
         // Create helpers
-        let cleaner_config = crate::core::text_cleaner::CleanerConfig::default();
-        let text_cleaner = Arc::new(crate::core::text_cleaner::TextCleaner::new(cleaner_config));
+        let cleaner_config = crate::core::books::text_cleaner::CleanerConfig::default();
+        let text_cleaner = Arc::new(crate::core::books::text_cleaner::TextCleaner::new(
+            cleaner_config,
+        ));
 
-        let nfo_manager = Arc::new(crate::core::nfo_manager::NfoManager::new(
+        let nfo_manager = Arc::new(crate::core::books::nfo_manager::NfoManager::new(
             config.storage.data_dir.clone(),
         ));
 
         // Create audio streamer with configuration
-        let streamer_config = crate::core::audio_streamer::StreamerConfig {
+        let streamer_config = crate::core::audio::StreamerConfig {
             cache_enabled: config.audio.cache_enabled,
             cache_size: config.audio.cache_size,
             buffer_size: config.audio.buffer_size,
             supported_formats: vec![
-                crate::core::audio_streamer::AudioFormat::Mp3,
-                crate::core::audio_streamer::AudioFormat::M4a,
-                crate::core::audio_streamer::AudioFormat::Aac,
-                crate::core::audio_streamer::AudioFormat::Flac,
-                crate::core::audio_streamer::AudioFormat::Wma,
+                crate::core::audio::AudioFormat::Mp3,
+                crate::core::audio::AudioFormat::M4a,
+                crate::core::audio::AudioFormat::Aac,
+                crate::core::audio::AudioFormat::Flac,
+                crate::core::audio::AudioFormat::Wma,
             ],
         };
-        let audio_streamer = Arc::new(crate::core::audio_streamer::AudioStreamer::new(
-            streamer_config,
-        ));
+        let audio_streamer = Arc::new(crate::core::audio::AudioStreamer::new(streamer_config));
 
         // Create StorageService
         let storage_service = Arc::new(crate::core::StorageService::new());
@@ -269,7 +269,7 @@ impl ApiServer {
         });
 
         let sync_scheduler = Arc::new(
-            crate::core::library_sync_scheduler::LibrarySyncScheduler::new(
+            crate::core::library_scanner::scheduler::LibrarySyncScheduler::new(
                 library_repo.clone(),
                 task_queue.clone(),
             ),
@@ -289,7 +289,7 @@ impl ApiServer {
                 .map_err(|e| anyhow::anyhow!("Failed to create plugin cache: {}", e))?,
         );
         let plugin_route_revocations = Arc::new(
-            crate::core::signing::PluginRouteRevocations::new(
+            crate::core::security::signing::PluginRouteRevocations::new(
                 config
                     .storage
                     .data_dir
@@ -322,7 +322,7 @@ impl ApiServer {
         plugin_manager.set_host_gateway(&plugin_host_gateway);
 
         // Create library watcher
-        let library_watcher = Arc::new(crate::core::library_watcher::LibraryWatcher::new(
+        let library_watcher = Arc::new(crate::core::library_scanner::watcher::LibraryWatcher::new(
             library_repo.clone(),
             Arc::new(crate::db::repository::LibraryScanStateRepository::new(
                 db.clone(),

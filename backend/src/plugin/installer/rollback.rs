@@ -2,7 +2,7 @@
 //!
 //! **Validates: Requirement 26.8**
 
-use crate::core::error::Result;
+use crate::core::app::error::Result;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tracing::{debug, error, warn};

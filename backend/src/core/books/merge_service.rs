@@ -1,4 +1,4 @@
-use crate::core::error::{Result, TingError};
+use crate::core::app::error::{Result, TingError};
 use crate::db::models::Book;
 use crate::db::repository::{BookRepository, ChapterRepository, Repository};
 use std::collections::HashSet;

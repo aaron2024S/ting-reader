@@ -6,7 +6,7 @@ use tracing::{error, info};
 
 use super::super::types::{Plugin, PluginContext, PluginInvocationContext, PluginMetadata};
 use super::plugin::JavaScriptPluginLoader;
-use crate::core::error::{Result, TingError};
+use crate::core::app::error::{Result, TingError};
 use crate::plugin::PluginHostGatewayHandle;
 
 /// Command sent to the JS worker thread
@@ -274,7 +274,7 @@ impl Plugin for JavaScriptPluginWrapper {
         operation: &str,
         input: Value,
         context: &PluginInvocationContext,
-    ) -> crate::core::error::Result<Value> {
+    ) -> crate::core::app::error::Result<Value> {
         self.call_function(operation, input, context).await
     }
 

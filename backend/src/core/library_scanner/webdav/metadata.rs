@@ -1,7 +1,7 @@
 use super::super::LibraryScanner;
 use crate::core::StorageService;
 use crate::db::models::Library;
-use crate::plugin::resources::{ResourceError, ResourceResult, ResourceSource};
+use crate::plugin::host_api::resources::{ResourceError, ResourceResult, ResourceSource};
 use id3::TagLike;
 use sha2::{Digest, Sha256};
 use std::path::Path;
@@ -586,7 +586,7 @@ impl LibraryScanner {
                                     (&library.username, &library.password)
                                 {
                                     let decrypted_password =
-                                        crate::core::crypto::decrypt(password, key)
+                                        crate::core::security::crypto::decrypt(password, key)
                                             .unwrap_or_else(|_| password.clone());
                                     url.set_username(username).ok();
                                     url.set_password(Some(&decrypted_password)).ok();

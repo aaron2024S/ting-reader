@@ -1,8 +1,8 @@
 use super::AppState;
 use crate::api::require_admin;
 use crate::auth::middleware::AuthUser;
-use crate::core::error::{Result, TingError};
-use crate::core::logging::LogEntry;
+use crate::core::app::error::{Result, TingError};
+use crate::core::app::logging::LogEntry;
 use axum::{
     Json,
     extract::{Path, Query, State},

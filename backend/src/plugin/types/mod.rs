@@ -3,9 +3,11 @@
 //! Defines core plugin interfaces and data structures for the plugin system.
 
 pub mod metadata;
+pub(crate) mod schema;
+pub mod scraper;
 pub mod stats;
 
-use crate::core::error::Result;
+use crate::core::app::error::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -22,7 +24,7 @@ pub type PluginId = String;
 #[derive(Debug, Clone, Default)]
 pub struct PluginInvocationContext {
     pub user: Option<crate::plugin::PluginHostUser>,
-    pub resources: Option<Arc<crate::plugin::resources::ResourceScope>>,
+    pub resources: Option<Arc<crate::plugin::host_api::resources::ResourceScope>>,
 }
 
 /// Base plugin trait that all plugins must implement
@@ -38,7 +40,7 @@ pub trait Plugin: Send + Sync {
         _input: serde_json::Value,
         _context: &PluginInvocationContext,
     ) -> Result<serde_json::Value> {
-        Err(crate::core::error::TingError::PluginExecutionError(
+        Err(crate::core::app::error::TingError::PluginExecutionError(
             format!("Plugin instance is unavailable for operation {operation}"),
         ))
     }
@@ -275,7 +277,7 @@ impl PluginDependency {
 pub struct PluginContext {
     pub config: serde_json::Value,
     pub data_dir: PathBuf,
-    pub resources: Option<Arc<crate::plugin::resources::ResourceScope>>,
+    pub resources: Option<Arc<crate::plugin::host_api::resources::ResourceScope>>,
     pub logger: Arc<dyn PluginLogger>,
     pub event_bus: Arc<dyn PluginEventBus>,
 }

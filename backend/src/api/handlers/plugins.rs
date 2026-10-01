@@ -12,16 +12,16 @@ use crate::api::models::{
 };
 use crate::api::require_admin;
 use crate::auth::middleware::AuthUser;
-use crate::core::error::{Result, TingError};
-use crate::core::signing::{
+use crate::core::app::error::{Result, TingError};
+use crate::core::security::signing::{
     DEFAULT_PLUGIN_ROUTE_SIGNATURE_TTL_SECONDS, MAX_PLUGIN_ROUTE_SIGNATURE_TTL_SECONDS,
     constant_time_eq, normalize_plugin_route_sign_path, sign_plugin_route_request,
     signature_expires_from_ttl, signature_has_expired,
 };
 use crate::db::repository::Repository;
 use crate::plugin::PluginHostUser;
+use crate::plugin::installer::tr_package::{self, TrPackageSignatureStatus};
 use crate::plugin::manager::capabilities::RegisteredCapability;
-use crate::plugin::tr_package::{self, TrPackageSignatureStatus};
 use crate::plugin::types::metadata::parse_plugin_metadata_content;
 use crate::plugin::types::{PluginCapability, PluginMetadata, PluginState};
 use axum::{
@@ -1387,7 +1387,7 @@ fn validate_public_plugin_route_access_with_revocations(
     route_path: &str,
     uri: &Uri,
     signing_key: &[u8; 32],
-    revocations: Option<&crate::core::signing::PluginRouteRevocations>,
+    revocations: Option<&crate::core::security::signing::PluginRouteRevocations>,
 ) -> Result<()> {
     match plugin_route_auth_policy(capability) {
         PluginRouteAuthPolicy::Public => {
@@ -1448,7 +1448,7 @@ fn validate_plugin_route_signature_with_revocations(
     route_path: &str,
     uri: &Uri,
     signing_key: &[u8; 32],
-    revocations: Option<&crate::core::signing::PluginRouteRevocations>,
+    revocations: Option<&crate::core::security::signing::PluginRouteRevocations>,
 ) -> Result<()> {
     let expires = query_param(uri, "expires")
         .ok_or_else(|| {

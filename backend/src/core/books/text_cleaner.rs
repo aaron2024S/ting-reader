@@ -10,7 +10,7 @@
 //!
 //! This is a core system feature, not implemented as a plugin.
 
-use crate::core::error::{Result, TingError};
+use crate::core::app::error::{Result, TingError};
 use regex::Regex;
 
 /// Text cleaner for chapter titles and filenames

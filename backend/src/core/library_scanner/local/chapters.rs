@@ -3,7 +3,7 @@ use super::super::shared::{
     apply_chapter_title_template, chapter_title_template_preserves_raw,
     clean_or_preserve_chapter_title,
 };
-use crate::core::error::{Result, TingError};
+use crate::core::app::error::{Result, TingError};
 use crate::db::models::Chapter;
 use crate::db::repository::Repository;
 use sha2::{Digest, Sha256};
@@ -20,7 +20,8 @@ pub(super) struct ChapterProcessingOptions<'a> {
     pub(super) extract_extra_chapters: bool,
     pub(super) cloud_mode: bool,
     pub(super) changed_file_paths: Option<&'a HashSet<PathBuf>>,
-    pub(super) json_chapters: Option<Vec<crate::core::metadata_writer::AudiobookshelfChapter>>,
+    pub(super) json_chapters:
+        Option<Vec<crate::core::books::metadata_writer::AudiobookshelfChapter>>,
     pub(super) chapter_title_template: Option<&'a str>,
     pub(super) chapter_title_overrides: Option<&'a [String]>,
 }
@@ -79,7 +80,7 @@ impl LibraryScanner {
                 .collect();
             if let Some(chapters) = json_chapters.take() {
                 let (aligned, matched_by_title) =
-                    crate::core::metadata_writer::align_chapters_to_file_stems(
+                    crate::core::books::metadata_writer::align_chapters_to_file_stems(
                         chapters,
                         &file_stems,
                     );

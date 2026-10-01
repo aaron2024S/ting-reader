@@ -1,6 +1,6 @@
 use super::runtime::WasmRuntime;
 use super::sandbox::Permission;
-use crate::core::error::{Result, TingError};
+use crate::core::app::error::{Result, TingError};
 use crate::plugin::types::{
     Plugin, PluginContext, PluginId, PluginInvocationContext, PluginMetadata,
 };
@@ -211,7 +211,7 @@ pub struct PluginState {
 
     /// User context scoped to the current plugin invocation
     pub(crate) current_user: Option<PluginHostUser>,
-    pub(crate) resources: Option<Arc<crate::plugin::resources::ResourceScope>>,
+    pub(crate) resources: Option<Arc<crate::plugin::host_api::resources::ResourceScope>>,
     pub(crate) unavailable: bool,
 
     /// Resource limiter for memory and compute

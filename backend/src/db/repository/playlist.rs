@@ -1,4 +1,4 @@
-use crate::core::error::{Result, TingError};
+use crate::core::app::error::{Result, TingError};
 use crate::db::manager::DatabaseManager;
 use crate::db::models::{Book, Playlist, PlaylistBook, PlaylistItem};
 use crate::db::repository::base::Repository;
