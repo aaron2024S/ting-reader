@@ -5,6 +5,7 @@ use ting_plugin_contract::format::FormatOperation;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
 const PRELOAD_WINDOW_BYTES: usize = 4 * 1024 * 1024;
+const PRELOAD_READ_BYTES: usize = 64 * 1024;
 const MAX_CACHE_BYTES: usize = 32 * 1024 * 1024;
 const CACHE_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 const MAX_CONCURRENT_PRELOADS: usize = 4;
@@ -219,15 +220,18 @@ async fn read_preload_prefix(
     reported_size: u64,
 ) -> std::io::Result<PreloadedChapter> {
     let mut total_size = (reported_size > 0).then_some(reported_size);
-    // Read only the window; a full window is not proof that the source ended.
-    // Fixed allocation keeps the in-flight memory budget independent of file size.
+    // An anonymous map releases its pages when the final Bytes owner drops,
+    // including on cancellation. Large Vec allocations can remain in allocator
+    // arenas after eviction and keep process RSS high across chapter switches.
     let limit = total_size
         .unwrap_or(PRELOAD_WINDOW_BYTES as u64)
         .min(PRELOAD_WINDOW_BYTES as u64) as usize;
-    let mut data = vec![0; limit];
+    let mut data = memmap2::MmapMut::map_anon(limit)?;
     let mut length = 0;
     while length < data.len() {
-        let read = reader.read(&mut data[length..]).await?;
+        // Bound the reader's own temporary buffers too (notably tokio::fs::File).
+        let end = (length + PRELOAD_READ_BYTES).min(data.len());
+        let read = reader.read(&mut data[length..end]).await?;
         if read == 0 {
             if total_size.is_some() {
                 return Err(std::io::Error::new(
@@ -236,14 +240,24 @@ async fn read_preload_prefix(
                 ));
             }
             total_size = Some(length as u64);
-            data.truncate(length);
             break;
         }
         length += read;
     }
+    let data = if length == 0 {
+        bytes::Bytes::new()
+    } else {
+        if length < data.len() {
+            // Unknown-length short sources must not retain an entire window.
+            let mut complete = memmap2::MmapMut::map_anon(length)?;
+            complete.copy_from_slice(&data[..length]);
+            data = complete;
+        }
+        // Response slices share the mapping until the last owner releases it.
+        bytes::Bytes::from_owner(data.make_read_only()?)
+    };
     Ok(PreloadedChapter {
-        // Release unused capacity for short sources so the byte budget is accurate.
-        data: bytes::Bytes::from(data.into_boxed_slice()),
+        data,
         total_size,
         last_access: std::time::Instant::now(),
     })
@@ -498,7 +512,111 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn preload_bounds_source_read_buffers() {
+        struct BoundedReader {
+            remaining: usize,
+        }
+        impl AsyncRead for BoundedReader {
+            fn poll_read(
+                mut self: std::pin::Pin<&mut Self>,
+                _: &mut std::task::Context<'_>,
+                buffer: &mut tokio::io::ReadBuf<'_>,
+            ) -> std::task::Poll<std::io::Result<()>> {
+                assert!(buffer.remaining() <= PRELOAD_READ_BYTES);
+                let count = buffer.remaining().min(self.remaining);
+                buffer.initialize_unfilled()[..count].fill(7);
+                buffer.advance(count);
+                self.remaining -= count;
+                std::task::Poll::Ready(Ok(()))
+            }
+        }
+
+        let mut reader = BoundedReader {
+            remaining: PRELOAD_WINDOW_BYTES + 10,
+        };
+        let cached = read_preload_prefix(&mut reader, 0).await.unwrap();
+        assert_eq!(cached.data.len(), PRELOAD_WINDOW_BYTES);
+        assert!(cached.data.iter().all(|byte| *byte == 7));
+        assert_eq!(reader.remaining, 10);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn mapped_prefix_releases_pages_after_last_response_or_cancellation() {
+        // Isolate address checks from mappings created by other concurrent tests.
+        const CHILD_ENV: &str = "TING_PRELOAD_MAPPING_TEST";
+        if std::env::var_os(CHILD_ENV).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "api::handlers::media::stream::preload::tests::mapped_prefix_releases_pages_after_last_response_or_cancellation",
+                    "--nocapture",
+                ])
+                .env(CHILD_ENV, "1")
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
+
+        fn mapped(address: usize) -> bool {
+            std::fs::read_to_string("/proc/self/maps")
+                .unwrap()
+                .lines()
+                .any(|line| {
+                    let range = line.split_whitespace().next().unwrap();
+                    let (start, end) = range.split_once('-').unwrap();
+                    let start = usize::from_str_radix(start, 16).unwrap();
+                    let end = usize::from_str_radix(end, 16).unwrap();
+                    start <= address && address < end
+                })
+        }
+
+        let source = vec![7; PRELOAD_WINDOW_BYTES];
+        let cached = read_preload_prefix(source.as_slice(), source.len() as u64)
+            .await
+            .unwrap();
+        let address = cached.data.as_ptr() as usize;
+        let response = cached.data.slice(1024..2048);
+        let mut cache = std::collections::HashMap::new();
+        cache.insert("chapter".into(), cached);
+        evict_expired_cache(&mut cache, std::time::Instant::now() + CACHE_IDLE_TIMEOUT);
+        assert!(cache.is_empty());
+        assert!(mapped(address));
+        assert!(response.iter().all(|byte| *byte == 7));
+        drop(response);
+        assert!(!mapped(address));
+
+        struct PendingReader(Arc<std::sync::atomic::AtomicUsize>);
+        impl AsyncRead for PendingReader {
+            fn poll_read(
+                self: std::pin::Pin<&mut Self>,
+                _: &mut std::task::Context<'_>,
+                buffer: &mut tokio::io::ReadBuf<'_>,
+            ) -> std::task::Poll<std::io::Result<()>> {
+                self.0.store(
+                    buffer.initialize_unfilled().as_ptr() as usize,
+                    Ordering::SeqCst,
+                );
+                std::task::Poll::Pending
+            }
+        }
+        let address = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut pending = Box::pin(read_preload_prefix(PendingReader(address.clone()), 0));
+        let waker = futures::task::noop_waker();
+        let mut context = std::task::Context::from_waker(&waker);
+        assert!(std::future::Future::poll(pending.as_mut(), &mut context).is_pending());
+        let address = address.load(Ordering::SeqCst);
+        assert!(mapped(address));
+        drop(pending);
+        assert!(!mapped(address));
+    }
+
+    #[tokio::test]
     async fn preload_distinguishes_complete_files_from_unknown_length_windows() {
+        let empty = read_preload_prefix(b"".as_slice(), 0).await.unwrap();
+        assert!(empty.data.is_empty());
+        assert_eq!(empty.total_size, Some(0));
         for reported_size in [0, 3] {
             let cached = read_preload_prefix(b"abc".as_slice(), reported_size)
                 .await

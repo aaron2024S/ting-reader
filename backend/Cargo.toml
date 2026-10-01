@@ -80,7 +80,8 @@ base64 = "0.21"
 # Audio Processing
 symphonia = { version = "0.5", default-features = false, features = ["mp3", "aac", "isomp4", "alac"] }
 id3 = "1.14"
-bytes = "1.5"
+bytes = "1.10.1"
+memmap2 = "0.9"
 
 # MIME type detection
 mime_guess = "2.0"
