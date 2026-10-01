@@ -4,10 +4,14 @@ use crate::api::handlers::media::stream::{
     get_hls_playlist, get_hls_segment, seek_hls_stream, stream_signed_chapter,
 };
 use crate::api::handlers::{
+    AppState,
+    COVER_BODY_LIMIT,
+    add_bookmark,
     add_favorite,
     apply_scrape_result,
     batch_delete_tasks,
     batch_update_chapters,
+    bookmark_books,
     // Cache management
     cache_chapter,
     call_plugin_route,
@@ -26,6 +30,7 @@ use crate::api::handlers::{
     create_series,
     create_user,
     delete_book,
+    delete_bookmark,
     delete_chapter_cache,
     delete_library,
     delete_notification_webhook,
@@ -34,6 +39,7 @@ use crate::api::handlers::{
     delete_series,
     delete_task,
     delete_user,
+    edit_bookmark,
     export_all_plugin_logs,
     export_plugin_logs,
     export_system_logs,
@@ -73,10 +79,14 @@ use crate::api::handlers::{
     get_user_settings,
     // System management endpoints
     health_check,
+    history_books,
+    history_chapters,
+    history_summary,
     install_plugin,
     install_store_plugin,
     invoke_plugin_capability,
     invoke_plugin_host,
+    list_bookmarks,
     list_books,
     list_libraries,
     list_notification_events,
@@ -90,6 +100,7 @@ use crate::api::handlers::{
     list_tasks,
     // User management (admin)
     list_users,
+    mark_books,
     merge_books,
     move_chapters,
     // Proxy API
@@ -118,15 +129,14 @@ use crate::api::handlers::{
     update_series,
     update_user,
     update_user_settings,
+    upload_book_cover,
     write_book_metadata_to_files,
-    AppState,
 };
 use crate::auth::handlers::{get_me, update_me};
 use crate::auth::middleware::authenticate;
 use axum::{
-    middleware,
+    Router, middleware,
     routing::{any, get, patch, post, put},
-    Router,
 };
 
 use axum::extract::DefaultBodyLimit;
@@ -195,6 +205,17 @@ pub fn build_api_routes(state: AppState) -> Router {
         .route("/api/progress/recent/delete", post(delete_progress_history))
         .route("/api/progress/:bookId", get(get_book_progress))
         .route("/api/progress", post(update_progress))
+        .route("/api/books/read-status", post(mark_books))
+        .route("/api/history/books", get(history_books))
+        .route("/api/history/summary", get(history_summary))
+        .route("/api/history/books/:bookId/chapters", get(history_chapters))
+        .route("/api/bookmarks/books", get(bookmark_books))
+        .route("/api/bookmarks/books/:bookId", get(list_bookmarks))
+        .route("/api/bookmarks", post(add_bookmark))
+        .route(
+            "/api/bookmarks/:id",
+            put(edit_bookmark).delete(delete_bookmark),
+        )
         // Favorites management endpoints
         .route("/api/favorites", get(get_favorites))
         .route(
@@ -259,6 +280,10 @@ pub fn build_api_routes(state: AppState) -> Router {
                 .delete(delete_book),
         )
         .route("/api/v1/books/:id/scrape-diff", post(scrape_book_diff))
+        .route(
+            "/api/v1/books/:id/cover",
+            post(upload_book_cover).layer(DefaultBodyLimit::max(COVER_BODY_LIMIT)),
+        )
         .route("/api/v1/books/:id/scrape-apply", post(apply_scrape_result))
         .route("/api/v1/books/merge", post(merge_books))
         .route("/api/v1/books/chapters/move", post(move_chapters))
@@ -368,6 +393,10 @@ pub fn build_api_routes(state: AppState) -> Router {
                 .delete(delete_book),
         )
         .route("/api/books/:id/scrape-diff", post(scrape_book_diff))
+        .route(
+            "/api/books/:id/cover",
+            post(upload_book_cover).layer(DefaultBodyLimit::max(COVER_BODY_LIMIT)),
+        )
         .route("/api/books/:id/scrape-apply", post(apply_scrape_result))
         .route("/api/books/merge", post(merge_books))
         .route("/api/books/chapters/move", post(move_chapters))

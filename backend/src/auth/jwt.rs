@@ -1,7 +1,7 @@
 //! JWT token generation and validation
 
 use crate::core::error::{Result, TingError};
-use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
+use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use serde::{Deserialize, Serialize};
 
 /// JWT Claims structure

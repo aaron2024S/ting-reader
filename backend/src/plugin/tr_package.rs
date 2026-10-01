@@ -711,6 +711,58 @@ fn hex_lower(bytes: &[u8]) -> String {
 }
 
 #[cfg(test)]
+mod official_package_tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires a released store artifact in TING_TEST_PLUGIN_STORE_PACKAGE"]
+    fn released_store_package_is_trusted() {
+        let package = std::env::var("TING_TEST_PLUGIN_STORE_PACKAGE")
+            .expect("TING_TEST_PLUGIN_STORE_PACKAGE must point to a released .tr package");
+        let package = Path::new(&package);
+        let contents = read_tr_package(package).unwrap();
+        assert_eq!(contents.manifest.plugin_id, "ting-reader-plugin-store");
+        assert_eq!(contents.manifest.plugin_version, "2.0.0");
+        assert!(matches!(
+            verify_tr_package_signature(package).unwrap(),
+            TrPackageSignatureStatus::Trusted { .. }
+        ));
+    }
+
+    /// Point TING_TEST_OFFICIAL_PACKAGES at the signed 2.0 release directory.
+    #[test]
+    fn signed_official_packages_are_trusted_and_have_matching_v2_manifests() {
+        let Ok(root) = std::env::var("TING_TEST_OFFICIAL_PACKAGES") else {
+            return;
+        };
+        let mut total = 0;
+        for entry in fs::read_dir(root).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("tr") {
+                continue;
+            }
+            let archive = read_tr_package(&path).unwrap();
+            assert_eq!(archive.manifest.plugin_version, "2.0.0");
+            let manifest: ting_plugin_contract::manifest::PluginManifest =
+                serde_yaml::from_slice(archive.files.get("plugin.yml").unwrap()).unwrap();
+            manifest.validate().unwrap();
+            assert_eq!(archive.manifest.plugin_id, manifest.id);
+            assert!(archive.files.contains_key(&archive.manifest.entry_point));
+            assert!(
+                matches!(
+                    verify_tr_package_signature(&path).unwrap(),
+                    TrPackageSignatureStatus::Trusted { .. }
+                ),
+                "Untrusted official artifact {}",
+                path.display()
+            );
+            total += 1;
+        }
+        assert_eq!(total, 21);
+    }
+}
+
+#[cfg(test)]
 mod package_limit_tests {
     use super::*;
 
@@ -726,9 +778,11 @@ mod package_limit_tests {
     #[test]
     fn rejects_oversized_single_file() {
         let mut budget = PackageReadBudget::default();
-        assert!(budget
-            .record_file("plugin.bin", MAX_PACKAGE_SINGLE_FILE_BYTES + 1)
-            .is_err());
+        assert!(
+            budget
+                .record_file("plugin.bin", MAX_PACKAGE_SINGLE_FILE_BYTES + 1)
+                .is_err()
+        );
     }
 
     #[test]

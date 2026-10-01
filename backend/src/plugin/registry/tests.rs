@@ -1,5 +1,5 @@
 use super::*;
-use crate::plugin::types::{PluginDependency, PluginMetadata, PluginType};
+use crate::plugin::types::{PluginDependency, PluginMetadata};
 use std::sync::Arc;
 
 // Mock plugin for testing
@@ -20,22 +20,13 @@ impl Plugin for MockPlugin {
     async fn shutdown(&self) -> Result<()> {
         Ok(())
     }
-
-    fn plugin_type(&self) -> PluginType {
-        self.metadata.plugin_type
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
 }
 
 fn create_test_plugin(name: &str, version: &str) -> (PluginMetadata, Arc<dyn Plugin>) {
     let metadata = PluginMetadata::new(
-        format!("{}@{}", name, version),
+        name.to_string(),
         name.to_string(),
         version.to_string(),
-        PluginType::Utility,
         "Test Author".to_string(),
         "Test plugin".to_string(),
         "test.wasm".to_string(),
@@ -95,16 +86,28 @@ fn test_unregister_nonexistent_plugin() {
 }
 
 #[test]
-fn test_find_by_type() {
+fn test_find_by_declared_capability() {
     let mut registry = PluginRegistry::new();
-    let (metadata1, instance1) = create_test_plugin("plugin1", "1.0.0");
+    let (mut metadata1, instance1) = create_test_plugin("plugin1", "1.0.0");
     let (metadata2, instance2) = create_test_plugin("plugin2", "1.0.0");
+    metadata1.capabilities.push(
+        serde_json::from_value(serde_json::json!({
+            "id": "store", "kind": "plugin_store", "operations": ["list_plugins"]
+        }))
+        .unwrap(),
+    );
 
     registry.register(metadata1, instance1).unwrap();
     registry.register(metadata2, instance2).unwrap();
 
-    let plugins = registry.find_by_type(PluginType::Utility);
-    assert_eq!(plugins.len(), 2);
+    let plugins = registry.find_by_capability_kind("plugin_store");
+    assert_eq!(plugins.len(), 1);
+    assert_eq!(plugins[0].metadata.id, "plugin1");
+    assert!(
+        registry
+            .find_by_capability_kind("format_handler")
+            .is_empty()
+    );
 }
 
 #[test]
@@ -125,10 +128,9 @@ fn test_dependency_check_missing() {
     let registry = PluginRegistry::new();
 
     let mut metadata = PluginMetadata::new(
-        "dependent-plugin@1.0.0".to_string(),
+        "dependent-plugin".to_string(),
         "dependent-plugin".to_string(),
         "1.0.0".to_string(),
-        PluginType::Utility,
         "Test".to_string(),
         "Test".to_string(),
         "test.wasm".to_string(),
@@ -153,10 +155,9 @@ fn test_dependency_check_satisfied() {
 
     // Create dependent plugin
     let mut metadata = PluginMetadata::new(
-        "dependent-plugin@1.0.0".to_string(),
+        "dependent-plugin".to_string(),
         "dependent-plugin".to_string(),
         "1.0.0".to_string(),
-        PluginType::Utility,
         "Test".to_string(),
         "Test".to_string(),
         "test.wasm".to_string(),
@@ -181,10 +182,9 @@ fn test_unregister_with_dependents() {
 
     // Register dependent plugin
     let mut dep_metadata = PluginMetadata::new(
-        "dependent-plugin@1.0.0".to_string(),
+        "dependent-plugin".to_string(),
         "dependent-plugin".to_string(),
         "1.0.0".to_string(),
-        PluginType::Utility,
         "Test".to_string(),
         "Test".to_string(),
         "test.wasm".to_string(),
@@ -212,10 +212,9 @@ fn test_get_dependents() {
 
     // Register dependent plugin
     let mut dep_metadata = PluginMetadata::new(
-        "dependent-plugin@1.0.0".to_string(),
+        "dependent-plugin".to_string(),
         "dependent-plugin".to_string(),
         "1.0.0".to_string(),
-        PluginType::Utility,
         "Test".to_string(),
         "Test".to_string(),
         "test.wasm".to_string(),
@@ -244,10 +243,9 @@ fn test_semver_caret_requirement() {
 
     // Create dependent plugin with caret requirement ^1.0.0
     let mut dep_metadata = PluginMetadata::new(
-        "dependent-plugin@1.0.0".to_string(),
+        "dependent-plugin".to_string(),
         "dependent-plugin".to_string(),
         "1.0.0".to_string(),
-        PluginType::Utility,
         "Test".to_string(),
         "Test".to_string(),
         "test.wasm".to_string(),
@@ -272,10 +270,9 @@ fn test_semver_caret_requirement_fails() {
 
     // Create dependent plugin with caret requirement ^1.0.0
     let mut dep_metadata = PluginMetadata::new(
-        "dependent-plugin@1.0.0".to_string(),
+        "dependent-plugin".to_string(),
         "dependent-plugin".to_string(),
         "1.0.0".to_string(),
-        PluginType::Utility,
         "Test".to_string(),
         "Test".to_string(),
         "test.wasm".to_string(),
@@ -300,10 +297,9 @@ fn test_semver_tilde_requirement() {
 
     // Create dependent plugin with tilde requirement ~1.2.0
     let mut dep_metadata = PluginMetadata::new(
-        "dependent-plugin@1.0.0".to_string(),
+        "dependent-plugin".to_string(),
         "dependent-plugin".to_string(),
         "1.0.0".to_string(),
-        PluginType::Utility,
         "Test".to_string(),
         "Test".to_string(),
         "test.wasm".to_string(),
@@ -328,10 +324,9 @@ fn test_semver_range_requirement() {
 
     // Create dependent plugin with range requirement >=1.2.0, <2.0.0
     let mut dep_metadata = PluginMetadata::new(
-        "dependent-plugin@1.0.0".to_string(),
+        "dependent-plugin".to_string(),
         "dependent-plugin".to_string(),
         "1.0.0".to_string(),
-        PluginType::Utility,
         "Test".to_string(),
         "Test".to_string(),
         "test.wasm".to_string(),
@@ -394,10 +389,9 @@ fn test_get_dependencies() {
 
     // Register dependent plugin
     let mut dep_metadata = PluginMetadata::new(
-        "dependent@1.0.0".to_string(),
+        "dependent".to_string(),
         "dependent".to_string(),
         "1.0.0".to_string(),
-        PluginType::Utility,
         "Test".to_string(),
         "Test".to_string(),
         "test.wasm".to_string(),
@@ -431,10 +425,9 @@ fn test_get_all_dependencies_transitive() {
 
     // Register middle plugin that depends on base
     let mut middle_meta = PluginMetadata::new(
-        "middle@1.0.0".to_string(),
+        "middle".to_string(),
         "middle".to_string(),
         "1.0.0".to_string(),
-        PluginType::Utility,
         "Test".to_string(),
         "Test".to_string(),
         "test.wasm".to_string(),
@@ -448,10 +441,9 @@ fn test_get_all_dependencies_transitive() {
 
     // Register top plugin that depends on middle
     let mut top_meta = PluginMetadata::new(
-        "top@1.0.0".to_string(),
+        "top".to_string(),
         "top".to_string(),
         "1.0.0".to_string(),
-        PluginType::Utility,
         "Test".to_string(),
         "Test".to_string(),
         "test.wasm".to_string(),
@@ -480,10 +472,9 @@ fn test_get_all_dependents_transitive() {
 
     // Register middle plugin that depends on base
     let mut middle_meta = PluginMetadata::new(
-        "middle@1.0.0".to_string(),
+        "middle".to_string(),
         "middle".to_string(),
         "1.0.0".to_string(),
-        PluginType::Utility,
         "Test".to_string(),
         "Test".to_string(),
         "test.wasm".to_string(),
@@ -497,10 +488,9 @@ fn test_get_all_dependents_transitive() {
 
     // Register top plugin that depends on middle
     let mut top_meta = PluginMetadata::new(
-        "top@1.0.0".to_string(),
+        "top".to_string(),
         "top".to_string(),
         "1.0.0".to_string(),
-        PluginType::Utility,
         "Test".to_string(),
         "Test".to_string(),
         "test.wasm".to_string(),
@@ -529,10 +519,9 @@ fn test_validate_dependency_graph_valid() {
 
     // Register dependent plugin
     let mut dep_meta = PluginMetadata::new(
-        "dependent@1.0.0".to_string(),
+        "dependent".to_string(),
         "dependent".to_string(),
         "1.0.0".to_string(),
-        PluginType::Utility,
         "Test".to_string(),
         "Test".to_string(),
         "test.wasm".to_string(),
@@ -559,10 +548,9 @@ fn test_circular_dependency_detection() {
 
     // Register plugin B that depends on A
     let mut b_meta = PluginMetadata::new(
-        "plugin-b@1.0.0".to_string(),
+        "plugin-b".to_string(),
         "plugin-b".to_string(),
         "1.0.0".to_string(),
-        PluginType::Utility,
         "Test".to_string(),
         "Test".to_string(),
         "test.wasm".to_string(),
@@ -576,10 +564,9 @@ fn test_circular_dependency_detection() {
 
     // Try to register plugin C that depends on B
     let mut c_meta = PluginMetadata::new(
-        "plugin-c@1.0.0".to_string(),
+        "plugin-c".to_string(),
         "plugin-c".to_string(),
         "1.0.0".to_string(),
-        PluginType::Utility,
         "Test".to_string(),
         "Test".to_string(),
         "test.wasm".to_string(),
@@ -621,10 +608,9 @@ fn test_load_order_respects_dependencies() {
 
     // Register middle plugin
     let mut middle_meta = PluginMetadata::new(
-        "middle@1.0.0".to_string(),
+        "middle".to_string(),
         "middle".to_string(),
         "1.0.0".to_string(),
-        PluginType::Utility,
         "Test".to_string(),
         "Test".to_string(),
         "test.wasm".to_string(),
@@ -638,10 +624,9 @@ fn test_load_order_respects_dependencies() {
 
     // Register top plugin
     let mut top_meta = PluginMetadata::new(
-        "top@1.0.0".to_string(),
+        "top".to_string(),
         "top".to_string(),
         "1.0.0".to_string(),
-        PluginType::Utility,
         "Test".to_string(),
         "Test".to_string(),
         "test.wasm".to_string(),

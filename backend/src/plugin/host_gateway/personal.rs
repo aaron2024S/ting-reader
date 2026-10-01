@@ -1,4 +1,4 @@
-use super::{required_string_param, string_param, usize_param, PluginHostGateway, PluginHostUser};
+use super::{PluginHostGateway, PluginHostUser, required_string_param, string_param, usize_param};
 use crate::core::error::{Result, TingError};
 use crate::db::models::{Favorite, Playlist, PlaylistItem, UserSettings};
 use crate::db::repository::Repository;

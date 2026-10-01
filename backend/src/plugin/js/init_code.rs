@@ -122,6 +122,13 @@ pub fn generate_init_code(
             pluginName: "{plugin_name}",
             config: {config_json},
 
+            resources: Object.freeze({{
+                invoke: (operation, input = {{}}) => Deno.core.ops.op_host_invoke("resources." + operation, input),
+                chunkCreate: (bytes) => Deno.core.ops.op_chunk_create(bytes),
+                chunkCopy: (id) => Deno.core.ops.op_chunk_copy(id),
+                writeAt: (resource, offset, bytes) => Deno.core.ops.op_resource_write(resource, offset, bytes),
+            }}),
+
             // Sandbox information
             sandbox: {{
                 allowedPaths: {paths_json},
@@ -142,15 +149,17 @@ pub fn generate_init_code(
                 return config[key] ?? null;
             }},
 
-            // Event bus (placeholder)
+            // Events are delivered through the declared Host event gateway.
             events: {{
-                publish: (eventType, data) => {{
-                    console.log(`[EVENT] [{plugin_name}] Publishing: ${{eventType}}`);
-                    return true;
-                }},
-                subscribe: (eventType, handler) => {{
-                    console.log(`[EVENT] [{plugin_name}] Subscribing to: ${{eventType}}`);
-                    return `sub_{plugin_name}_${{eventType}}`;
+                publish: async (eventType, data) =>
+                    await Ting.host.invoke("events.publish", {{
+                        event: eventType,
+                        data: data ?? null,
+                    }}),
+                subscribe: () => {{
+                    throw new Error(
+                        "Dynamic event subscriptions are unavailable; declare an event_handler capability",
+                    );
                 }},
             }},
 
@@ -166,9 +175,6 @@ pub fn generate_init_code(
                 }},
             }},
 
-            npm: {{
-                require: (name) => globalThis.require(name),
-            }},
         }};
 
         // Preserve familiar console APIs while binding log identity in the host.
@@ -176,41 +182,6 @@ pub fn generate_init_code(
         globalThis.console.debug = (...args) => __tingWriteConsole("debug", args);
         globalThis.console.warn = (...args) => __tingWriteConsole("warn", args);
         globalThis.console.error = (...args) => __tingWriteConsole("error", args);
-
-        const __tingModuleCache = new Map();
-        function __tingRequire(request, parentPath) {{
-            if (!request || typeof request !== 'string') {{
-                throw new Error("require() needs a module name");
-            }}
-            const moduleInfo = Deno.core.ops.op_require_module(request, parentPath || "");
-            if (__tingModuleCache.has(moduleInfo.id)) {{
-                return __tingModuleCache.get(moduleInfo.id).exports;
-            }}
-
-            const module = {{
-                id: moduleInfo.id,
-                filename: moduleInfo.filename,
-                exports: {{}},
-                loaded: false,
-            }};
-            __tingModuleCache.set(moduleInfo.id, module);
-
-            const localRequire = (childRequest) => __tingRequire(childRequest, moduleInfo.filename);
-            localRequire.cache = __tingModuleCache;
-
-            const wrapped = new Function(
-                "exports",
-                "require",
-                "module",
-                "__filename",
-                "__dirname",
-                moduleInfo.code + "\n//# sourceURL=" + moduleInfo.filename
-            );
-            wrapped(module.exports, localRequire, module, moduleInfo.filename, moduleInfo.dirname);
-            module.loaded = true;
-            return module.exports;
-        }}
-        globalThis.require = (request) => __tingRequire(request, "");
 
         function safeNetworkTarget(url) {{
             try {{
@@ -221,55 +192,53 @@ pub fn generate_init_code(
             }}
         }}
 
-        // Override fetch to enforce network access control
-        globalThis.fetch = async function(url, options) {{
-            const urlStr = typeof url === 'string' ? url : url.toString();
-            const logTarget = safeNetworkTarget(urlStr);
-            Ting.log.info('fetch request', {{ op: 'fetch.request', target: logTarget }});
-
-            // Check if URL is allowed
-            const allowedDomains = Ting.sandbox.allowedDomains;
-            const domain = extractDomain(urlStr);
-            const isAllowed = allowedDomains.length > 0 &&
-                allowedDomains.some(pattern => domainMatches(domain, pattern));
-
-            if (!isAllowed) {{
-                throw new Error(`Network access denied for domain: ${{domain || '<invalid>'}}`);
-            }}
-
-            try {{
-                const responseText = await Deno.core.ops.op_fetch(urlStr, options);
-                Ting.log.info('fetch completed', {{ op: 'fetch.complete', target: logTarget }});
-                return {{
-                    ok: true,
-                    status: 200,
-                    statusText: "OK",
-                    text: async () => responseText,
-                    json: async () => JSON.parse(responseText),
-                    headers: new Headers(),
-                }};
-            }} catch (e) {{
-                throw e;
-            }}
+        // fetch uses the same authoritative Host HTTP service as Rust SDKs.
+        globalThis.fetch = async function(url, options = {{}}) {{
+            const result = await Ting.host.invoke("http.request", {{
+                url: typeof url === 'string' ? url : url.toString(),
+                method: options.method || 'GET',
+                headers: options.headers || {{}},
+                body: options.body ?? null,
+                timeout_ms: options.timeout_ms ?? 30000,
+            }});
+            let bytesPromise;
+            const readBytes = () => bytesPromise ||= (async () => {{
+                if (!Number.isSafeInteger(result.length) || result.length < 0 || result.length > 8 * 1024 * 1024) {{
+                    throw new RangeError('Invalid HTTP response length');
+                }}
+                const bytes = new Uint8Array(result.length);
+                let offset = 0;
+                try {{
+                    while (offset < bytes.length) {{
+                        const read = await Ting.resources.invoke('read_at', {{
+                            resource: result.resource, offset,
+                            max_bytes: Math.min(256 * 1024, bytes.length - offset),
+                        }});
+                        try {{
+                            const chunk = Ting.resources.chunkCopy(read.chunk);
+                            if (!chunk.length || chunk.length !== read.bytes || chunk.length > bytes.length - offset) {{
+                                throw new Error('HTTP response was truncated');
+                            }}
+                            bytes.set(chunk, offset);
+                            offset += chunk.length;
+                        }} finally {{
+                            await Ting.resources.invoke('release_chunk', {{ chunk: read.chunk }});
+                        }}
+                    }}
+                    return bytes;
+                }} finally {{
+                    await Ting.resources.invoke('close', {{ resource: result.resource }});
+                }}
+            }})();
+            return {{
+                ok: result.status >= 200 && result.status < 300,
+                status: result.status,
+                headers: new Headers(result.headers),
+                text: async () => Deno.core.ops.op_decode_utf8(await readBytes()),
+                json: async () => JSON.parse(Deno.core.ops.op_decode_utf8(await readBytes())),
+                arrayBuffer: async () => (await readBytes()).buffer,
+            }};
         }};
-
-        // Helper function to extract domain from URL
-        function extractDomain(url) {{
-            const matches = url.match(/^https?:\/\/([^/?#]+)(?:[/?#]|$)/i);
-            return matches ? matches[1] : '';
-        }}
-
-        // Helper function to check if domain matches pattern (supports wildcards)
-        function domainMatches(domain, pattern) {{
-            if (pattern === '*') {{
-                return true;
-            }} else if (pattern.startsWith('*.')) {{
-                const base = pattern.substring(2);
-                return domain.endsWith(base) || domain === base;
-            }} else {{
-                return domain === pattern;
-            }}
-        }}
 
         // Helper for invoking functions from Rust without recompiling scripts
         globalThis._ting_invoke = async function(funcName, args) {{
@@ -307,14 +276,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn generated_fetch_denies_network_when_no_domains_are_allowed() {
-        let code = generate_init_code("test-plugin", &serde_json::json!({}), &[], &[]);
-
-        assert!(code.contains("const isAllowed = allowedDomains.length > 0 &&"));
-        assert!(code.contains("Network access denied"));
-    }
-
-    #[test]
     fn generated_ting_host_get_context_is_scoped_to_invocation_args() {
         let code = generate_init_code("test-plugin", &serde_json::json!({}), &[], &[]);
 
@@ -339,5 +300,14 @@ mod tests {
         assert!(code.contains("info: (message, fields)"));
         assert!(code.contains("globalThis.console.log = (...args)"));
         assert!(!code.contains("[INFO] [test-plugin]"));
+    }
+
+    #[test]
+    fn generated_events_use_host_gateway_without_fake_subscriptions() {
+        let code = generate_init_code("test-plugin", &serde_json::json!({}), &[], &[]);
+
+        assert!(code.contains("Ting.host.invoke(\"events.publish\""));
+        assert!(code.contains("Dynamic event subscriptions are unavailable"));
+        assert!(!code.contains("sub_test-plugin_"));
     }
 }

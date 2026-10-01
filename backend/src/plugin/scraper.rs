@@ -1,84 +1,6 @@
-//! Scraper plugin interface
-//!
-//! This module defines the interface for scraper plugins that fetch book metadata
-//! and resources from external platforms.
-//!
-//! Scraper plugins must implement the `ScraperPlugin` trait in addition to the base
-//! `Plugin` trait. They provide functionality for:
-//! - Searching for books by keyword
-//! - Getting chapter lists
-//! - Downloading cover images
-//! - Getting audio download URLs
+//! Search-facing business DTOs. Plugin wire DTOs are defined in ting-plugin-contract.
 
-use super::Plugin;
-use crate::core::error::Result;
-use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-
-/// Scraper plugin trait
-///
-/// All scraper plugins must implement this trait to provide book metadata
-/// fetching functionality from external sources.
-#[async_trait]
-pub trait ScraperPlugin: Plugin {
-    /// Search for books by keyword
-    ///
-    /// # Arguments
-    /// * `query` - Search keyword
-    /// * `author` - Optional author name for filtering
-    /// * `narrator` - Optional narrator name for filtering
-    /// * `page` - Page number (1-indexed)
-    ///
-    /// # Returns
-    /// Search results containing a list of books and pagination info
-    ///
-    /// # Errors
-    /// Returns an error if the search fails or the network request fails
-    async fn search(
-        &self,
-        query: &str,
-        author: Option<&str>,
-        narrator: Option<&str>,
-        page: u32,
-    ) -> Result<SearchResult>;
-
-    /// Get the list of chapters for a book
-    ///
-    /// # Arguments
-    /// * `book_id` - Unique identifier of the book on the source platform
-    ///
-    /// # Returns
-    /// List of chapters with their metadata
-    ///
-    /// # Errors
-    /// Returns an error if the book is not found or the request fails
-    async fn get_chapters(&self, book_id: &str) -> Result<Vec<Chapter>>;
-
-    /// Download a cover image
-    ///
-    /// # Arguments
-    /// * `cover_url` - URL of the cover image
-    ///
-    /// # Returns
-    /// Raw image data as bytes
-    ///
-    /// # Errors
-    /// Returns an error if the download fails or the URL is invalid
-    async fn download_cover(&self, cover_url: &str) -> Result<Vec<u8>>;
-
-    /// Get the audio download URL for a chapter
-    ///
-    /// # Arguments
-    /// * `chapter_id` - Unique identifier of the chapter on the source platform
-    ///
-    /// # Returns
-    /// Direct download URL for the audio file
-    ///
-    /// # Errors
-    /// Returns an error if the chapter is not found or the request fails
-    async fn get_audio_url(&self, chapter_id: &str) -> Result<String>;
-}
 
 /// Search result containing a list of books and pagination information
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -87,7 +9,10 @@ pub struct SearchResult {
     pub items: Vec<BookItem>,
 
     /// Total number of results available
-    pub total: u32,
+    pub total: Option<u64>,
+
+    /// Whether the source knows another page exists.
+    pub has_more: Option<bool>,
 
     /// Current page number (1-indexed)
     pub page: u32,
@@ -101,9 +26,14 @@ pub struct SearchResult {
 /// Contains basic information about a book, typically shown in search results
 /// or book lists.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BookItem {
     /// Unique identifier on the source platform
-    pub id: String,
+    pub id: Option<String>,
+
+    /// Source URL when the source has no stable platform identifier.
+    #[serde(default)]
+    pub source_url: Option<String>,
 
     /// Book title
     #[serde(default)]
@@ -181,9 +111,8 @@ pub struct BookItem {
     #[serde(default)]
     pub chapter_titles: Vec<String>,
 
-    /// Additional plugin-specific metadata fields.
-    #[serde(flatten)]
-    pub extra: HashMap<String, serde_json::Value>,
+    #[serde(default)]
+    pub score: Option<f64>,
 }
 
 /// Detailed book information
@@ -193,7 +122,7 @@ pub struct BookItem {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BookDetail {
     /// Unique identifier on the source platform
-    pub id: String,
+    pub id: Option<String>,
 
     /// Book title
     pub title: String,
@@ -308,7 +237,8 @@ mod tests {
     fn test_search_result_serialization() {
         let result = SearchResult {
             items: vec![BookItem {
-                id: "123".to_string(),
+                id: Some("123".to_string()),
+                source_url: None,
                 title: "Test Book".to_string(),
                 author: "Test Author".to_string(),
                 cover_url: Some("https://example.com/cover.jpg".to_string()),
@@ -328,9 +258,10 @@ mod tests {
                 duration: None,
                 chapter_title_template: None,
                 chapter_titles: vec![],
-                extra: HashMap::new(),
+                score: None,
             }],
-            total: 100,
+            total: Some(100),
+            has_more: Some(true),
             page: 1,
             page_size: 20,
         };
@@ -339,14 +270,14 @@ mod tests {
         let deserialized: SearchResult = serde_json::from_str(&json).unwrap();
 
         assert_eq!(deserialized.items.len(), 1);
-        assert_eq!(deserialized.total, 100);
+        assert_eq!(deserialized.total, Some(100));
         assert_eq!(deserialized.page, 1);
     }
 
     #[test]
     fn test_book_detail_serialization() {
         let detail = BookDetail {
-            id: "456".to_string(),
+            id: Some("456".to_string()),
             title: "Test Book".to_string(),
             author: "Test Author".to_string(),
             narrator: Some("Test Narrator".to_string()),
@@ -372,7 +303,7 @@ mod tests {
         let json = serde_json::to_string(&detail).unwrap();
         let deserialized: BookDetail = serde_json::from_str(&json).unwrap();
 
-        assert_eq!(deserialized.id, "456");
+        assert_eq!(deserialized.id.as_deref(), Some("456"));
         assert_eq!(deserialized.chapter_count, 50);
         assert_eq!(deserialized.tags.len(), 2);
         assert_eq!(deserialized.chapter_titles.len(), 2);

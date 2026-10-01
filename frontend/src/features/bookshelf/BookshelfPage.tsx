@@ -9,7 +9,7 @@ import SeriesModal from '../../shared/modals/SeriesModal';
 import DeleteBookModal from './bookDetail/DeleteBookModal';
 import DeleteSeriesModal from './bookDetail/DeleteSeriesModal';
 import DisplaySettingsMenu from '../../shared/widgets/DisplaySettingsMenu';
-import { Search, Database, Plus, Library as LibraryIcon, Layers, Check, X, CheckSquare, ChevronDown, Trash2 } from 'lucide-react';
+import { Search, Database, Plus, Library as LibraryIcon, Layers, Check, X, CheckSquare, ChevronDown, Trash2, BookCheck, BookX } from 'lucide-react';
 import { usePlayerStore } from '../../core/stores/playerStore';
 import { useAuthStore } from '../../core/stores/authStore';
 import { getPinyinInitial } from '../../core/utils/pinyin';
@@ -47,6 +47,17 @@ const BookshelfPage: React.FC = () => {
   const [deletingBooks, setDeletingBooks] = useState(false);
   const [deletingSeries, setDeletingSeries] = useState(false);
   const [deleteSourceFiles, setDeleteSourceFiles] = useState(false);
+  const [savingReadStatus, setSavingReadStatus] = useState(false);
+  const [confirmUnread, setConfirmUnread] = useState(false);
+
+  useEffect(() => {
+    if (!confirmUnread) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !savingReadStatus) setConfirmUnread(false);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [confirmUnread, savingReadStatus]);
 
   // Lazy loading state
   const [visibleCount, setVisibleCount] = useState(50);
@@ -248,6 +259,24 @@ const BookshelfPage: React.FC = () => {
     } else {
       setSelectedBookIds(filteredBooks.map(b => b.id));
       setSelectedSeriesIds(filteredSeries.map(s => s.id));
+    }
+  };
+
+  const handleMarkRead = async (read: boolean) => {
+    if (selectedBookIds.length === 0 || savingReadStatus) return;
+    setSavingReadStatus(true);
+    try {
+      for (let offset = 0; offset < selectedBookIds.length; offset += 200) {
+        await apiClient.post('/api/books/read-status', { book_ids: selectedBookIds.slice(offset, offset + 200), read });
+      }
+      setConfirmUnread(false);
+      await fetchData();
+      setSelectedBookIds([]);
+    } catch (err) {
+      console.error('Failed to update book read status', err);
+      alert(t('common.saveFailed'));
+    } finally {
+      setSavingReadStatus(false);
     }
   };
 
@@ -494,20 +523,22 @@ const BookshelfPage: React.FC = () => {
                   <CheckSquare size={18} />
                   <span>{t('bookshelf.selectAll')}</span>
                 </button>
-                {isAdmin && (
                   <div className="relative operations-dropdown-container">
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
                         setIsOperationsOpen(!isOperationsOpen);
                       }}
+                      aria-haspopup="menu"
+                      aria-expanded={isOperationsOpen}
+                      disabled={savingReadStatus}
                       className="flex items-center gap-2 px-3 sm:px-4 py-2 bg-primary-600 hover:bg-primary-700 text-white rounded-xl text-sm font-bold shadow-lg shadow-primary-500/30 whitespace-nowrap shrink-0 transition-all active:scale-95"
                     >
                       <span>{t('bookshelf.batchOperations', '操作')}</span>
                       <ChevronDown size={14} className={`transition-transform duration-200 ${isOperationsOpen ? 'rotate-180' : ''}`} />
                     </button>
                     {isOperationsOpen && (
-                      <div className="absolute right-0 top-full mt-2 w-48 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-2xl z-50 overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+                      <div role="menu" className="absolute right-0 top-full mt-2 w-60 max-w-[calc(100vw-2rem)] bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-2xl z-50 overflow-hidden animate-in fade-in zoom-in-95 duration-200">
                         <div className="p-1.5 space-y-1">
                           {selectedBookIds.length === 0 && selectedSeriesIds.length === 0 ? (
                             <div className="px-4 py-3 text-xs text-center text-slate-400 dark:text-slate-500 font-medium">
@@ -516,6 +547,33 @@ const BookshelfPage: React.FC = () => {
                           ) : (
                             <>
                               <button
+                                role="menuitem"
+                                onClick={() => {
+                                  setIsOperationsOpen(false);
+                                  void handleMarkRead(true);
+                                }}
+                                disabled={selectedBookIds.length === 0 || savingReadStatus}
+                                className="w-full text-left px-4 py-2.5 text-sm font-semibold rounded-xl transition-colors text-slate-700 hover:bg-slate-50 dark:text-slate-200 dark:hover:bg-slate-800 flex items-center gap-2 disabled:opacity-50"
+                              >
+                                <BookCheck size={16} />
+                                <span>{t('bookshelf.markRead')}</span>
+                              </button>
+                              <button
+                                role="menuitem"
+                                onClick={() => {
+                                  setIsOperationsOpen(false);
+                                  setConfirmUnread(true);
+                                }}
+                                disabled={selectedBookIds.length === 0 || savingReadStatus}
+                                className="w-full text-left px-4 py-2.5 text-sm font-semibold rounded-xl transition-colors text-slate-700 hover:bg-slate-50 dark:text-slate-200 dark:hover:bg-slate-800 flex items-center gap-2 disabled:opacity-50"
+                              >
+                                <BookX size={16} />
+                                <span>{t('bookshelf.markUnread')}</span>
+                              </button>
+                              {isAdmin && <>
+                              <div className="mx-3 my-1 border-t border-slate-100 dark:border-slate-800" />
+                              <button
+                                role="menuitem"
                                 onClick={() => {
                                   setIsOperationsOpen(false);
                                   setIsSeriesModalOpen(true);
@@ -527,6 +585,7 @@ const BookshelfPage: React.FC = () => {
                                 <span>{t('bookshelf.createSeries')}</span>
                               </button>
                               <button
+                                role="menuitem"
                                 onClick={() => {
                                   setIsOperationsOpen(false);
                                   handleDeleteClick();
@@ -536,13 +595,13 @@ const BookshelfPage: React.FC = () => {
                                 <Trash2 size={16} />
                                 <span>{t('common.delete')}</span>
                               </button>
+                              </>}
                             </>
                           )}
                         </div>
                       </div>
                     )}
                   </div>
-                )}
                 <button
                   onClick={exitSelectionMode}
                   className="p-2.5 bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 rounded-xl shrink-0"
@@ -551,7 +610,7 @@ const BookshelfPage: React.FC = () => {
                 </button>
               </div>
             ) : (
-              isAdmin && (
+              (
                 <button
                   onClick={() => setIsSelectionMode(true)}
                   className="flex items-center gap-2 px-3 sm:px-4 py-2.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors text-sm font-medium shrink-0 order-1"
@@ -822,6 +881,20 @@ const BookshelfPage: React.FC = () => {
       </div>
 
       {/* Series Creation Modal */}
+      {confirmUnread && (
+        <div className="fixed inset-0 z-[400] flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm" onMouseDown={(event) => { if (event.target === event.currentTarget && !savingReadStatus) setConfirmUnread(false); }}>
+          <section role="dialog" aria-modal="true" aria-labelledby="mark-unread-title" aria-describedby="mark-unread-description" className="w-full max-w-md rounded-3xl border border-slate-100 bg-white p-6 shadow-xl dark:border-slate-800 dark:bg-slate-900">
+            <div className="mb-4 flex h-11 w-11 items-center justify-center rounded-2xl bg-primary-50 text-primary-600 dark:bg-primary-950/50 dark:text-primary-400"><BookX size={22} /></div>
+            <h2 id="mark-unread-title" className="text-lg font-bold text-slate-900 dark:text-white">{t('bookshelf.confirmUnreadTitle')}</h2>
+            <p id="mark-unread-description" className="mt-2 text-sm leading-relaxed text-slate-500 dark:text-slate-400">{t('bookshelf.confirmUnreadMessage', { count: selectedBookIds.length })}</p>
+            <div className="mt-6 flex justify-end gap-3">
+              <button autoFocus onClick={() => setConfirmUnread(false)} disabled={savingReadStatus} className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-medium text-slate-600 disabled:opacity-50 dark:border-slate-700 dark:text-slate-300">{t('common.cancel')}</button>
+              <button onClick={() => void handleMarkRead(false)} disabled={savingReadStatus} className="rounded-xl bg-primary-600 px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-primary-700 disabled:opacity-50">{savingReadStatus ? t('common.loading') : t('bookshelf.markUnread')}</button>
+            </div>
+          </section>
+        </div>
+      )}
+
       <SeriesModal
         isOpen={isSeriesModalOpen}
         onClose={() => setIsSeriesModalOpen(false)}

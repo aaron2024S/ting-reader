@@ -9,6 +9,7 @@ on:
 env:
   FNPACK_VERSION: "1.2.3"
   FYGOPACK_VERSION: "1.2.3"
+  TING_PLUGIN_STORE_VERSION: "2.0.0"
 
 jobs:
   prepare:
@@ -73,6 +74,8 @@ jobs:
           context: .
           file: ./Dockerfile
           platforms: ${{ matrix.platform }}
+          build-args: |
+            TING_PLUGIN_STORE_VERSION=${{ env.TING_PLUGIN_STORE_VERSION }}
           outputs: type=image,name=dqsq2e2/ting-reader,push-by-digest=true,name-canonical=true,push=true
           cache-from: type=gha,scope=build-${{ matrix.platform }}
           cache-to: type=gha,mode=max,scope=build-${{ matrix.platform }}
@@ -208,8 +211,9 @@ jobs:
           mkdir -p package/preinstalled-plugins
           cp target/release/ting_reader package/ting-reader
           cp config.toml package/config.toml
-          curl -fL "https://github.com/dqsq2e2/ting-reader-plugin-store/releases/download/v1.0.0/ting-reader-plugin-store-1.0.0.tr" \
-            -o package/preinstalled-plugins/ting-reader-plugin-store.tr
+          curl --fail --location --retry 3 \
+            "https://github.com/dqsq2e2/ting-reader-plugin-store/releases/download/v${TING_PLUGIN_STORE_VERSION}/ting-reader-plugin-store-${TING_PLUGIN_STORE_VERSION}.tr" \
+            --output package/preinstalled-plugins/ting-reader-plugin-store.tr
           chmod +x package/ting-reader
           tar -C package -czf "../ting-reader-backend-linux-${{ matrix.arch }}-${VERSION}.tar.gz" \
             ting-reader config.toml preinstalled-plugins

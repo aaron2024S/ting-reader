@@ -9,15 +9,22 @@
 //! - Safe library unloading and resource cleanup
 //! - Thread-safe library management
 
-use super::host_api;
 use crate::core::error::{Result, TingError};
+use crate::plugin::native::host_api;
 use crate::plugin::types::{PluginId, PluginMetadata};
 use crate::plugin::wasm::ResourceLimits;
 use libloading::{Library, Symbol};
 use std::collections::HashMap;
+use std::ffi::c_void;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc;
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
+use ting_plugin_contract::native_abi::{
+    MAX_NATIVE_CONTROL_BYTES, NATIVE_ABI_REVISION, NATIVE_BOOTSTRAP_SYMBOL, NativeAbiHeader,
+    NativeCallOutput, NativeHostAllocator, NativePluginAbiV2, NativeTargetInfo,
+};
 
 /// Native plugin loader
 ///
@@ -26,7 +33,7 @@ use std::time::{Duration, Instant};
 /// Includes safety wrappers for timeout control, error handling, and resource monitoring.
 pub struct NativeLoader {
     /// Map of plugin ID to loaded library
-    libraries: Arc<RwLock<HashMap<PluginId, LoadedLibrary>>>,
+    libraries: RwLock<HashMap<PluginId, Arc<LoadedLibrary>>>,
 
     /// Default resource limits for native plugins
     default_limits: ResourceLimits,
@@ -35,7 +42,12 @@ pub struct NativeLoader {
 /// A loaded native library with its metadata
 struct LoadedLibrary {
     /// The loaded library handle
-    library: Library,
+    _library: Library,
+    abi: NativePluginAbiV2,
+    instance: usize,
+    call_lock: Mutex<()>,
+    /// A timed out in-process call cannot be killed; never dispatch to it again.
+    unavailable: Arc<AtomicBool>,
 
     /// Path to the library file
     path: PathBuf,
@@ -44,13 +56,40 @@ struct LoadedLibrary {
     metadata: PluginMetadata,
 
     /// Reference count for safe unloading
-    ref_count: usize,
+    ref_count: AtomicUsize,
 
     /// Resource limits for this plugin
     resource_limits: ResourceLimits,
 
     /// Resource usage statistics
-    stats: ResourceStats,
+    stats: Mutex<ResourceStats>,
+}
+
+#[derive(Default)]
+struct HostAllocation {
+    buffer: Option<Box<[u8]>>,
+    limit: usize,
+}
+
+unsafe extern "C" fn allocate_native_output(context: *mut c_void, size: usize) -> *mut u8 {
+    if context.is_null() || size == 0 || size > MAX_NATIVE_CONTROL_BYTES {
+        return std::ptr::null_mut();
+    }
+    let allocation = unsafe { &mut *context.cast::<HostAllocation>() };
+    if allocation.buffer.is_some() || size > allocation.limit {
+        return std::ptr::null_mut();
+    }
+    let mut buffer = vec![0; size].into_boxed_slice();
+    let pointer = buffer.as_mut_ptr();
+    allocation.buffer = Some(buffer);
+    pointer
+}
+
+impl Drop for LoadedLibrary {
+    fn drop(&mut self) {
+        // This runs while the library is still held by this struct.
+        unsafe { (self.abi.destroy)(self.instance as *mut c_void) };
+    }
 }
 
 /// Resource usage statistics for a native plugin
@@ -68,7 +107,7 @@ pub struct ResourceStats {
     /// Number of timeout errors
     pub timeout_errors: u64,
 
-    /// Peak memory usage in bytes (estimated)
+    /// Peak Host-allocated control output bytes. Private plugin heap is not included.
     pub peak_memory_bytes: usize,
 
     /// Total CPU time spent
@@ -87,7 +126,7 @@ impl NativeLoader {
     /// Create a new native loader with custom resource limits
     pub fn with_limits(default_limits: ResourceLimits) -> Self {
         Self {
-            libraries: Arc::new(RwLock::new(HashMap::new())),
+            libraries: RwLock::new(HashMap::new()),
             default_limits,
         }
     }
@@ -155,7 +194,18 @@ impl NativeLoader {
                 TingError::PluginLoadError(format!("Failed to load library {:?}: {}", path, e))
             })?
         };
-        Self::configure_host_api(&library, &plugin_id)?;
+        let abi = Self::load_abi(&library, &plugin_id)?;
+        let instance = unsafe { (abi.create)() };
+        if instance.is_null() {
+            return Err(TingError::PluginLoadError(format!(
+                "Native plugin {} failed to create instance",
+                plugin_id
+            )));
+        }
+        if let Err(error) = validate_native_exports(&abi, instance, &metadata) {
+            unsafe { (abi.destroy)(instance) };
+            return Err(error);
+        }
 
         tracing::info!(
             plugin_id = %plugin_id,
@@ -167,43 +217,66 @@ impl NativeLoader {
 
         // Store the loaded library
         let loaded = LoadedLibrary {
-            library,
+            _library: library,
+            abi,
+            instance: instance as usize,
+            call_lock: Mutex::new(()),
+            unavailable: Arc::new(AtomicBool::new(false)),
             path: path.to_path_buf(),
             metadata,
-            ref_count: 1,
+            ref_count: AtomicUsize::new(1),
             resource_limits,
-            stats: ResourceStats::default(),
+            stats: Mutex::new(ResourceStats::default()),
         };
 
         let mut libraries = self.libraries.write().map_err(|e| {
             TingError::PluginLoadError(format!("Failed to acquire write lock: {}", e))
         })?;
 
-        libraries.insert(plugin_id, loaded);
+        if libraries.contains_key(&plugin_id) {
+            return Err(TingError::PluginLoadError(format!(
+                "Native plugin {} is already loaded",
+                plugin_id
+            )));
+        }
+        libraries.insert(plugin_id, Arc::new(loaded));
 
         Ok(())
     }
 
-    fn configure_host_api(library: &Library, plugin_id: &PluginId) -> Result<()> {
-        let setter: Symbol<host_api::SetHostApiFn> =
-            match unsafe { library.get(b"plugin_set_host_api") } {
-                Ok(setter) => setter,
-                Err(_) => return Ok(()),
-            };
-
-        let code = unsafe { setter(host_api::native_host_api()) };
-        if code != 0 {
+    fn load_abi(library: &Library, plugin_id: &PluginId) -> Result<NativePluginAbiV2> {
+        type Bootstrap = unsafe extern "C" fn() -> *const NativeAbiHeader;
+        let bootstrap: Symbol<Bootstrap> = unsafe {
+            library.get(NATIVE_BOOTSTRAP_SYMBOL).map_err(|error| {
+                TingError::PluginLoadError(format!(
+                    "Native plugin {} lacks ABI v2 bootstrap: {}",
+                    plugin_id, error
+                ))
+            })?
+        };
+        let header = unsafe { bootstrap() };
+        if header.is_null() {
             return Err(TingError::PluginLoadError(format!(
-                "Native plugin {} rejected HostGateway API with code {}",
-                plugin_id, code
+                "Native plugin {} returned a null ABI header",
+                plugin_id
             )));
         }
-
-        tracing::debug!(
-            plugin_id = %plugin_id,
-            "Native HostGateway API registered"
-        );
-        Ok(())
+        let header_value = unsafe { std::ptr::read(header) };
+        if header_value.abi_revision != NATIVE_ABI_REVISION
+            || header_value.struct_size as usize != std::mem::size_of::<NativePluginAbiV2>()
+        {
+            return Err(TingError::PluginLoadError(format!(
+                "Native plugin {} has unsupported ABI revision {} or struct size {}",
+                plugin_id, header_value.abi_revision, header_value.struct_size
+            )));
+        }
+        let abi = unsafe { std::ptr::read(header.cast::<NativePluginAbiV2>()) };
+        if abi.target != NativeTargetInfo::CURRENT {
+            return Err(TingError::PluginLoadError(format!(
+                "Native plugin {plugin_id} target layout does not match the Host"
+            )));
+        }
+        Ok(abi)
     }
 
     /// Unload a native library
@@ -220,14 +293,18 @@ impl NativeLoader {
         })?;
 
         let loaded = libraries
-            .get_mut(plugin_id)
+            .get(plugin_id)
             .ok_or_else(|| TingError::PluginNotFound(format!("Plugin {} not found", plugin_id)))?;
 
-        // Decrement reference count
-        loaded.ref_count = loaded.ref_count.saturating_sub(1);
+        let ref_count = loaded.ref_count.load(Ordering::Acquire);
+        if ref_count == 0 {
+            return Err(TingError::PluginLoadError(format!(
+                "Native plugin {plugin_id} was already unloaded"
+            )));
+        }
+        loaded.ref_count.fetch_sub(1, Ordering::AcqRel);
 
-        // Only unload if reference count reaches zero
-        if loaded.ref_count == 0 {
+        if ref_count == 1 {
             let path = loaded.path.clone();
             libraries.remove(plugin_id);
 
@@ -239,7 +316,7 @@ impl NativeLoader {
         } else {
             tracing::debug!(
                 plugin_id = %plugin_id,
-                ref_count = loaded.ref_count,
+                ref_count = ref_count - 1,
                 "Library still in use, not unloading"
             );
         }
@@ -247,40 +324,10 @@ impl NativeLoader {
         Ok(())
     }
 
-    /// Check if a symbol exists in a loaded library
-    ///
-    /// # Arguments
-    /// * `plugin_id` - ID of the plugin
-    /// * `symbol_name` - Name of the function symbol to check
-    ///
-    /// # Returns
-    /// * `Ok(true)` if the symbol exists
-    /// * `Ok(false)` if the symbol doesn't exist
-    /// * `Err(TingError)` if the library is not loaded
-    pub fn has_symbol(&self, plugin_id: &PluginId, symbol_name: &str) -> Result<bool> {
-        let libraries = self.libraries.read().map_err(|e| {
-            TingError::PluginLoadError(format!("Failed to acquire read lock: {}", e))
-        })?;
-
-        let loaded = libraries
-            .get(plugin_id)
-            .ok_or_else(|| TingError::PluginNotFound(format!("Plugin {} not found", plugin_id)))?;
-
-        // Try to look up the symbol
-        unsafe {
-            match loaded.library.get::<*const ()>(symbol_name.as_bytes()) {
-                Ok(_) => Ok(true),
-                Err(_) => Ok(false),
-            }
-        }
-    }
-
     /// Call a function in a loaded library with safety wrappers
     ///
-    /// This method provides:
-    /// - Timeout control to prevent hanging
-    /// - Error catching and conversion
-    /// - Resource monitoring (CPU time, memory estimation)
+    /// A timed-out in-process call keeps the library mapped until its worker
+    /// finishes. Subsequent calls to this instance are rejected.
     ///
     /// # Arguments
     /// * `plugin_id` - ID of the plugin
@@ -292,323 +339,195 @@ impl NativeLoader {
     /// * `Err(TingError)` - If the function call failed
     ///
     /// # Safety
-    /// This function assumes the native plugin exports a standard interface:
-    /// ```c
-    /// int plugin_invoke(const char* method, const char* params, char** result);
-    /// ```
+    /// The Native ABI v2 function table is validated during library loading.
     pub fn call_function(
         &self,
         plugin_id: &PluginId,
         function_name: &str,
         args: serde_json::Value,
     ) -> Result<serde_json::Value> {
-        // Get resource limits before spawning thread
-        let resource_limits = {
-            let libraries = self.libraries.read().map_err(|e| {
-                TingError::PluginLoadError(format!("Failed to acquire read lock: {}", e))
-            })?;
-
-            let loaded = libraries.get(plugin_id).ok_or_else(|| {
-                TingError::PluginNotFound(format!("Plugin {} not found", plugin_id))
-            })?;
-
-            loaded.resource_limits.clone()
-        };
-
-        // Execute with timeout using tokio runtime
-        let result = self.call_function_with_timeout(
-            plugin_id,
-            function_name,
-            args,
-            resource_limits.max_cpu_time,
-        )?;
-
-        // Update statistics
-        self.update_stats_after_call(plugin_id, true, None)?;
-
-        Ok(result)
+        self.call_function_with_context(plugin_id, function_name, args, None)
     }
 
-    /// Call a function with timeout control
-    ///
-    /// Spawns the native call in a separate thread to enable timeout enforcement.
-    fn call_function_with_timeout(
+    pub(crate) fn call_function_with_context(
         &self,
         plugin_id: &PluginId,
         function_name: &str,
         args: serde_json::Value,
-        _timeout: Duration,
+        mut host_context: Option<host_api::NativeHostInvocationContext>,
     ) -> Result<serde_json::Value> {
-        // Record start time for CPU time monitoring
-        let start_time = Instant::now();
+        let loaded = {
+            let libraries = self.libraries.read().map_err(|e| {
+                TingError::PluginLoadError(format!("Failed to acquire read lock: {}", e))
+            })?;
 
-        // Prepare arguments
-        let args_str = serde_json::to_string(&args).map_err(|e| {
-            TingError::PluginExecutionError(format!("Failed to serialize arguments: {}", e))
-        })?;
-
-        let method_cstr = std::ffi::CString::new(function_name).map_err(|e| {
-            TingError::PluginExecutionError(format!("Invalid function name: {}", e))
-        })?;
-
-        let params_cstr = std::ffi::CString::new(args_str)
-            .map_err(|e| TingError::PluginExecutionError(format!("Invalid parameters: {}", e)))?;
-
-        // DIRECT EXECUTION: Removed thread spawning to avoid issues in DLL environment
-        // The outer layer (NativePlugin) already uses spawn_blocking, so we are not blocking the async runtime.
-        // Thread spawning inside a DLL or during initialization can be problematic.
-        let result =
-            Self::execute_native_call(&self.libraries, plugin_id, method_cstr, params_cstr);
-
-        match result {
-            Ok(call_result) => {
-                let elapsed = start_time.elapsed();
-                // Update execution time stats
-                self.update_execution_time(plugin_id, elapsed)?;
-                Ok(call_result)
-            }
-            Err(e) => {
-                tracing::error!(
-                    plugin_id = %plugin_id,
-                    function = function_name,
-                    "Native plugin execution failed: {:?}",
-                    e
-                );
-                Err(e)
-            }
-        }
-    }
-
-    /// Execute the actual native call (runs in a separate thread)
-    fn execute_native_call(
-        libraries: &Arc<RwLock<HashMap<PluginId, LoadedLibrary>>>,
-        plugin_id: &PluginId,
-        method_cstr: std::ffi::CString,
-        params_cstr: std::ffi::CString,
-    ) -> Result<serde_json::Value> {
-        // Acquire read lock
-        let libraries = libraries.read().map_err(|e| {
-            TingError::PluginLoadError(format!("Failed to acquire read lock: {}", e))
-        })?;
-
-        let loaded = libraries
-            .get(plugin_id)
-            .ok_or_else(|| TingError::PluginNotFound(format!("Plugin {} not found", plugin_id)))?;
-
-        // Look up the plugin_invoke function
-        type InvokeFn = unsafe extern "C" fn(*const u8, *const u8, *mut *mut u8) -> i32;
-
-        let symbol: Symbol<InvokeFn> = unsafe {
-            loaded.library.get(b"plugin_invoke").map_err(|e| {
-                TingError::PluginExecutionError(format!(
-                    "Symbol 'plugin_invoke' not found in plugin {}: {}",
-                    plugin_id, e
-                ))
-            })?
+            Arc::clone(libraries.get(plugin_id).ok_or_else(|| {
+                TingError::PluginNotFound(format!("Plugin {} not found", plugin_id))
+            })?)
         };
-
-        // Call the function with error catching
-        let mut result_ptr: *mut u8 = std::ptr::null_mut();
-
-        // Catch any panics from the native code
-        let return_code = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
-            symbol(
-                method_cstr.as_bytes().as_ptr(),
-                params_cstr.as_bytes().as_ptr(),
-                &mut result_ptr as *mut *mut u8,
-            )
-        }));
-
-        let return_code = match return_code {
-            Ok(code) => code,
-            Err(e) => {
-                tracing::error!(
-                    plugin_id = %plugin_id,
-                    "Native plugin panicked during execution: {:?}",
-                    e
-                );
-                return Err(TingError::PluginExecutionError(
-                    "Native plugin panicked during execution".to_string(),
-                ));
-            }
-        };
-
-        // Check return code
-        if return_code != 0 {
-            // Check if result_ptr contains error info before returning generic error
-            if !result_ptr.is_null() {
-                let result_str = unsafe {
-                    let cstr = std::ffi::CStr::from_ptr(result_ptr as *const std::os::raw::c_char);
-                    cstr.to_str().unwrap_or("")
-                };
-
-                if let Ok(json) = serde_json::from_str::<serde_json::Value>(result_str)
-                    && let Some(err) = json.get("error").and_then(|e| e.as_str()) {
-                        tracing::warn!(
-                            plugin_id = %plugin_id,
-                            error = %err,
-                            "Native plugin returned error"
-                        );
-
-                        // Free memory
-                        let free_symbol_name = b"plugin_free";
-                        let has_free =
-                            unsafe { loaded.library.get::<*const ()>(free_symbol_name).is_ok() };
-                        if has_free {
-                            type FreeFn = unsafe extern "C" fn(*mut u8);
-                            let free_fn: Symbol<FreeFn> =
-                                unsafe { loaded.library.get(free_symbol_name).unwrap() };
-                            unsafe {
-                                free_fn(result_ptr);
-                            }
-                        } else {
-                            unsafe {
-                                libc::free(result_ptr as *mut libc::c_void);
-                            }
-                        }
-
-                        return Ok(json);
-                    }
-            }
-
-            tracing::warn!(
-                plugin_id = %plugin_id,
-                return_code = return_code,
-                "Native plugin returned error code"
-            );
-
+        let timeout = loaded.resource_limits.max_cpu_time;
+        if !matches!(function_name, "initialize" | "shutdown")
+            && !loaded
+                .metadata
+                .capabilities
+                .iter()
+                .any(|cap| cap.supports(function_name))
+        {
             return Err(TingError::PluginExecutionError(format!(
-                "Plugin function returned error code: {}",
-                return_code
+                "Native plugin {plugin_id} did not declare operation {function_name}"
             )));
         }
 
-        // Validate result pointer
-        if result_ptr.is_null() {
+        let args_str = serde_json::to_vec(&args).map_err(|e| {
+            TingError::PluginExecutionError(format!("Failed to serialize arguments: {}", e))
+        })?;
+        if args_str.len() > MAX_NATIVE_CONTROL_BYTES {
             return Err(TingError::PluginExecutionError(
-                "Plugin function returned null result".to_string(),
+                "Native control input exceeds the 1 MiB limit".into(),
             ));
         }
-
-        // Convert result pointer to string
-        let result_str = unsafe {
-            // Fix for ARM64 build: Ensure pointer cast is correct
-            // result_ptr is *mut u8 (pointer to u8)
-            // CStr::from_ptr expects *const c_char (which can be i8 or u8 depending on platform)
-            let cstr = std::ffi::CStr::from_ptr(result_ptr as *const std::os::raw::c_char);
-            cstr.to_str().map_err(|e| {
-                TingError::PluginExecutionError(format!("Invalid UTF-8 in result: {}", e))
-            })?
-        };
-
-        // Parse JSON result
-        let result = serde_json::from_str(result_str).map_err(|e| {
-            TingError::PluginExecutionError(format!("Failed to parse result JSON: {}", e))
-        })?;
-
-        // Free the result string using plugin_free if available, otherwise fallback to libc::free
-        // Ideally, plugins should export plugin_free to ensure memory is freed by the same allocator
-        let free_symbol_name = b"plugin_free";
-        let has_free = unsafe { loaded.library.get::<*const ()>(free_symbol_name).is_ok() };
-
-        if has_free {
-            type FreeFn = unsafe extern "C" fn(*mut u8);
-            let free_fn: Symbol<FreeFn> = unsafe { loaded.library.get(free_symbol_name).unwrap() };
-            unsafe {
-                free_fn(result_ptr);
-            }
-            // Log at trace level to avoid spam, but useful for debugging leaks
-            tracing::trace!(plugin_id = %plugin_id, "Freed native plugin result using plugin_free");
-        } else {
-            // Fallback to libc::free (might cause issues on Windows if CRT differs)
-            tracing::warn!(
-                plugin_id = %plugin_id,
-                "plugin_free not found, falling back to libc::free. This may cause memory leaks or crashes on Windows."
-            );
-            unsafe {
-                libc::free(result_ptr as *mut libc::c_void);
-            }
+        if loaded.unavailable.load(Ordering::Acquire) {
+            return Err(TingError::PluginExecutionError(format!(
+                "Native plugin {plugin_id} is unavailable after a timed-out call"
+            )));
         }
-
-        Ok(result)
-    }
-
-    /// Update statistics after a function call
-    fn update_stats_after_call(
-        &self,
-        plugin_id: &PluginId,
-        success: bool,
-        elapsed: Option<Duration>,
-    ) -> Result<()> {
-        let mut libraries = self.libraries.write().map_err(|e| {
-            TingError::PluginLoadError(format!("Failed to acquire write lock: {}", e))
-        })?;
-
-        if let Some(loaded) = libraries.get_mut(plugin_id) {
-            loaded.stats.total_calls += 1;
-
-            if success {
-                loaded.stats.successful_calls += 1;
-            } else {
-                loaded.stats.failed_calls += 1;
-
-                if elapsed.is_some() {
-                    loaded.stats.timeout_errors += 1;
+        let plugin_id = plugin_id.clone();
+        let worker_id = plugin_id.clone();
+        let operation = function_name.to_owned();
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let worker = Arc::clone(&loaded);
+        std::thread::Builder::new()
+            .name("ting-native-call".into())
+            .spawn(move || {
+                let start = Instant::now();
+                let host = host_api::table(host_context.as_mut());
+                let result =
+                    Self::execute_native_call(&worker, &worker_id, &operation, &args_str, &host);
+                let elapsed = start.elapsed();
+                if let Ok(mut stats) = worker.stats.lock() {
+                    stats.total_calls += 1;
+                    if let Ok((_, allocated_bytes)) = &result {
+                        stats.successful_calls += 1;
+                        stats.peak_memory_bytes = stats.peak_memory_bytes.max(*allocated_bytes);
+                    } else {
+                        stats.failed_calls += 1;
+                    }
+                    stats.total_cpu_time += elapsed;
+                    stats.last_execution_time = Some(elapsed);
                 }
-            }
+                let _ = sender.send(result.map(|(output, _)| output));
+            })
+            .map_err(|error| {
+                TingError::PluginExecutionError(format!("Failed to start Native worker: {error}"))
+            })?;
 
-            if let Some(duration) = elapsed {
-                loaded.stats.total_cpu_time += duration;
-                loaded.stats.last_execution_time = Some(duration);
+        match receiver.recv_timeout(timeout) {
+            Ok(result) => result,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                loaded.unavailable.store(true, Ordering::Release);
+                // The worker holds a strong reference to the library until
+                // it returns. Unloading no longer blocks on the worker.
+                if let Ok(mut stats) = loaded.stats.lock() {
+                    stats.timeout_errors += 1;
+                }
+                Err(TingError::Timeout(format!(
+                    "Native plugin {plugin_id} exceeded its {timeout:?} call deadline"
+                )))
             }
-
-            // Estimate memory usage (this is a rough estimate)
-            // In a real implementation, you might use platform-specific APIs
-            // to get actual memory usage
-            let estimated_memory = Self::estimate_memory_usage();
-            if estimated_memory > loaded.stats.peak_memory_bytes {
-                loaded.stats.peak_memory_bytes = estimated_memory;
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                loaded.unavailable.store(true, Ordering::Release);
+                Err(TingError::PluginExecutionError(format!(
+                    "Native plugin {plugin_id} worker exited without returning"
+                )))
             }
-
-            tracing::debug!(
-                plugin_id = %plugin_id,
-                total_calls = loaded.stats.total_calls,
-                successful = loaded.stats.successful_calls,
-                failed = loaded.stats.failed_calls,
-                timeouts = loaded.stats.timeout_errors,
-                peak_memory = loaded.stats.peak_memory_bytes,
-                "Updated plugin statistics"
-            );
         }
-
-        Ok(())
     }
 
-    /// Update execution time statistics
-    fn update_execution_time(&self, plugin_id: &PluginId, elapsed: Duration) -> Result<()> {
-        let mut libraries = self.libraries.write().map_err(|e| {
-            TingError::PluginLoadError(format!("Failed to acquire write lock: {}", e))
+    /// Invoke an instance while retaining the library reference and serializing
+    /// work on this instance. The Host alone owns the output allocation.
+    fn execute_native_call(
+        loaded: &LoadedLibrary,
+        plugin_id: &PluginId,
+        operation: &str,
+        args: &[u8],
+        host: &ting_plugin_contract::native_abi::NativeHostApiV2,
+    ) -> Result<(serde_json::Value, usize)> {
+        if !matches!(operation, "initialize" | "shutdown")
+            && !loaded
+                .metadata
+                .capabilities
+                .iter()
+                .any(|cap| cap.supports(operation))
+        {
+            return Err(TingError::PluginExecutionError(format!(
+                "Native plugin {plugin_id} did not declare operation {operation}"
+            )));
+        }
+        if loaded.unavailable.load(Ordering::Acquire) {
+            return Err(TingError::PluginExecutionError(format!(
+                "Native plugin {plugin_id} is unavailable"
+            )));
+        }
+        let _serial = loaded.call_lock.lock().map_err(|error| {
+            TingError::PluginExecutionError(format!("Native instance lock failed: {error}"))
         })?;
-
-        if let Some(loaded) = libraries.get_mut(plugin_id) {
-            loaded.stats.total_cpu_time += elapsed;
-            loaded.stats.last_execution_time = Some(elapsed);
+        if loaded.unavailable.load(Ordering::Acquire) {
+            return Err(TingError::PluginExecutionError(format!(
+                "Native plugin {plugin_id} is unavailable"
+            )));
         }
-
-        Ok(())
-    }
-
-    /// Estimate current memory usage
-    ///
-    /// This is a rough estimate. In production, you might want to use
-    /// platform-specific APIs like:
-    /// - Linux: /proc/self/status
-    /// - Windows: GetProcessMemoryInfo
-    /// - macOS: task_info
-    fn estimate_memory_usage() -> usize {
-        // For now, return a placeholder
-        // In a real implementation, use platform-specific memory APIs
-        0
+        if !unsafe {
+            (loaded.abi.supports)(
+                loaded.instance as *mut c_void,
+                operation.as_ptr(),
+                operation.len(),
+            )
+        } {
+            return Err(TingError::PluginExecutionError(format!(
+                "Native plugin {plugin_id} does not support {operation}"
+            )));
+        }
+        let mut allocation = HostAllocation {
+            buffer: None,
+            limit: loaded
+                .resource_limits
+                .max_memory_bytes
+                .min(MAX_NATIVE_CONTROL_BYTES),
+        };
+        let mut output = NativeCallOutput::default();
+        let allocator = NativeHostAllocator {
+            user_data: (&mut allocation as *mut HostAllocation).cast(),
+            allocate: allocate_native_output,
+        };
+        let code = unsafe {
+            (loaded.abi.invoke)(
+                loaded.instance as *mut c_void,
+                operation.as_ptr(),
+                operation.len(),
+                args.as_ptr(),
+                args.len(),
+                host,
+                allocator,
+                &mut output,
+            )
+        };
+        if code != 0 {
+            return Err(TingError::PluginExecutionError(format!(
+                "Native plugin {plugin_id} returned error code {code} from {operation}"
+            )));
+        }
+        let bytes = allocation.buffer.ok_or_else(|| {
+            TingError::PluginExecutionError("Native plugin did not allocate an output".into())
+        })?;
+        if !std::ptr::eq(output.data, bytes.as_ptr()) || output.len > bytes.len() {
+            return Err(TingError::PluginExecutionError(
+                "Native plugin returned an invalid Host allocation".into(),
+            ));
+        }
+        let value = serde_json::from_slice(&bytes[..output.len]).map_err(|error| {
+            TingError::PluginExecutionError(format!("Invalid Native response JSON: {error}"))
+        })?;
+        Ok((value, bytes.len()))
     }
 
     /// Get resource usage statistics for a plugin
@@ -621,7 +540,13 @@ impl NativeLoader {
             .get(plugin_id)
             .ok_or_else(|| TingError::PluginNotFound(format!("Plugin {} not found", plugin_id)))?;
 
-        Ok(loaded.stats.clone())
+        loaded
+            .stats
+            .lock()
+            .map(|stats| stats.clone())
+            .map_err(|error| {
+                TingError::PluginLoadError(format!("Native statistics lock failed: {error}"))
+            })
     }
 
     /// Check if a library is currently loaded
@@ -662,15 +587,15 @@ impl NativeLoader {
     ///
     /// This prevents the library from being unloaded while it's in use.
     pub fn increment_ref_count(&self, plugin_id: &PluginId) -> Result<()> {
-        let mut libraries = self.libraries.write().map_err(|e| {
-            TingError::PluginLoadError(format!("Failed to acquire write lock: {}", e))
+        let libraries = self.libraries.read().map_err(|e| {
+            TingError::PluginLoadError(format!("Failed to acquire read lock: {}", e))
         })?;
 
         let loaded = libraries
-            .get_mut(plugin_id)
+            .get(plugin_id)
             .ok_or_else(|| TingError::PluginNotFound(format!("Plugin {} not found", plugin_id)))?;
 
-        loaded.ref_count += 1;
+        loaded.ref_count.fetch_add(1, Ordering::AcqRel);
 
         Ok(())
     }
@@ -715,6 +640,48 @@ impl NativeLoader {
     }
 }
 
+/// The bootstrap table is checked before calling `supports` for each
+/// manifest operation, so unknown operation names never reach the plugin.
+fn validate_native_exports(
+    abi: &NativePluginAbiV2,
+    instance: *mut c_void,
+    metadata: &PluginMetadata,
+) -> Result<()> {
+    let mut missing = missing_native_exports(metadata, |name| unsafe {
+        (abi.supports)(instance, name.as_ptr(), name.len())
+    });
+    for lifecycle in ["initialize", "shutdown"] {
+        if !unsafe { (abi.supports)(instance, lifecycle.as_ptr(), lifecycle.len()) } {
+            missing.push(lifecycle);
+        }
+    }
+    missing.sort_unstable();
+    missing.dedup();
+    if !missing.is_empty() {
+        return Err(TingError::PluginLoadError(format!(
+            "Native plugin {} is missing declared function exports: {}",
+            metadata.instance_id(),
+            missing.join(", ")
+        )));
+    }
+    Ok(())
+}
+
+fn missing_native_exports(
+    metadata: &PluginMetadata,
+    has_export: impl Fn(&str) -> bool,
+) -> Vec<&str> {
+    let mut missing: Vec<_> = metadata
+        .capabilities
+        .iter()
+        .flat_map(|capability| capability.required_exports())
+        .filter(|name| !has_export(name))
+        .collect();
+    missing.sort_unstable();
+    missing.dedup();
+    missing
+}
+
 impl Default for NativeLoader {
     fn default() -> Self {
         Self::new()
@@ -728,15 +695,38 @@ unsafe impl Sync for NativeLoader {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plugin::types::PluginType;
+    use serde_json::json;
+    use std::process::Command;
     use std::time::Duration;
+
+    fn fixture_library(bad_revision: bool) -> (tempfile::TempDir, PathBuf) {
+        let temp = tempfile::tempdir().unwrap();
+        let name = format!("native_fixture.{}", std::env::consts::DLL_EXTENSION);
+        let library = temp.path().join(name);
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/native_abi_v2.rs");
+        let mut compiler = Command::new("rustc");
+        compiler
+            .args(["--edition=2024", "--crate-type=cdylib", "--cap-lints=allow"])
+            .arg(source)
+            .arg("-o")
+            .arg(&library);
+        if bad_revision {
+            compiler.args(["--cfg", "bad_revision"]);
+        }
+        let result = compiler.output().unwrap();
+        assert!(
+            result.status.success(),
+            "Native test fixture compilation failed: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        (temp, library)
+    }
 
     fn create_test_metadata() -> PluginMetadata {
         PluginMetadata::new(
             "test-plugin".to_string(),
             "test-plugin".to_string(),
             "1.0.0".to_string(),
-            PluginType::Utility,
             "Test Author".to_string(),
             "Test plugin".to_string(),
             "libtest.so".to_string(),
@@ -747,6 +737,236 @@ mod tests {
     fn test_native_loader_creation() {
         let loader = NativeLoader::new();
         assert_eq!(loader.library_count(), 0);
+    }
+
+    /// Set TING_TEST_XM_LIBRARY to a freshly built official XM DLL / SO. CI's
+    /// source-plugin gate builds it before running this real ABI integration.
+    #[tokio::test]
+    async fn official_xm_native_abi_extracts_and_writes_without_file_paths() {
+        let Ok(library) = std::env::var("TING_TEST_XM_LIBRARY") else {
+            return;
+        };
+        let temporary = tempfile::tempdir().unwrap();
+        let mut tag = id3::Tag::new();
+        use id3::TagLike;
+        tag.set_title("Chapter one");
+        tag.set_album("Book | extra");
+        tag.set_artist("Narrator");
+        tag.add_frame(id3::Frame::text("TSIZ", "16"));
+        tag.add_frame(id3::Frame::text("TENC", "00000000000000000000000000000000"));
+        tag.add_frame(id3::Frame::text("TSSE", "prefix"));
+        let mut bytes = Vec::new();
+        tag.write_to(&mut bytes, id3::Version::Id3v23).unwrap();
+        let header_size = bytes.len();
+        bytes.extend([0u8; 16]);
+        bytes.extend(b"plain-tail");
+        let path = temporary.path().join("sample.xm");
+        std::fs::write(&path, bytes).unwrap();
+
+        let mut metadata = PluginMetadata::new(
+            "xm-format".into(),
+            "xm format".into(),
+            "2.0.0".into(),
+            "Ting Reader".into(),
+            "XM format".into(),
+            library.clone(),
+        );
+        metadata.capabilities = vec![
+            serde_json::from_value(json!({
+                "id":"format.handler","kind":"format_handler","extensions":["xm"],
+                "operations":["probe","get_metadata_read_size","extract_metadata",
+                    "write_metadata","open_decrypt","read_chunk","seek","close","cancel"]
+            }))
+            .unwrap(),
+        ];
+        let id = metadata.instance_id();
+        let loader = NativeLoader::new();
+        loader
+            .load_library(id.clone(), Path::new(&library), metadata)
+            .unwrap();
+        let scope = Arc::new(crate::plugin::resources::ResourceScope::new(
+            id.clone(),
+            uuid::Uuid::new_v4(),
+            None,
+            temporary.path().join("staging"),
+            crate::plugin::resources::ResourceLimits::default(),
+        ));
+        let input = scope.grant_file(&path, 8 * 1024 * 1024, None).unwrap();
+        let host = || host_api::NativeHostInvocationContext {
+            plugin_id: id.clone(),
+            permissions: Vec::new(),
+            user: None,
+            host_gateway: None,
+            resources: Some(Arc::clone(&scope)),
+            runtime_handle: tokio::runtime::Handle::current(),
+        };
+        let initialized = loader.call_function(&id, "initialize", json!({})).unwrap();
+        assert_eq!(initialized["ok"], true);
+        let probed = loader
+            .call_function_with_context(
+                &id,
+                "probe",
+                json!({
+                    "input":input, "extension_hint":"xm", "mime_hint":null,
+                    "prefix_bytes":header_size,
+                }),
+                Some(host()),
+            )
+            .unwrap();
+        assert_eq!(probed["data"]["kind"], "match");
+        let extracted = loader
+            .call_function_with_context(
+                &id,
+                "extract_metadata",
+                json!({
+                    "input":input, "extract_cover":false,
+                }),
+                Some(host()),
+            )
+            .unwrap();
+        assert_eq!(extracted["data"]["title"], "Chapter one");
+        assert_eq!(extracted["data"]["album"], "Book");
+        assert_eq!(extracted["data"]["narrator"], "Narrator");
+        let output = scope.create_output(None).unwrap();
+        let revision = scope.stat(&input).unwrap().revision.unwrap();
+        let written = loader
+            .call_function_with_context(
+                &id,
+                "write_metadata",
+                json!({
+                    "input":input,"output":output,"source_revision":revision,
+                    "patch":{"title":"Chapter two"}
+                }),
+                Some(host()),
+            )
+            .unwrap();
+        assert_eq!(written["ok"], true, "{written}");
+        scope
+            .commit_local_output(&output, &input, &path, &revision)
+            .unwrap();
+        let tag = id3::Tag::read_from_path(&path).unwrap();
+        assert_eq!(tag.title(), Some("Chapter two"));
+        assert_eq!(
+            tag.get("TSIZ").and_then(|frame| frame.content().text()),
+            Some("16")
+        );
+        assert_eq!(
+            tag.get("TSSE").and_then(|frame| frame.content().text()),
+            Some("prefix")
+        );
+        loader.call_function(&id, "shutdown", json!({})).unwrap();
+        loader.unload_library(&id).unwrap();
+    }
+
+    #[test]
+    fn native_preflight_requires_all_declared_symbols_before_registration() {
+        let mut metadata = create_test_metadata();
+        metadata.capabilities = vec![
+            serde_json::from_value(json!({
+                "id": "format.xm", "kind": "format_handler",
+                "extensions": ["xm"],
+                "operations": ["probe", "get_metadata_read_size", "extract_metadata"]
+            }))
+            .unwrap(),
+            serde_json::from_value(json!({
+                "id": "format.special", "kind": "format_handler",
+                "extensions": ["special"],
+                "operations": ["probe", "extract_metadata"]
+            }))
+            .unwrap(),
+        ];
+        assert_eq!(
+            missing_native_exports(&metadata, |name| name == "probe"),
+            ["extract_metadata", "get_metadata_read_size"]
+        );
+        assert!(missing_native_exports(&metadata, |_| true).is_empty());
+    }
+
+    #[test]
+    fn native_v2_fixture_invokes_and_enforces_host_output_limit() {
+        let (_temp, library) = fixture_library(false);
+        let mut metadata = create_test_metadata();
+        metadata.capabilities = vec![
+            serde_json::from_value(json!({
+                "id": "format.test", "kind": "format_handler",
+                "extensions": ["test"], "operations": ["probe", "extract_metadata"]
+            }))
+            .unwrap(),
+        ];
+        let id = metadata.instance_id();
+        let loader = NativeLoader::new();
+        loader.load_library(id.clone(), &library, metadata).unwrap();
+        assert_eq!(
+            loader
+                .call_function(&id, "probe", json!({"input": "opaque"}))
+                .unwrap(),
+            json!({"kind":"no_match"})
+        );
+        assert!(
+            loader
+                .call_function(&id, "probe", json!({"case": "oversize"}))
+                .is_err()
+        );
+        assert!(loader.call_function(&id, "oversize", json!({})).is_err());
+        let stats = loader.get_stats(&id).unwrap();
+        assert_eq!(
+            (
+                stats.total_calls,
+                stats.successful_calls,
+                stats.failed_calls
+            ),
+            (2, 1, 1)
+        );
+        assert_eq!(stats.peak_memory_bytes, br#"{"kind":"no_match"}"#.len());
+        loader.unload_library(&id).unwrap();
+    }
+
+    #[test]
+    fn native_v2_rejects_wrong_revision_before_reading_function_table() {
+        let (_temp, library) = fixture_library(true);
+        let loader = NativeLoader::new();
+        let error = loader
+            .load_library("fixture".into(), &library, create_test_metadata())
+            .unwrap_err();
+        assert!(error.to_string().contains("unsupported ABI revision"));
+        assert_eq!(loader.library_count(), 0);
+    }
+
+    #[test]
+    fn timed_out_native_instance_never_accepts_another_call() {
+        let (_temp, library) = fixture_library(false);
+        let mut metadata = create_test_metadata();
+        metadata.capabilities = vec![
+            serde_json::from_value(json!({
+                "id": "format.test", "kind": "format_handler",
+                "extensions": ["test"], "operations": ["probe", "extract_metadata"]
+            }))
+            .unwrap(),
+        ];
+        let id = metadata.instance_id();
+        let limits = ResourceLimits::custom(
+            1024 * 1024,
+            Duration::from_millis(25),
+            1024 * 1024,
+            1024 * 1024,
+        );
+        let loader = NativeLoader::with_limits(limits);
+        loader.load_library(id.clone(), &library, metadata).unwrap();
+        let start = Instant::now();
+        assert!(matches!(
+            loader.call_function(&id, "probe", json!({"case": "slow"})),
+            Err(TingError::Timeout(_))
+        ));
+        assert!(start.elapsed() < Duration::from_millis(150));
+        assert!(loader.call_function(&id, "probe", json!({})).is_err());
+        let stats = loader.get_stats(&id).unwrap();
+        assert_eq!(stats.timeout_errors, 1);
+        // Unloading removes the instance immediately; the running worker
+        // retains its own library reference until it completes.
+        let unload_start = Instant::now();
+        loader.unload_library(&id).unwrap();
+        assert!(unload_start.elapsed() < Duration::from_millis(120));
+        std::thread::sleep(Duration::from_millis(180));
     }
 
     #[test]

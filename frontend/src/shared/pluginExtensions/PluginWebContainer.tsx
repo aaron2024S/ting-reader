@@ -826,9 +826,6 @@ const PluginWebContainer = ({
     const request = data;
     try {
       if (request.method === "capability.invoke") {
-        if (extension.render?.bridge?.allow_capability_invoke === false) {
-          throw new Error("Capability invocation is disabled for this view");
-        }
         const params =
           request.params && typeof request.params === "object"
             ? (request.params as {

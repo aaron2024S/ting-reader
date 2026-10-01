@@ -10,10 +10,10 @@ use crate::core::local_paths::{
     resolve_existing_local_library_root, resolve_local_library_path, resolve_storage_folder_target,
 };
 use axum::{
+    Json,
     extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
-    Json,
 };
 use uuid::Uuid;
 
@@ -40,12 +40,13 @@ fn normalize_rss_sync_config(config: serde_json::Value) -> Option<serde_json::Va
         && matches!(
             interval.trim().to_ascii_lowercase().as_str(),
             "hourly" | "daily" | "weekly" | "monthly"
-        ) {
-            normalized.insert(
-                "scheduled_sync_interval".to_string(),
-                serde_json::Value::String(interval.to_string()),
-            );
-        }
+        )
+    {
+        normalized.insert(
+            "scheduled_sync_interval".to_string(),
+            serde_json::Value::String(interval.to_string()),
+        );
+    }
 
     if normalized.is_empty() {
         None
@@ -182,21 +183,10 @@ pub async fn create_library(
         req.root_path.unwrap_or_else(|| "/".to_string())
     };
 
-    let scraper_config = req.scraper_config.and_then(|mut config| {
+    let scraper_config = req.scraper_config.and_then(|config| {
         if library_type == "rss" {
             return normalize_rss_sync_config(config).map(|config| config.to_string());
         }
-        if library_type == "webdav"
-            && let Some(object) = config.as_object_mut() {
-                object.insert(
-                    "nfo_writing_enabled".to_string(),
-                    serde_json::Value::Bool(false),
-                );
-                object.insert(
-                    "metadata_writing_enabled".to_string(),
-                    serde_json::Value::Bool(false),
-                );
-            }
         Some(config.to_string())
     });
 
@@ -308,18 +298,18 @@ pub async fn create_library(
                 .library_watcher
                 .watch_library(&library.id, &library_path)
                 .await
-            {
-                tracing::warn!(
-                    library_id = %library.id,
-                    error = %e,
-                    message_key = "library.watcher.watch_failed",
-                    message_params = %serde_json::json!({
-                        "library_id": library.id,
-                        "error": e.to_string(),
-                    }),
-                    "Failed to watch new library"
-                );
-            }
+        {
+            tracing::warn!(
+                library_id = %library.id,
+                error = %e,
+                message_key = "library.watcher.watch_failed",
+                message_params = %serde_json::json!({
+                    "library_id": library.id,
+                    "error": e.to_string(),
+                }),
+                "Failed to watch new library"
+            );
+        }
     }
 
     Ok((StatusCode::CREATED, Json(LibraryResponse::from(library))))
@@ -403,9 +393,10 @@ pub async fn update_library(
     }
 
     if (library.library_type == "webdav" || library.library_type == "local")
-        && let Some(root_path) = req.root_path {
-            library.root_path = root_path;
-        }
+        && let Some(root_path) = req.root_path
+    {
+        library.root_path = root_path;
+    }
 
     if let Some(config) = req.scraper_config {
         library.scraper_config = if library.library_type == "rss" {
@@ -422,25 +413,6 @@ pub async fn update_library(
             .and_then(|value| serde_json::from_str::<serde_json::Value>(&value).ok())
             .and_then(normalize_rss_sync_config)
             .map(|config| config.to_string());
-    }
-
-    if library.library_type == "webdav" {
-        let mut config = library
-            .scraper_config
-            .as_deref()
-            .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok())
-            .unwrap_or_else(|| serde_json::json!({}));
-        if let Some(object) = config.as_object_mut() {
-            object.insert(
-                "nfo_writing_enabled".to_string(),
-                serde_json::Value::Bool(false),
-            );
-            object.insert(
-                "metadata_writing_enabled".to_string(),
-                serde_json::Value::Bool(false),
-            );
-        }
-        library.scraper_config = Some(config.to_string());
     }
 
     if library.library_type == "local" {
@@ -755,19 +727,20 @@ pub async fn get_storage_folders(
             }
 
             if let Some(name) = entry_path.file_name().and_then(|n| n.to_str())
-                && !name.starts_with('.') {
-                    let relative_path = canonical_entry
-                        .strip_prefix(&storage_root)
-                        .unwrap_or(&canonical_entry)
-                        .to_string_lossy()
-                        .replace('\\', "/");
+                && !name.starts_with('.')
+            {
+                let relative_path = canonical_entry
+                    .strip_prefix(&storage_root)
+                    .unwrap_or(&canonical_entry)
+                    .to_string_lossy()
+                    .replace('\\', "/");
 
-                    folders.push(FolderInfo {
-                        name: name.to_string(),
-                        path: relative_path,
-                        is_directory: true,
-                    });
-                }
+                folders.push(FolderInfo {
+                    name: name.to_string(),
+                    path: relative_path,
+                    is_directory: true,
+                });
+            }
         }
     }
 
@@ -838,9 +811,10 @@ pub async fn test_webdav_connection(
         }
 
         if let Some(ref username) = req.username
-            && !username.is_empty() {
-                request = request.basic_auth(username, req.password.as_ref());
-            }
+            && !username.is_empty()
+        {
+            request = request.basic_auth(username, req.password.as_ref());
+        }
 
         match request.send().await {
             Ok(res) => {
@@ -910,9 +884,11 @@ mod tests {
 
     #[test]
     fn rss_config_without_schedule_is_omitted() {
-        assert!(normalize_rss_sync_config(json!({
-            "default_sources": ["scraper"],
-        }))
-        .is_none());
+        assert!(
+            normalize_rss_sync_config(json!({
+                "default_sources": ["scraper"],
+            }))
+            .is_none()
+        );
     }
 }

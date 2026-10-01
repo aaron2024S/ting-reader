@@ -11,7 +11,9 @@ async fn test_wasm_runtime_creation() {
 #[tokio::test]
 async fn test_sandbox_creation() {
     let runtime = WasmRuntime::new().unwrap();
-    let permissions = vec![Permission::FileRead(std::path::PathBuf::from("/tmp"))];
+    let permissions = vec![Permission::FileRead {
+        path: "/tmp".into(),
+    }];
     let limits = ResourceLimits::default();
 
     let sandbox = runtime.create_sandbox(permissions, limits);

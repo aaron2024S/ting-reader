@@ -13,11 +13,11 @@ use std::path::Path;
 use tracing::Level;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{
-    filter::{filter_fn, FilterExt},
+    EnvFilter, Layer,
+    filter::{FilterExt, filter_fn},
     fmt,
     layer::SubscriberExt,
     util::SubscriberInitExt,
-    EnvFilter, Layer,
 };
 
 const PLUGIN_LOG_TARGET: &str = "ting_reader::plugin::logger";

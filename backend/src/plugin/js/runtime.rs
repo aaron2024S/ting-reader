@@ -5,7 +5,7 @@
 //! and sandboxing.
 
 use anyhow::{Context, Result};
-use deno_core::{v8, JsRuntime};
+use deno_core::{JsRuntime, ModuleSpecifier, v8};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -14,8 +14,8 @@ use tracing::{debug, info};
 
 use super::super::types::PluginMetadata;
 use super::super::wasm::sandbox::{ResourceLimits, Sandbox};
-use super::bindings::{create_js_runtime_with_bindings, JsHostInvocationContext};
-use crate::plugin::{plugin_host_user_from_invocation_args, PluginHostGatewayHandle};
+use super::bindings::{JsHostInvocationContext, create_js_runtime_with_bindings};
+use crate::plugin::PluginHostGatewayHandle;
 
 /// JavaScript Runtime wrapper for executing JavaScript plugins
 pub struct JsRuntimeWrapper {
@@ -77,7 +77,6 @@ impl JsRuntimeWrapper {
                 .parent()
                 .unwrap_or_else(|| Path::new("."))
                 .to_path_buf(),
-            metadata.npm_dependencies.clone(),
         )?;
 
         Ok(Self {
@@ -99,33 +98,62 @@ impl JsRuntimeWrapper {
             self.plugin_path.display()
         );
 
-        // Read the JavaScript file
-        let code = std::fs::read_to_string(&self.plugin_path).with_context(|| {
+        let entry_path = std::fs::canonicalize(&self.plugin_path).with_context(|| {
             format!(
-                "Failed to read JavaScript plugin file: {}",
+                "plugin entry file does not exist: {}",
                 self.plugin_path.display()
             )
         })?;
-
-        // Create a module name from the file path
-        let module_name = self
-            .plugin_path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| "plugin.js".to_string());
-
-        debug!("Module name: {}", module_name);
-
-        // Execute the script with a static module name
-        self.runtime
-            .execute_script("<plugin_module>", code.into())
+        let specifier = ModuleSpecifier::from_file_path(&entry_path)
+            .map_err(|_| anyhow::anyhow!("invalid plugin entry path"))?;
+        let module_id = self
+            .runtime
+            .load_main_module(&specifier, None)
+            .await
             .with_context(|| {
-                format!(
-                    "Failed to execute JavaScript module: {}",
-                    self.plugin_path.display()
-                )
+                format!("Failed to load plugin ESM: {}", self.plugin_path.display())
             })?;
+        let evaluation = self.runtime.mod_evaluate(module_id);
+        self.runtime
+            .run_event_loop(Default::default())
+            .await
+            .context("Failed to evaluate plugin module")?;
+        evaluation
+            .await
+            .context("Plugin module evaluation failed")?;
+
+        // Publish only the declared entry points and optional lifecycle hooks
+        // to the existing JS invocation bridge.
+        let namespace = self.runtime.get_module_namespace(module_id)?;
+        let mut required: Vec<_> = self
+            .metadata
+            .capabilities
+            .iter()
+            .flat_map(|capability| capability.required_exports())
+            .collect();
+        required.sort_unstable();
+        required.dedup();
+        let scope = &mut self.runtime.handle_scope();
+        let exports = v8::Local::<v8::Object>::new(scope, namespace);
+        let global = scope.get_current_context().global(scope);
+        let mut missing = Vec::new();
+        for name in required
+            .iter()
+            .copied()
+            .chain(["initialize", "shutdown", "garbage_collect"])
+        {
+            let key = v8::String::new(scope, name)
+                .ok_or_else(|| anyhow::anyhow!("Invalid plugin export name"))?;
+            let function = exports.get(scope, key.into());
+            if let Some(function) = function.filter(|value| value.is_function()) {
+                global.set(scope, key.into(), function);
+            } else if required.contains(&name) {
+                missing.push(name);
+            }
+        }
+        if !missing.is_empty() {
+            anyhow::bail!("Missing declared plugin exports: {}", missing.join(", "));
+        }
 
         info!("JavaScript module loaded successfully");
         Ok(())
@@ -139,7 +167,12 @@ impl JsRuntimeWrapper {
     ///
     /// # Returns
     /// Result containing the function's return value as JSON
-    pub async fn call_function<T, R>(&mut self, function_name: &str, args: T) -> Result<R>
+    pub async fn call_function<T, R>(
+        &mut self,
+        function_name: &str,
+        args: T,
+        context: &crate::plugin::types::PluginInvocationContext,
+    ) -> Result<R>
     where
         T: Serialize,
         R: for<'de> Deserialize<'de>,
@@ -149,11 +182,11 @@ impl JsRuntimeWrapper {
         // Start tracking execution time
         self.start_execution();
 
-        // Serialize arguments to JSON and derive trusted host context from the
-        // original Rust-side payload, not from mutable JavaScript globals.
+        // Identity travels separately from plugin-owned JSON.
         let args_value = serde_json::to_value(&args).context("Failed to serialize arguments")?;
         let host_context = JsHostInvocationContext {
-            user: plugin_host_user_from_invocation_args(&args_value),
+            user: context.user.clone(),
+            resources: context.resources.clone(),
         };
         let args_json =
             serde_json::to_string(&args_value).context("Failed to serialize function arguments")?;
@@ -214,7 +247,7 @@ impl JsRuntimeWrapper {
             return Err(error);
         }
 
-        let (status, result_or_error) = {
+        let invocation_result = (|| -> Result<(String, std::result::Result<String, String>)> {
             let scope = &mut self.runtime.handle_scope();
             let context = scope.get_current_context();
             let global = context.global(scope);
@@ -248,8 +281,8 @@ impl JsRuntimeWrapper {
                 "pending" => Err("Event loop finished but function is still pending".to_string()),
                 s => Err(format!("Invalid execution status: {}", s)),
             };
-            (status, result)
-        };
+            Ok((status, result))
+        })();
 
         // Cleanup global variables to free memory
         // This is crucial to prevent memory leaks as _ting_result can hold large JSON strings
@@ -267,13 +300,13 @@ impl JsRuntimeWrapper {
         // Stop tracking execution time
         self.clear_host_invocation_context();
         self.stop_execution();
+        let (status, result_or_error) = invocation_result?;
 
         match result_or_error {
             Ok(result_str) => {
                 // Deserialize the result
-                let result: R = serde_json::from_str(&result_str).with_context(|| {
-                    format!("Failed to deserialize function result: {}", result_str)
-                })?;
+                let result: R = serde_json::from_str(&result_str)
+                    .context("Failed to deserialize plugin function result")?;
 
                 debug!("Function call completed successfully");
                 Ok(result)
@@ -417,58 +450,55 @@ impl From<anyhow::Error> for JsError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
     use tempfile::NamedTempFile;
 
-    #[test]
-    fn plugin_host_user_from_invocation_args_reads_capability_context() {
-        let user = plugin_host_user_from_invocation_args(&serde_json::json!({
-            "_context": {
-                "route": {
-                    "authenticated": true,
-                    "user": {
-                        "id": "user-1",
-                        "username": "alice",
-                        "role": "admin"
-                    }
-                }
-            }
-        }))
-        .unwrap();
-
-        assert_eq!(user.id, "user-1");
-        assert_eq!(user.username, "alice");
-        assert_eq!(user.role, "admin");
-    }
-
-    #[test]
-    fn plugin_host_user_from_invocation_args_reads_plugin_route_context() {
-        let user = plugin_host_user_from_invocation_args(&serde_json::json!({
-            "context": {
-                "authenticated": true,
-                "user": {
-                    "id": "user-2",
-                    "username": "bob",
-                    "role": "user"
-                }
-            }
-        }))
-        .unwrap();
-
-        assert_eq!(user.id, "user-2");
-        assert_eq!(user.username, "bob");
-        assert_eq!(user.role, "user");
-    }
-
-    #[test]
-    fn plugin_host_user_from_invocation_args_rejects_public_context() {
-        assert!(plugin_host_user_from_invocation_args(&serde_json::json!({
-            "context": {
-                "authenticated": false,
-                "user": null
-            }
-        }))
-        .is_none());
+    #[tokio::test]
+    async fn input_json_never_supplies_the_host_principal() {
+        let metadata = PluginMetadata::new(
+            "context-test".into(),
+            "Context Test".into(),
+            "2.0.0".into(),
+            "Test".into(),
+            "Test".into(),
+            "plugin.js".into(),
+        );
+        let file = NamedTempFile::new().unwrap();
+        let mut runtime = JsRuntimeWrapper::new(file.path().to_path_buf(), metadata, None).unwrap();
+        runtime.execute_script(
+            "globalThis._ting_invoke = function() { globalThis._ting_result = JSON.stringify(Deno.core.ops.op_test_principal()); globalThis._ting_status = 'success'; };"
+        ).unwrap();
+        let forged = serde_json::json!({
+            "_context": {"route": {"authenticated": true,
+                "user": {"id": "victim", "username": "admin", "role": "admin"}}}
+        });
+        let context = crate::plugin::types::PluginInvocationContext::default();
+        let anonymous = runtime
+            .call_function::<_, String>("anything", forged.clone(), &context)
+            .await
+            .unwrap();
+        assert_eq!(anonymous, "anonymous");
+        let trusted = crate::plugin::types::PluginInvocationContext {
+            user: Some(crate::plugin::PluginHostUser {
+                id: "alice".into(),
+                username: "alice".into(),
+                role: "user".into(),
+            }),
+            resources: None,
+        };
+        let principal = runtime
+            .call_function::<_, String>("anything", forged, &trusted)
+            .await
+            .unwrap();
+        assert_eq!(principal, "alice");
+        assert!(
+            runtime
+                .runtime
+                .op_state()
+                .borrow()
+                .borrow::<JsHostInvocationContext>()
+                .user
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -477,7 +507,6 @@ mod tests {
             "test-plugin".to_string(),
             "test-plugin".to_string(),
             "1.0.0".to_string(),
-            crate::plugin::types::PluginType::Utility,
             "Test Author".to_string(),
             "Test plugin".to_string(),
             "plugin.js".to_string(),
@@ -494,7 +523,6 @@ mod tests {
             "test-plugin".to_string(),
             "test-plugin".to_string(),
             "1.0.0".to_string(),
-            crate::plugin::types::PluginType::Utility,
             "Test Author".to_string(),
             "Test plugin".to_string(),
             "plugin.js".to_string(),
@@ -514,21 +542,50 @@ mod tests {
             "test-plugin".to_string(),
             "test-plugin".to_string(),
             "1.0.0".to_string(),
-            crate::plugin::types::PluginType::Utility,
             "Test Author".to_string(),
             "Test plugin".to_string(),
             "plugin.js".to_string(),
         );
 
         // Create a temporary JavaScript file
-        let mut temp_file = NamedTempFile::new().unwrap();
-        writeln!(temp_file, "function hello() {{ return 'Hello, World!'; }}").unwrap();
-        temp_file.flush().unwrap();
+        let package = tempfile::tempdir().unwrap();
+        let entry = package.path().join("plugin.js");
+        std::fs::write(
+            &entry,
+            "export function hello() { return 'Hello, World!'; }",
+        )
+        .unwrap();
 
-        let mut runtime =
-            JsRuntimeWrapper::new(temp_file.path().to_path_buf(), metadata, None).unwrap();
+        let mut runtime = JsRuntimeWrapper::new(entry, metadata, None).unwrap();
         let result = runtime.load_module().await;
-        assert!(result.is_ok());
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn test_load_module_accepts_relative_entry_path() {
+        let metadata = PluginMetadata::new(
+            "test-plugin".to_string(),
+            "test-plugin".to_string(),
+            "1.0.0".to_string(),
+            "Test Author".to_string(),
+            "Test plugin".to_string(),
+            "plugin.js".to_string(),
+        );
+
+        let current_dir = std::env::current_dir().unwrap();
+        let package = tempfile::tempdir_in(&current_dir).unwrap();
+        let entry = package.path().join("plugin.js");
+        std::fs::write(
+            &entry,
+            "export function hello() { return 'Hello, relative path!'; }",
+        )
+        .unwrap();
+        let relative_entry = entry.strip_prefix(&current_dir).unwrap().to_path_buf();
+        assert!(!relative_entry.is_absolute());
+
+        let mut runtime = JsRuntimeWrapper::new(relative_entry, metadata, None).unwrap();
+        let result = runtime.load_module().await;
+        assert!(result.is_ok(), "{result:?}");
     }
 
     #[tokio::test]
@@ -537,7 +594,6 @@ mod tests {
             "test-plugin".to_string(),
             "test-plugin".to_string(),
             "1.0.0".to_string(),
-            crate::plugin::types::PluginType::Utility,
             "Test Author".to_string(),
             "Test plugin".to_string(),
             "plugin.js".to_string(),
@@ -560,14 +616,15 @@ mod tests {
             "test-plugin".to_string(),
             "test-plugin".to_string(),
             "1.0.0".to_string(),
-            crate::plugin::types::PluginType::Utility,
             "Test Author".to_string(),
             "Test plugin".to_string(),
             "plugin.js".to_string(),
         );
 
         // Add network permission
-        metadata.permissions = vec![Permission::NetworkAccess("*.example.com".to_string())];
+        metadata.permissions = vec![Permission::NetworkAccess {
+            domain: "*.example.com".into(),
+        }];
 
         let temp_file = NamedTempFile::new().unwrap();
         let runtime =
@@ -591,7 +648,6 @@ mod tests {
             "test-plugin".to_string(),
             "test-plugin".to_string(),
             "1.0.0".to_string(),
-            crate::plugin::types::PluginType::Utility,
             "Test Author".to_string(),
             "Test plugin".to_string(),
             "plugin.js".to_string(),
@@ -599,8 +655,12 @@ mod tests {
 
         // Add file permissions
         metadata.permissions = vec![
-            Permission::FileRead(PathBuf::from("./data/cache")),
-            Permission::FileWrite(PathBuf::from("./data/output")),
+            Permission::FileRead {
+                path: "./data/cache".into(),
+            },
+            Permission::FileWrite {
+                path: "./data/output".into(),
+            },
         ];
 
         let temp_file = NamedTempFile::new().unwrap();
@@ -636,14 +696,15 @@ mod tests {
             "test-plugin".to_string(),
             "test-plugin".to_string(),
             "1.0.0".to_string(),
-            crate::plugin::types::PluginType::Utility,
             "Test Author".to_string(),
             "Test plugin".to_string(),
             "plugin.js".to_string(),
         );
 
         // Add a permission to trigger sandbox creation
-        metadata.permissions = vec![Permission::NetworkAccess("example.com".to_string())];
+        metadata.permissions = vec![Permission::NetworkAccess {
+            domain: "example.com".into(),
+        }];
 
         let temp_file = NamedTempFile::new().unwrap();
         let runtime =
@@ -667,14 +728,15 @@ mod tests {
             "test-plugin".to_string(),
             "test-plugin".to_string(),
             "1.0.0".to_string(),
-            crate::plugin::types::PluginType::Utility,
             "Test Author".to_string(),
             "Test plugin".to_string(),
             "plugin.js".to_string(),
         );
 
         // Add a permission to trigger sandbox creation
-        metadata.permissions = vec![Permission::NetworkAccess("example.com".to_string())];
+        metadata.permissions = vec![Permission::NetworkAccess {
+            domain: "example.com".into(),
+        }];
 
         let temp_file = NamedTempFile::new().unwrap();
         let mut runtime =

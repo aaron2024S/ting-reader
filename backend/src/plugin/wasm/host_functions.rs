@@ -1,459 +1,41 @@
-//! HTTP host functions for WASM runtime
-//!
-//! Registers `ting_env` host functions (http_request, http_post, etc.)
-//! that let WASM plugins make HTTP requests via a blocking reqwest client.
+//! WASM v2 Host control adapter. Binary resources use resource_bindings.
 
 use super::plugin::PluginState;
-use crate::plugin::logger::{emit_plugin_log, PluginLogLevel};
-use crate::plugin::types::PluginLogSource;
-use std::time::Duration;
+use futures::FutureExt;
+use ting_plugin_contract::native_abi::NativeStatus;
 use wasmtime::*;
 
-const ERR_PERMISSION_DENIED: i32 = -7;
 const ERR_INVALID_MEMORY: i32 = -1;
-const ERR_INVALID_UTF8: i32 = -2;
-const ERR_INVALID_JSON: i32 = -3;
-const ERR_MISSING_GATEWAY: i32 = -8;
-const ERR_MISSING_USER: i32 = -9;
-const ERR_MISSING_RUNTIME: i32 = -10;
-const ERR_HOST_PANIC: i32 = -11;
-const ERR_SERIALIZE_RESPONSE: i32 = -12;
+const ERR_INVALID_UTF8: i32 = -1;
+const ERR_INVALID_JSON: i32 = -1;
+const ERR_MISSING_GATEWAY: i32 = -7;
+const ERR_HOST_PANIC: i32 = -7;
+const ERR_SERIALIZE_RESPONSE: i32 = -7;
 
-/// Register all `ting_env` host functions on a linker
-pub fn add_host_functions(linker: &mut Linker<PluginState>) -> Result<(), anyhow::Error> {
-    // ting_http_request(url_ptr, url_len) -> handle (>0) or error (<0)
-    linker
-        .func_wrap(
-            "ting_env",
-            "http_request",
-            |mut caller: Caller<'_, PluginState>, url_ptr: i32, url_len: i32| -> i32 {
-                let mem = match caller.get_export("memory") {
-                    Some(Extern::Memory(mem)) => mem,
-                    _ => return -1,
-                };
-                let ctx = caller.as_context();
-                let data = mem.data(&ctx);
-                let url = match std::str::from_utf8(
-                    &data[url_ptr as usize..(url_ptr + url_len) as usize],
-                ) {
-                    Ok(s) => s,
-                    Err(_) => return -2,
-                };
-
-                log_http_request(caller.data(), "GET", url);
-                if !is_network_allowed(&caller.data().allowed_domains, url) {
-                    log_network_denied(caller.data(), "GET", url);
-                    return ERR_PERMISSION_DENIED;
-                }
-
-                let url_clone = url.to_string();
-                let resp_result = std::thread::spawn(move || {
-                    let client = match reqwest::blocking::Client::builder()
-                        .user_agent("TingReader/1.0")
-                        .timeout(Duration::from_secs(30))
-                        .build()
-                    {
-                        Ok(c) => c,
-                        Err(_) => return Err(-3i32),
-                    };
-
-                    let resp = match client.get(&url_clone).send() {
-                        Ok(r) => r,
-                        Err(_) => return Err(-4i32),
-                    };
-
-                    if !resp.status().is_success() {
-                        return Err(-(resp.status().as_u16() as i32));
-                    }
-
-                    resp.bytes().map(|b| b.to_vec()).map_err(|_| -5)
-                })
-                .join();
-
-                let body = match resp_result {
-                    Ok(Ok(b)) => b,
-                    Ok(Err(e)) => return e,
-                    Err(_) => return -6,
-                };
-
-                log_http_response(caller.data(), &body);
-
-                let handle = (caller.data().http_responses.len() as u32) + 1;
-                caller.data_mut().http_responses.insert(handle, body);
-                handle as i32
-            },
-        )
-        .map_err(|e| anyhow::anyhow!("Failed to define http_request: {}", e))?;
-
-    // ting_http_post(url_ptr, url_len, body_ptr, body_len) -> handle (>0) or error (<0)
-    linker
-        .func_wrap(
-            "ting_env",
-            "http_post",
-            |mut caller: Caller<'_, PluginState>,
-             url_ptr: i32,
-             url_len: i32,
-             body_ptr: i32,
-             body_len: i32|
-             -> i32 {
-                let mem = match caller.get_export("memory") {
-                    Some(Extern::Memory(mem)) => mem,
-                    _ => return -1,
-                };
-                let ctx = caller.as_context();
-                let data = mem.data(&ctx);
-                let url = match std::str::from_utf8(
-                    &data[url_ptr as usize..(url_ptr + url_len) as usize],
-                ) {
-                    Ok(s) => s,
-                    Err(_) => return -2,
-                };
-                let req_body = data[body_ptr as usize..(body_ptr + body_len) as usize].to_vec();
-
-                log_http_request(caller.data(), "POST", url);
-                if !is_network_allowed(&caller.data().allowed_domains, url) {
-                    log_network_denied(caller.data(), "POST", url);
-                    return ERR_PERMISSION_DENIED;
-                }
-
-                let url_clone = url.to_string();
-                let resp_result = std::thread::spawn(move || {
-                    let client = match reqwest::blocking::Client::builder()
-                        .user_agent("TingReader/1.0")
-                        .timeout(Duration::from_secs(30))
-                        .build()
-                    {
-                        Ok(c) => c,
-                        Err(_) => return Err(-3i32),
-                    };
-
-                    let resp = match client
-                        .post(&url_clone)
-                        .header("Content-Type", "application/x-www-form-urlencoded")
-                        .body(req_body)
-                        .send()
-                    {
-                        Ok(r) => r,
-                        Err(_) => return Err(-4i32),
-                    };
-
-                    if !resp.status().is_success() {
-                        return Err(-(resp.status().as_u16() as i32));
-                    }
-                    resp.bytes().map(|b| b.to_vec()).map_err(|_| -5)
-                })
-                .join();
-
-                let body = match resp_result {
-                    Ok(Ok(b)) => b,
-                    Ok(Err(e)) => return e,
-                    Err(_) => return -6,
-                };
-                log_http_response(caller.data(), &body);
-                let handle = (caller.data().http_responses.len() as u32) + 1;
-                caller.data_mut().http_responses.insert(handle, body);
-                handle as i32
-            },
-        )
-        .map_err(|e| anyhow::anyhow!("Failed to define http_post: {}", e))?;
-
-    // ting_http_get_with_token(url_ptr, url_len, token_ptr, token_len) -> handle (>0) or error (<0)
-    linker
-        .func_wrap(
-            "ting_env",
-            "http_get_with_token",
-            |mut caller: Caller<'_, PluginState>,
-             url_ptr: i32,
-             url_len: i32,
-             token_ptr: i32,
-             token_len: i32|
-             -> i32 {
-                let mem = match caller.get_export("memory") {
-                    Some(Extern::Memory(mem)) => mem,
-                    _ => return -1,
-                };
-                let ctx = caller.as_context();
-                let data = mem.data(&ctx);
-                let url = match std::str::from_utf8(
-                    &data[url_ptr as usize..(url_ptr + url_len) as usize],
-                ) {
-                    Ok(s) => s,
-                    Err(_) => return -2,
-                };
-                let token = match std::str::from_utf8(
-                    &data[token_ptr as usize..(token_ptr + token_len) as usize],
-                ) {
-                    Ok(s) => s,
-                    Err(_) => return -2,
-                };
-
-                log_http_request(caller.data(), "GET", url);
-                if !is_network_allowed(&caller.data().allowed_domains, url) {
-                    log_network_denied(caller.data(), "GET", url);
-                    return ERR_PERMISSION_DENIED;
-                }
-
-                let url_clone = url.to_string();
-                let token_clone = token.to_string();
-                let resp_result = std::thread::spawn(move || {
-                    let client = match reqwest::blocking::Client::builder()
-                        .user_agent("TingReader/1.0")
-                        .timeout(Duration::from_secs(30))
-                        .build()
-                    {
-                        Ok(c) => c,
-                        Err(_) => return Err(-3i32),
-                    };
-
-                    let mut req = client.get(&url_clone);
-                    if !token_clone.is_empty() {
-                        req = req.header("Authorization", format!("Bearer {}", token_clone));
-                    }
-                    let resp = match req.send() {
-                        Ok(r) => r,
-                        Err(_) => return Err(-4i32),
-                    };
-                    if !resp.status().is_success() {
-                        return Err(-(resp.status().as_u16() as i32));
-                    }
-                    resp.bytes().map(|b| b.to_vec()).map_err(|_| -5)
-                })
-                .join();
-
-                let body = match resp_result {
-                    Ok(Ok(b)) => b,
-                    Ok(Err(e)) => return e,
-                    Err(_) => return -6,
-                };
-                log_http_response(caller.data(), &body);
-                let handle = (caller.data().http_responses.len() as u32) + 1;
-                caller.data_mut().http_responses.insert(handle, body);
-                handle as i32
-            },
-        )
-        .map_err(|e| anyhow::anyhow!("Failed to define http_get_with_token: {}", e))?;
-
-    // ting_http_request_with_headers(...)
-    linker
-        .func_wrap(
-            "ting_env",
-            "http_request_with_headers",
-            |mut caller: Caller<'_, PluginState>,
-             url_ptr: i32,
-             url_len: i32,
-             method_ptr: i32,
-             method_len: i32,
-             headers_ptr: i32,
-             headers_len: i32,
-             body_ptr: i32,
-             body_len: i32|
-             -> i32 {
-                let mem = match caller.get_export("memory") {
-                    Some(Extern::Memory(mem)) => mem,
-                    _ => return -1,
-                };
-                let ctx = caller.as_context();
-                let data = mem.data(&ctx);
-                let url = match std::str::from_utf8(
-                    &data[url_ptr as usize..(url_ptr + url_len) as usize],
-                ) {
-                    Ok(s) => s,
-                    Err(_) => return -2,
-                };
-                let method = match std::str::from_utf8(
-                    &data[method_ptr as usize..(method_ptr + method_len) as usize],
-                ) {
-                    Ok(s) => s,
-                    Err(_) => return -2,
-                };
-                let headers_json = match std::str::from_utf8(
-                    &data[headers_ptr as usize..(headers_ptr + headers_len) as usize],
-                ) {
-                    Ok(s) => s,
-                    Err(_) => return -2,
-                };
-                let req_body = if body_len > 0 {
-                    data[body_ptr as usize..(body_ptr + body_len) as usize].to_vec()
-                } else {
-                    vec![]
-                };
-
-                log_http_request(caller.data(), method, url);
-                if !is_network_allowed(&caller.data().allowed_domains, url) {
-                    log_network_denied(caller.data(), method, url);
-                    return ERR_PERMISSION_DENIED;
-                }
-
-                let url_clone = url.to_string();
-                let method_clone = method.to_string();
-                let headers_json_clone = headers_json.to_string();
-                let req_body_clone = req_body.clone();
-                let resp_result = std::thread::spawn(move || {
-                    let client = match reqwest::blocking::Client::builder()
-                        .user_agent("TingReader/1.0")
-                        .timeout(Duration::from_secs(30))
-                        .build()
-                    {
-                        Ok(c) => c,
-                        Err(_) => return Err(-3i32),
-                    };
-
-                    let http_method = match method_clone.to_uppercase().as_str() {
-                        "GET" => reqwest::Method::GET,
-                        "POST" => reqwest::Method::POST,
-                        "PUT" => reqwest::Method::PUT,
-                        "DELETE" => reqwest::Method::DELETE,
-                        "HEAD" => reqwest::Method::HEAD,
-                        "OPTIONS" => reqwest::Method::OPTIONS,
-                        "PATCH" => reqwest::Method::PATCH,
-                        _ => reqwest::Method::GET,
-                    };
-                    let mut req = client.request(http_method, &url_clone);
-                    if !headers_json_clone.is_empty()
-                        && let Ok(headers_map) = serde_json::from_str::<
-                            std::collections::HashMap<String, String>,
-                        >(&headers_json_clone)
-                        {
-                            for (k, v) in headers_map {
-                                req = req.header(k, v);
-                            }
-                        }
-                    if !req_body_clone.is_empty() {
-                        req = req.body(req_body_clone);
-                    }
-                    let resp = match req.send() {
-                        Ok(r) => r,
-                        Err(_) => return Err(-4i32),
-                    };
-                    if !resp.status().is_success() {
-                        return Err(-(resp.status().as_u16() as i32));
-                    }
-                    resp.bytes().map(|b| b.to_vec()).map_err(|_| -5)
-                })
-                .join();
-
-                let body = match resp_result {
-                    Ok(Ok(b)) => b,
-                    Ok(Err(e)) => return e,
-                    Err(_) => return -6,
-                };
-                log_http_response(caller.data(), &body);
-                let handle = (caller.data().http_responses.len() as u32) + 1;
-                caller.data_mut().http_responses.insert(handle, body);
-                handle as i32
-            },
-        )
-        .map_err(|e| anyhow::anyhow!("Failed to define http_request_with_headers: {}", e))?;
-
-    // ting_http_response_size(handle) -> size
-    linker
-        .func_wrap(
-            "ting_env",
-            "http_response_size",
-            |caller: Caller<'_, PluginState>, handle: i32| -> i32 {
-                if let Some(body) = caller.data().http_responses.get(&(handle as u32)) {
-                    body.len() as i32
-                } else {
-                    -1
-                }
-            },
-        )
-        .map_err(|e| anyhow::anyhow!("Failed to define http_response_size: {}", e))?;
-
-    // ting_http_read_body(handle, ptr, len) -> bytes_read
-    linker
-        .func_wrap(
-            "ting_env",
-            "http_read_body",
-            |mut caller: Caller<'_, PluginState>, handle: i32, ptr: i32, len: i32| -> i32 {
-                let body = if let Some(b) = caller.data().http_responses.get(&(handle as u32)) {
-                    b.clone()
-                } else {
-                    return -1;
-                };
-                let copy_len = std::cmp::min(body.len(), len as usize);
-                let mem = match caller.get_export("memory") {
-                    Some(Extern::Memory(mem)) => mem,
-                    _ => return -2,
-                };
-                if mem
-                    .write(&mut caller, ptr as usize, &body[..copy_len])
-                    .is_err()
-                {
-                    return -3;
-                }
-                caller.data_mut().http_responses.remove(&(handle as u32));
-                copy_len as i32
-            },
-        )
-        .map_err(|e| anyhow::anyhow!("Failed to define http_read_body: {}", e))?;
-
+pub fn add_host_functions(linker: &mut Linker<PluginState>) -> anyhow::Result<()> {
+    super::resource_bindings::add(linker)?;
     // ting_host_invoke(method_ptr, method_len, params_ptr, params_len) -> handle (>0) or error (<0)
     linker
-        .func_wrap(
+        .func_wrap_async(
             "ting_env",
             "host_invoke",
             |mut caller: Caller<'_, PluginState>,
-             method_ptr: i32,
-             method_len: i32,
-             params_ptr: i32,
-             params_len: i32|
-             -> i32 {
-                let method = match read_wasm_string(&mut caller, method_ptr, method_len) {
-                    Ok(value) => value,
-                    Err(code) => return code,
-                };
-                let params = match read_wasm_json(&mut caller, params_ptr, params_len) {
-                    Ok(value) => value,
-                    Err(code) => return code,
-                };
-
-                let plugin_id = caller.data().plugin_id.clone();
-                let permissions = caller.data().permissions.clone();
-                let gateway = match caller
-                    .data()
-                    .host_gateway
-                    .as_ref()
-                    .and_then(|handle| handle.get())
-                {
-                    Some(gateway) => gateway,
-                    None => return ERR_MISSING_GATEWAY,
-                };
-                let user = match caller.data().current_user.clone() {
-                    Some(user) => user,
-                    None => return ERR_MISSING_USER,
-                };
-                let runtime_handle = match tokio::runtime::Handle::try_current() {
-                    Ok(handle) => handle,
-                    Err(_) => return ERR_MISSING_RUNTIME,
-                };
-
-                let result = std::thread::spawn(move || {
-                    runtime_handle.block_on(async move {
-                        gateway
-                            .invoke_with_permissions(
-                                &plugin_id,
-                                &permissions,
-                                &user,
-                                &method,
-                                params,
-                            )
-                            .await
+             (method_ptr, method_len, params_ptr, params_len): (i32, i32, i32, i32)| {
+                Box::new(async move {
+                    std::panic::AssertUnwindSafe(invoke_host(
+                        &mut caller,
+                        method_ptr,
+                        method_len,
+                        params_ptr,
+                        params_len,
+                    ))
+                    .catch_unwind()
+                    .await
+                    .unwrap_or_else(|_| {
+                        tracing::error!(operation = "host_invoke", "WASM Host callback panicked");
+                        ERR_HOST_PANIC
                     })
                 })
-                .join();
-
-                let response = match result {
-                    Ok(Ok(value)) => value,
-                    Ok(Err(error)) => serde_json::json!({ "error": error.to_string() }),
-                    Err(_) => return ERR_HOST_PANIC,
-                };
-
-                let body = match serde_json::to_vec(&response) {
-                    Ok(body) => body,
-                    Err(_) => return ERR_SERIALIZE_RESPONSE,
-                };
-                store_host_response(&mut caller, body)
             },
         )
         .map_err(|e| anyhow::anyhow!("Failed to define host_invoke: {}", e))?;
@@ -464,11 +46,13 @@ pub fn add_host_functions(linker: &mut Linker<PluginState>) -> Result<(), anyhow
             "ting_env",
             "host_response_size",
             |caller: Caller<'_, PluginState>, handle: i32| -> i32 {
-                if let Some(body) = caller.data().host_responses.get(&(handle as u32)) {
-                    body.len() as i32
-                } else {
-                    -1
-                }
+                guarded_host_callback("host_response_size", || {
+                    caller
+                        .data()
+                        .host_responses
+                        .get(&(handle as u32))
+                        .map_or(-1, |body| body.len() as i32)
+                })
             },
         )
         .map_err(|e| anyhow::anyhow!("Failed to define host_response_size: {}", e))?;
@@ -479,24 +63,30 @@ pub fn add_host_functions(linker: &mut Linker<PluginState>) -> Result<(), anyhow
             "ting_env",
             "host_read_body",
             |mut caller: Caller<'_, PluginState>, handle: i32, ptr: i32, len: i32| -> i32 {
-                let body = if let Some(b) = caller.data().host_responses.get(&(handle as u32)) {
-                    b.clone()
-                } else {
-                    return -1;
-                };
-                let copy_len = std::cmp::min(body.len(), len as usize);
-                let mem = match caller.get_export("memory") {
-                    Some(Extern::Memory(mem)) => mem,
-                    _ => return -2,
-                };
-                if mem
-                    .write(&mut caller, ptr as usize, &body[..copy_len])
-                    .is_err()
-                {
-                    return -3;
-                }
-                caller.data_mut().host_responses.remove(&(handle as u32));
-                copy_len as i32
+                guarded_host_callback("host_read_body", || {
+                    if ptr < 0 || len < 0 {
+                        return -1;
+                    }
+                    let body =
+                        if let Some(body) = caller.data().host_responses.get(&(handle as u32)) {
+                            body.clone()
+                        } else {
+                            return -1;
+                        };
+                    let copy_len = std::cmp::min(body.len(), len as usize);
+                    let mem = match caller.get_export("memory") {
+                        Some(Extern::Memory(mem)) => mem,
+                        _ => return -2,
+                    };
+                    if mem
+                        .write(&mut caller, ptr as usize, &body[..copy_len])
+                        .is_err()
+                    {
+                        return -3;
+                    }
+                    caller.data_mut().host_responses.remove(&(handle as u32));
+                    copy_len as i32
+                })
             },
         )
         .map_err(|e| anyhow::anyhow!("Failed to define host_read_body: {}", e))?;
@@ -504,79 +94,126 @@ pub fn add_host_functions(linker: &mut Linker<PluginState>) -> Result<(), anyhow
     Ok(())
 }
 
-fn emit_wasm_plugin_log(
-    state: &PluginState,
-    source: PluginLogSource,
-    level: PluginLogLevel,
-    message: &str,
-    fields: &serde_json::Value,
-) {
-    let Some(context) = state.plugin_log_context.as_ref() else {
-        return;
+fn guarded_host_callback(operation: &'static str, callback: impl FnOnce() -> i32) -> i32 {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(callback)) {
+        Ok(value) => value,
+        Err(_) => {
+            tracing::error!(operation, "WASM Host callback panicked");
+            ERR_HOST_PANIC
+        }
+    }
+}
+
+async fn invoke_host(
+    caller: &mut Caller<'_, PluginState>,
+    method_ptr: i32,
+    method_len: i32,
+    params_ptr: i32,
+    params_len: i32,
+) -> i32 {
+    let method = match read_wasm_string(caller, method_ptr, method_len) {
+        Ok(value) => value,
+        Err(code) => return code,
     };
-    let mut context = context.clone();
-    context.source = source;
-    emit_plugin_log(&context, level, message, Some(fields));
+    let params = match read_wasm_json(caller, params_ptr, params_len) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+
+    if method.starts_with("resources.") {
+        let Some(scope) = caller.data().resources.clone() else {
+            return NativeStatus::NoScope as i32;
+        };
+        let response = match scope.invoke(&method, params) {
+            Ok(response) => response,
+            Err(error) => return resource_error_status(error.code),
+        };
+        let body = match serde_json::to_vec(&response) {
+            Ok(body) => body,
+            Err(_) => return ERR_SERIALIZE_RESPONSE,
+        };
+        return store_host_response(caller, body);
+    }
+
+    let plugin_id = caller.data().plugin_id.clone();
+    let permissions = caller.data().permissions.clone();
+    let gateway = match caller
+        .data()
+        .host_gateway
+        .as_ref()
+        .and_then(|handle| handle.get())
+    {
+        Some(gateway) => gateway,
+        None => return ERR_MISSING_GATEWAY,
+    };
+    let user = caller.data().current_user.clone();
+    let resources = caller.data().resources.clone();
+    let response = match invoke_host_request(
+        plugin_id,
+        permissions,
+        user,
+        resources,
+        gateway,
+        method,
+        params,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(error) => return host_error_status(error),
+    };
+    let body = match serde_json::to_vec(&response) {
+        Ok(body) => body,
+        Err(_) => return ERR_SERIALIZE_RESPONSE,
+    };
+    store_host_response(caller, body)
 }
 
-fn log_http_request(state: &PluginState, method: &str, url: &str) {
-    let fields = serde_json::json!({
-        "op": "wasm.http.request",
-        "method": method,
-        "url": url,
-    });
-    let message = format!("Plugin {} request URL: {}", method, url);
-    emit_wasm_plugin_log(
-        state,
-        PluginLogSource::Gateway,
-        PluginLogLevel::Info,
-        &message,
-        &fields,
-    );
+async fn invoke_host_request(
+    plugin_id: String,
+    permissions: Vec<ting_plugin_contract::manifest::Permission>,
+    user: Option<crate::plugin::PluginHostUser>,
+    resources: Option<std::sync::Arc<crate::plugin::resources::ResourceScope>>,
+    gateway: std::sync::Arc<crate::plugin::PluginHostGateway>,
+    method: String,
+    params: serde_json::Value,
+) -> crate::core::error::Result<serde_json::Value> {
+    crate::plugin::host_api::invoke(
+        &plugin_id,
+        Some(&permissions),
+        user.as_ref(),
+        resources.as_ref(),
+        Some(&gateway),
+        &method,
+        params,
+    )
+    .await
 }
 
-fn log_network_denied(state: &PluginState, method: &str, url: &str) {
-    let fields = serde_json::json!({
-        "op": "wasm.http.request",
-        "method": method,
-        "url": url,
-        "status": "denied",
-    });
-    emit_wasm_plugin_log(
-        state,
-        PluginLogSource::Security,
-        PluginLogLevel::Warn,
-        "WASM plugin network access denied",
-        &fields,
-    );
+fn resource_error_status(code: ting_plugin_contract::protocol::PluginErrorCode) -> i32 {
+    match code {
+        ting_plugin_contract::protocol::PluginErrorCode::Cancelled => -6,
+        ting_plugin_contract::protocol::PluginErrorCode::ResourceLimit => -5,
+        ting_plugin_contract::protocol::PluginErrorCode::PermissionDenied => -4,
+        _ => -1,
+    }
 }
 
-fn log_http_response(state: &PluginState, body: &[u8]) {
-    let preview = std::str::from_utf8(body)
-        .ok()
-        .map(|body| body.chars().take(200).collect::<String>());
-    let message = preview.as_ref().map_or_else(
-        || format!("Plugin received binary response (length={})", body.len()),
-        |preview| {
-            format!(
-                "Plugin received response (length={}): {}...",
-                body.len(),
-                preview
-            )
-        },
-    );
-    let fields = serde_json::json!({
-        "op": "wasm.http.response",
-        "body_length": body.len(),
-        "body_preview": preview,
-    });
-    emit_wasm_plugin_log(
-        state,
-        PluginLogSource::Gateway,
-        PluginLogLevel::Info,
-        &message,
-        &fields,
-    );
+fn host_error_status(error: crate::core::error::TingError) -> i32 {
+    match error {
+        crate::core::error::TingError::PermissionDenied(_)
+        | crate::core::error::TingError::SecurityViolation(_) => {
+            NativeStatus::PermissionDenied as i32
+        }
+        crate::core::error::TingError::ResourceLimitExceeded(_) => {
+            NativeStatus::ResourceLimit as i32
+        }
+        crate::core::error::TingError::NotFound(_)
+        | crate::core::error::TingError::PluginNotFound(_) => NativeStatus::NotFound as i32,
+        crate::core::error::TingError::InvalidRequest(_)
+        | crate::core::error::TingError::ValidationError(_) => NativeStatus::InvalidInput as i32,
+        _ => NativeStatus::InternalError as i32,
+    }
 }
 
 fn read_wasm_bytes(
@@ -584,7 +221,7 @@ fn read_wasm_bytes(
     ptr: i32,
     len: i32,
 ) -> std::result::Result<Vec<u8>, i32> {
-    if ptr < 0 || len < 0 {
+    if ptr < 0 || !(0..=1024 * 1024).contains(&len) {
         return Err(ERR_INVALID_MEMORY);
     }
 
@@ -625,6 +262,19 @@ fn read_wasm_json(
 }
 
 fn store_host_response(caller: &mut Caller<'_, PluginState>, body: Vec<u8>) -> i32 {
+    if body.len() > 1024 * 1024
+        || caller.data().host_responses.len() >= 128
+        || caller
+            .data()
+            .host_responses
+            .values()
+            .map(Vec::len)
+            .sum::<usize>()
+            + body.len()
+            > 8 * 1024 * 1024
+    {
+        return ting_plugin_contract::native_abi::NativeStatus::ResourceLimit as i32;
+    }
     let handle = caller
         .data()
         .host_responses
@@ -637,130 +287,13 @@ fn store_host_response(caller: &mut Caller<'_, PluginState>, body: Vec<u8>) -> i
     handle as i32
 }
 
-pub(crate) fn is_network_allowed(allowed_domains: &[String], url: &str) -> bool {
-    if allowed_domains.is_empty() {
-        return false;
-    }
-
-    let Ok(parsed) = url::Url::parse(url) else {
-        return false;
-    };
-    let Some(domain) = parsed.host_str() else {
-        return false;
-    };
-
-    allowed_domains
-        .iter()
-        .any(|pattern| domain_matches(domain, pattern.trim()))
-}
-
-fn domain_matches(domain: &str, pattern: &str) -> bool {
-    if pattern.is_empty() {
-        return false;
-    }
-
-    if pattern == "*" {
-        true
-    } else if let Some(base) = pattern.strip_prefix("*.") {
-        domain == base || domain.ends_with(&format!(".{}", base))
-    } else {
-        domain == pattern
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
-    use std::sync::{Arc, Mutex};
-    use tracing_subscriber::fmt::MakeWriter;
-
-    #[derive(Clone, Default)]
-    struct CapturedWriter(Arc<Mutex<Vec<u8>>>);
-
-    struct CapturedGuard(Arc<Mutex<Vec<u8>>>);
-
-    impl Write for CapturedGuard {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl<'a> MakeWriter<'a> for CapturedWriter {
-        type Writer = CapturedGuard;
-
-        fn make_writer(&'a self) -> Self::Writer {
-            CapturedGuard(self.0.clone())
-        }
-    }
 
     #[test]
-    fn wasm_http_activity_uses_plugin_log_target() {
-        let writer = CapturedWriter::default();
-        let subscriber = tracing_subscriber::fmt()
-            .json()
-            .with_writer(writer.clone())
-            .finish();
-        let state = PluginState {
-            plugin_log_context: Some(crate::plugin::types::PluginLogContext {
-                plugin_id: "scraper-id".to_string(),
-                plugin_instance_id: "scraper-id@1.0.0".to_string(),
-                plugin_name: "Scraper".to_string(),
-                plugin_version: "1.0.0".to_string(),
-                runtime: "wasm".to_string(),
-                source: PluginLogSource::Gateway,
-            }),
-            ..Default::default()
-        };
-
-        tracing::subscriber::with_default(subscriber, || {
-            log_http_request(&state, "GET", "https://example.com/search");
-        });
-
-        let output = String::from_utf8(writer.0.lock().unwrap().clone()).unwrap();
-        let event: serde_json::Value = serde_json::from_str(output.trim()).unwrap();
-        assert_eq!(
-            event.get("target").and_then(serde_json::Value::as_str),
-            Some("ting_reader::plugin::logger")
-        );
-        let fields = event.get("fields").unwrap();
-        assert_eq!(
-            fields.get("plugin_id").and_then(serde_json::Value::as_str),
-            Some("scraper-id")
-        );
-        assert!(fields
-            .get("plugin_fields")
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|value| value.contains("wasm.http.request")));
-    }
-
-    #[test]
-    fn wasm_network_permission_denies_when_no_domains_declared() {
-        assert!(!is_network_allowed(&[], "https://example.com/data"));
-    }
-
-    #[test]
-    fn wasm_network_permission_allows_exact_and_wildcard_domains() {
-        let allowed = vec!["api.example.com".to_string(), "*.trusted.test".to_string()];
-
-        assert!(is_network_allowed(
-            &allowed,
-            "https://api.example.com/v1/search"
-        ));
-        assert!(is_network_allowed(
-            &allowed,
-            "https://cdn.trusted.test/resource"
-        ));
-        assert!(is_network_allowed(&allowed, "https://trusted.test/root"));
-        assert!(!is_network_allowed(&allowed, "https://evil.example.com"));
-        assert!(is_network_allowed(
-            &["*".to_string()],
-            "https://evil.example.com"
-        ));
+    fn host_callback_panics_become_internal_status() {
+        let status = guarded_host_callback("test", || panic!("test panic"));
+        assert_eq!(status, ERR_HOST_PANIC);
     }
 }

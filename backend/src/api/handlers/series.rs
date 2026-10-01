@@ -4,10 +4,10 @@ use crate::core::error::{Result, TingError};
 use crate::db::models::{Series, SeriesBook};
 use crate::db::repository::Repository;
 use axum::{
+    Json,
     extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
-    Json,
 };
 use uuid::Uuid;
 
@@ -27,6 +27,10 @@ pub async fn list_series(
         .find_with_filters(&user.id, is_admin, library_id)
         .await?;
 
+    let percentages =
+        crate::db::repository::reading::ReadingRepository::new(state.book_repo.db().clone())
+            .percentages(&user.id)
+            .await?;
     let mut response = Vec::new();
     for series in series_list {
         let mut s_res = SeriesResponse::from(series.clone());
@@ -37,7 +41,11 @@ pub async fn list_series(
 
         s_res.books = books
             .into_iter()
-            .map(|(b, _)| BookResponse::from(b))
+            .map(|(b, _)| {
+                let mut response = BookResponse::from(b);
+                response.progress_percent = percentages.get(&response.id).copied().unwrap_or(0.0);
+                response
+            })
             .collect();
         response.push(s_res);
     }
@@ -70,14 +78,30 @@ pub async fn get_series(
         ));
     }
 
+    let percentages =
+        crate::db::repository::reading::ReadingRepository::new(state.book_repo.db().clone())
+            .percentages(&user.id)
+            .await?;
     let mut response = SeriesResponse::from(series.clone());
     let books = state
         .series_repo
         .find_books_by_series_with_filters(&series.id, &user.id, is_admin)
         .await?;
+    let library_types: std::collections::HashMap<String, String> = state
+        .library_repo
+        .find_all()
+        .await?
+        .into_iter()
+        .map(|library| (library.id, library.library_type))
+        .collect();
     response.books = books
         .into_iter()
-        .map(|(b, _)| BookResponse::from(b))
+        .map(|(b, _)| {
+            let mut response = BookResponse::from(b);
+            response.library_type = library_types.get(&response.library_id).cloned();
+            response.progress_percent = percentages.get(&response.id).copied().unwrap_or(0.0);
+            response
+        })
         .collect();
 
     Ok(Json(response))
@@ -105,20 +129,21 @@ pub async fn create_series(
     let mut description = req.description;
 
     if !req.book_ids.is_empty()
-        && let Some(first_book) = state.book_repo.find_by_id(&req.book_ids[0]).await? {
-            if author.is_none() {
-                author = first_book.author;
-            }
-            if narrator.is_none() {
-                narrator = first_book.narrator;
-            }
-            if cover_url.is_none() {
-                cover_url = first_book.cover_url;
-            }
-            if description.is_none() {
-                description = first_book.description;
-            }
+        && let Some(first_book) = state.book_repo.find_by_id(&req.book_ids[0]).await?
+    {
+        if author.is_none() {
+            author = first_book.author;
         }
+        if narrator.is_none() {
+            narrator = first_book.narrator;
+        }
+        if cover_url.is_none() {
+            cover_url = first_book.cover_url;
+        }
+        if description.is_none() {
+            description = first_book.description;
+        }
+    }
 
     let series = Series {
         id: series_id.clone(),
@@ -174,12 +199,20 @@ pub async fn create_series(
         }
     }
 
+    let percentages =
+        crate::db::repository::reading::ReadingRepository::new(state.book_repo.db().clone())
+            .percentages(&user.id)
+            .await?;
     let mut response = SeriesResponse::from(series);
     // Fetch added books to return full response
     let books = state.series_repo.find_books_by_series(&series_id).await?;
     response.books = books
         .into_iter()
-        .map(|(b, _)| BookResponse::from(b))
+        .map(|(b, _)| {
+            let mut response = BookResponse::from(b);
+            response.progress_percent = percentages.get(&response.id).copied().unwrap_or(0.0);
+            response
+        })
         .collect();
 
     Ok((StatusCode::CREATED, Json(response)))
@@ -306,11 +339,19 @@ pub async fn update_series(
         }
     }
 
+    let percentages =
+        crate::db::repository::reading::ReadingRepository::new(state.book_repo.db().clone())
+            .percentages(&user.id)
+            .await?;
     let mut response = SeriesResponse::from(updated_series);
     let books = state.series_repo.find_books_by_series(&id).await?;
     response.books = books
         .into_iter()
-        .map(|(b, _)| BookResponse::from(b))
+        .map(|(b, _)| {
+            let mut response = BookResponse::from(b);
+            response.progress_percent = percentages.get(&response.id).copied().unwrap_or(0.0);
+            response
+        })
         .collect();
 
     Ok(Json(response))
@@ -364,6 +405,14 @@ async fn update_book_metadata_series(state: &AppState, book_id: &str) -> Result<
     use crate::db::repository::Repository;
 
     if let Some(book) = state.book_repo.find_by_id(book_id).await? {
+        if let Some(library) = state.library_repo.find_by_id(&book.library_id).await? {
+            if library.library_type == "webdav" {
+                return super::books::save_webdav_metadata(state, &book).await;
+            }
+            if library.library_type == "rss" {
+                return Ok(());
+            }
+        }
         let path = std::path::Path::new(&book.path);
 
         // Read existing metadata

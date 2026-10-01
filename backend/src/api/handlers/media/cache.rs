@@ -8,8 +8,8 @@ use crate::api::require_admin;
 use crate::core::error::{Result, TingError};
 use crate::db::repository::Repository;
 use axum::{
-    extract::{Path, State},
     Json,
+    extract::{Path, State},
 };
 
 /// POST /api/cache/:chapterId - Cache a chapter from remote to local
@@ -53,9 +53,10 @@ pub async fn cache_chapter(
             .get_cache_info(&chapter_id)
             .await
             .map_err(|e| {
-                TingError::IoError(std::io::Error::other(
-                    format!("Failed to get cache info: {}", e),
-                ))
+                TingError::IoError(std::io::Error::other(format!(
+                    "Failed to get cache info: {}",
+                    e
+                )))
             })?
     } else {
         let temp_path = cache_path.with_extension("tmp");
@@ -70,11 +71,7 @@ pub async fn cache_chapter(
                 .get_http_reader(&chapter.path, None)
                 .await
         }
-        .map_err(|e| {
-            TingError::IoError(std::io::Error::other(
-                e.to_string(),
-            ))
-        })?;
+        .map_err(|e| TingError::IoError(std::io::Error::other(e.to_string())))?;
 
         let mut file = tokio::fs::File::create(&temp_path).await?;
         tokio::io::copy(&mut reader, &mut file).await?;
@@ -91,9 +88,10 @@ pub async fn cache_chapter(
             .get_cache_info(&chapter_id)
             .await
             .map_err(|e| {
-                TingError::IoError(std::io::Error::other(
-                    format!("Failed to get cache info: {}", e),
-                ))
+                TingError::IoError(std::io::Error::other(format!(
+                    "Failed to get cache info: {}",
+                    e
+                )))
             })?
     };
 
@@ -126,9 +124,10 @@ pub async fn get_cache_list(
     require_admin(&user)?;
 
     let cached_chapters = state.cache_manager.list_cached().await.map_err(|e| {
-        TingError::IoError(std::io::Error::other(
-            format!("Failed to list caches: {}", e),
-        ))
+        TingError::IoError(std::io::Error::other(format!(
+            "Failed to list caches: {}",
+            e
+        )))
     })?;
 
     let mut caches = Vec::new();
@@ -204,9 +203,10 @@ pub async fn delete_chapter_cache(
             crate::cache::CacheError::NotFound(_) => {
                 TingError::NotFound(format!("Cache for chapter {} not found", chapter_id))
             }
-            _ => TingError::IoError(std::io::Error::other(
-                format!("Failed to delete cache: {}", e),
-            )),
+            _ => TingError::IoError(std::io::Error::other(format!(
+                "Failed to delete cache: {}",
+                e
+            ))),
         })?;
 
     Ok(Json(CacheOperationResponse {
@@ -224,9 +224,10 @@ pub async fn clear_all_caches(
     require_admin(&user)?;
 
     let deleted_count = state.cache_manager.clear_all().await.map_err(|e| {
-        TingError::IoError(std::io::Error::other(
-            format!("Failed to clear caches: {}", e),
-        ))
+        TingError::IoError(std::io::Error::other(format!(
+            "Failed to clear caches: {}",
+            e
+        )))
     })?;
 
     Ok(Json(ClearCacheResponse {

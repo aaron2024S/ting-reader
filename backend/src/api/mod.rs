@@ -15,7 +15,7 @@ pub mod server;
 pub mod utils;
 pub mod ws;
 
-pub use middleware::{trace_id_middleware, TraceId, TRACE_ID_HEADER};
+pub use middleware::{TRACE_ID_HEADER, TraceId, trace_id_middleware};
 pub use models::{ErrorResponse, SearchQuery, SearchResponse};
 pub use server::ApiServer;
 pub use utils::require_admin;

@@ -4,7 +4,7 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{error, info};
 
-use super::super::types::{Plugin, PluginContext, PluginMetadata, PluginType};
+use super::super::types::{Plugin, PluginContext, PluginInvocationContext, PluginMetadata};
 use super::plugin::JavaScriptPluginLoader;
 use crate::core::error::{Result, TingError};
 use crate::plugin::PluginHostGatewayHandle;
@@ -21,6 +21,7 @@ enum JsCommand {
     CallFunction {
         name: String,
         args: Value,
+        context: PluginInvocationContext,
         resp: oneshot::Sender<Result<Value>>,
     },
     GarbageCollect {
@@ -159,9 +160,16 @@ impl JavaScriptPluginWrapper {
                                     let _ = resp.send(result);
                                     break;
                                 }
-                                JsCommand::CallFunction { name, args, resp } => {
+                                JsCommand::CallFunction {
+                                    name,
+                                    args,
+                                    context,
+                                    resp,
+                                } => {
                                     let result = executor
-                                        .call_function::<Value, Value>(&name, args)
+                                        .call_function_with_context::<Value, Value>(
+                                            &name, args, &context,
+                                        )
                                         .await
                                         .map_err(|e| {
                                             TingError::PluginExecutionError(e.to_string())
@@ -236,7 +244,9 @@ impl JavaScriptPluginWrapper {
                             "JS plugin {} passed early initialization check (3s)",
                             plugin_id
                         );
-                        info!("Note: Plugin is still initializing in background, full initialization may take up to 30s");
+                        info!(
+                            "Note: Plugin is still initializing in background, full initialization may take up to 30s"
+                        );
                     }
                 }
             }
@@ -259,12 +269,17 @@ impl JavaScriptPluginWrapper {
 
 #[async_trait::async_trait]
 impl Plugin for JavaScriptPluginWrapper {
-    fn metadata(&self) -> &PluginMetadata {
-        &self.metadata
+    async fn invoke(
+        &self,
+        operation: &str,
+        input: Value,
+        context: &PluginInvocationContext,
+    ) -> crate::core::error::Result<Value> {
+        self.call_function(operation, input, context).await
     }
 
-    fn plugin_type(&self) -> PluginType {
-        self.metadata.plugin_type
+    fn metadata(&self) -> &PluginMetadata {
+        &self.metadata
     }
 
     async fn initialize(&self, context: &PluginContext) -> Result<()> {
@@ -324,21 +339,23 @@ impl Plugin for JavaScriptPluginWrapper {
             )),
         }
     }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
 }
 
 // Add method to call arbitrary functions (not part of Plugin trait but used by Manager)
 impl JavaScriptPluginWrapper {
-    pub async fn call_function(&self, name: &str, args: Value) -> Result<Value> {
+    pub async fn call_function(
+        &self,
+        name: &str,
+        args: Value,
+        context: &PluginInvocationContext,
+    ) -> Result<Value> {
         let (resp_tx, resp_rx) = oneshot::channel();
 
         self.tx
             .send(JsCommand::CallFunction {
                 name: name.to_string(),
                 args,
+                context: context.clone(),
                 resp: resp_tx,
             })
             .await

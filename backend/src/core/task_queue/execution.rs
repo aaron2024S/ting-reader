@@ -1,11 +1,11 @@
 use super::{Task, TaskPayload, TaskQueue};
-use crate::core::error::Result;
+use crate::core::error::{Result, TingError};
 use crate::db::repository::Repository;
 use id3::frame::{Picture, PictureType as Id3PictureType};
 use id3::{Tag, TagLike, Version};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
@@ -35,7 +35,8 @@ impl TaskQueue {
             }
             TaskPayload::PluginInvoke {
                 plugin_id,
-                method,
+                capability_id,
+                operation,
                 params,
             } => {
                 let plugin_manager = self.plugin_manager.as_ref().ok_or_else(|| {
@@ -46,11 +47,18 @@ impl TaskQueue {
 
                 info!(
                     plugin_id = %plugin_id,
-                    method = %method,
+                    capability_id = %capability_id,
+                    operation = %operation,
                     "Executing plugin invoke task"
                 );
                 plugin_manager
-                    .invoke_plugin(plugin_id, method, params.clone())
+                    .invoke_capability(
+                        plugin_id,
+                        capability_id,
+                        operation,
+                        params.clone(),
+                        &crate::plugin::types::PluginInvocationContext::default(),
+                    )
                     .await?;
             }
             TaskPayload::Custom { task_type, data } => match task_type.as_str() {
@@ -82,8 +90,14 @@ impl TaskQueue {
         let plugin_manager = self.plugin_manager.as_ref().ok_or_else(|| {
             crate::core::error::TingError::TaskError("Plugin manager not configured".to_string())
         })?;
+        let owner = data
+            .get("_ting_task_owner")
+            .and_then(|value| value.as_str());
         let handlers = plugin_manager.find_task_handlers(Some(task_type)).await;
-        let Some(handler) = handlers.into_iter().next() else {
+        let Some(handler) = handlers
+            .into_iter()
+            .find(|handler| owner.is_none_or(|owner| handler.registration.plugin_id == owner))
+        else {
             warn!(task_type = %task_type, "Unknown task type");
             return Err(crate::core::error::TingError::TaskError(format!(
                 "Unknown task type: {}",
@@ -91,31 +105,30 @@ impl TaskQueue {
             )));
         };
 
-        let invoke_method = handler
-            .registration
-            .capability
-            .invoke
-            .clone()
-            .unwrap_or_else(|| handler.registration.capability.id.clone());
-
         info!(
             task_id = %task_id,
             task_type = %task_type,
             plugin_id = %handler.registration.plugin_id,
-            capability_id = %handler.registration.capability.id,
+            capability_id = %handler.registration.capability.id(),
             "Dispatching custom task to plugin task_handler"
         );
 
+        let handler_data = data
+            .get("_ting_task_input")
+            .cloned()
+            .unwrap_or_else(|| data.clone());
         plugin_manager
-            .invoke_plugin(
+            .invoke_capability(
                 &handler.registration.plugin_id,
-                &invoke_method,
+                handler.registration.capability.id(),
+                "run",
                 serde_json::json!({
                     "task_id": task_id,
                     "task_type": task_type,
-                    "data": data,
-                    "capability_id": handler.registration.capability.id,
+                    "data": handler_data,
+                    "capability_id": handler.registration.capability.id(),
                 }),
+                &crate::plugin::types::PluginInvocationContext::default(),
             )
             .await?;
 
@@ -333,7 +346,7 @@ impl TaskQueue {
             crate::core::error::TingError::NotFound(format!("Book with id {} not found", book_id))
         })?;
 
-        // Check if library is local
+        // Recheck the setting when executing a previously queued task.
         let library = library_repo
             .find_by_id(&book.library_id)
             .await?
@@ -344,59 +357,75 @@ impl TaskQueue {
                 ))
             })?;
 
-        if library.library_type != "local" {
-            return Err(crate::core::error::TingError::InvalidRequest(
-                "Only local libraries are supported for metadata writing".to_string(),
+        if !library.can_write_metadata_files() {
+            return Err(TingError::InvalidRequest(
+                "Metadata file writing is disabled for this library".to_string(),
             ));
         }
+        let remote = library.library_type == "webdav";
+        let storage = if remote {
+            Some(self.storage_service.as_ref().ok_or_else(|| {
+                TingError::TaskError("WebDAV storage service is not configured".into())
+            })?)
+        } else {
+            None
+        };
+        let key = self.encryption_key.as_deref().unwrap_or(&[0; 32]);
 
         // Resolve cover path
         let mut cover_path_str = None;
         let mut temp_cover_path = None;
 
         if let Some(ref url) = book.cover_url {
-            if url.starts_with("http://") || url.starts_with("https://") {
-                // Download to temp
-                let temp_dir = self.temp_dir.join("ting-reader-covers");
-                if !temp_dir.exists() {
-                    tokio::fs::create_dir_all(&temp_dir)
-                        .await
-                        .map_err(crate::core::error::TingError::IoError)?;
-                }
+            if crate::core::webdav_metadata::is_cover_url(url) {
+                if remote {
+                    // URL covers remain references; the explicit audio write
+                    // only embeds file covers already held in the book cache.
+                    cover_path_str = None;
+                } else {
+                    // Download to temp
+                    let temp_dir = self.temp_dir.join("ting-reader-covers");
+                    if !temp_dir.exists() {
+                        tokio::fs::create_dir_all(&temp_dir)
+                            .await
+                            .map_err(crate::core::error::TingError::IoError)?;
+                    }
 
-                let mut fetch_url = url.clone();
-                let mut referer = "".to_string();
-                if let Some(idx) = fetch_url.find("#referer=") {
-                    referer = fetch_url[idx + 9..].to_string();
-                    fetch_url = fetch_url[..idx].to_string();
-                }
+                    let mut fetch_url = url.clone();
+                    let mut referer = "".to_string();
+                    if let Some(idx) = fetch_url.find("#referer=") {
+                        referer = fetch_url[idx + 9..].to_string();
+                        fetch_url = fetch_url[..idx].to_string();
+                    }
 
-                let ext = std::path::Path::new(&fetch_url)
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .unwrap_or("jpg");
-                let file_name = format!("{}.{}", Uuid::new_v4(), ext);
-                let path = temp_dir.join(file_name);
+                    let ext = std::path::Path::new(&fetch_url)
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .unwrap_or("jpg");
+                    let file_name = format!("{}.{}", Uuid::new_v4(), ext);
+                    let path = temp_dir.join(file_name);
 
-                // Download
-                let client = reqwest::Client::new();
-                let mut req = client.get(&fetch_url).header(
-                    reqwest::header::USER_AGENT,
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                );
-                if !referer.is_empty() {
-                    req = req.header(reqwest::header::REFERER, referer);
-                }
+                    // Download
+                    let client = reqwest::Client::new();
+                    let mut req = client.get(&fetch_url).header(
+                        reqwest::header::USER_AGENT,
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                    );
+                    if !referer.is_empty() {
+                        req = req.header(reqwest::header::REFERER, referer);
+                    }
 
-                match req.send().await {
-                    Ok(resp) => {
-                        if let Ok(bytes) = resp.bytes().await
-                            && tokio::fs::write(&path, bytes).await.is_ok() {
+                    match req.send().await {
+                        Ok(resp) => {
+                            if let Ok(bytes) = resp.bytes().await
+                                && tokio::fs::write(&path, bytes).await.is_ok()
+                            {
                                 temp_cover_path = Some(path.clone());
                                 cover_path_str = Some(path.to_string_lossy().to_string());
                             }
+                        }
+                        Err(e) => warn!("Failed to download cover for metadata writing: {}", e),
                     }
-                    Err(e) => warn!("Failed to download cover for metadata writing: {}", e),
                 }
             } else {
                 // Local path
@@ -404,7 +433,11 @@ impl TaskQueue {
                 if path.is_absolute() || path.exists() {
                     cover_path_str = Some(url.clone());
                 } else {
-                    let book_path = std::path::Path::new(&book.path);
+                    let book_path = if remote {
+                        crate::core::metadata_writer::remote_metadata_dir(&book.path)?
+                    } else {
+                        PathBuf::from(&book.path)
+                    };
                     let joined = book_path.join(url);
                     // If joined path exists, use it. Otherwise fallback to original URL
                     // to avoid double-pathing (e.g. ./storage/./storage/...)
@@ -426,6 +459,16 @@ impl TaskQueue {
         let total_chapters = chapters.len();
 
         for (index, chapter) in chapters.iter().enumerate() {
+            if self
+                .task_repo
+                .find_by_id(task_id)
+                .await?
+                .is_some_and(|task| task.status == "cancelled")
+            {
+                return Err(TingError::TaskError(
+                    "Metadata writing was cancelled".into(),
+                ));
+            }
             // Update progress
             let _ = self
                 .task_repo
@@ -440,8 +483,8 @@ impl TaskQueue {
                 )
                 .await;
 
-            let path = std::path::Path::new(&chapter.path);
-            let ext = path
+            let source_path = std::path::Path::new(&chapter.path);
+            let ext = source_path
                 .extension()
                 .unwrap_or_default()
                 .to_string_lossy()
@@ -453,37 +496,58 @@ impl TaskQueue {
                 continue;
             }
 
+            let mut remote_file = None;
+            if let Some(storage) = storage {
+                let temporary = TemporaryMetadataFile(self.temp_dir.join(format!(
+                    "metadata-{}.{}",
+                    Uuid::new_v4(),
+                    ext
+                )));
+                let download = async {
+                    tokio::fs::create_dir_all(&self.temp_dir).await?;
+                    let source = storage
+                        .get_webdav_write_source(&library, &book.path, &chapter.path, key)
+                        .await?;
+                    let mut reader = source.reader;
+                    let mut file = tokio::fs::File::create(&temporary.0).await?;
+                    let copied = tokio::io::copy(&mut reader, &mut file).await?;
+                    if source.length > 0 && copied != source.length {
+                        return Err(TingError::NetworkError(
+                            "Incomplete WebDAV audio download".into(),
+                        ));
+                    }
+                    Ok::<_, TingError>(source.revision)
+                }
+                .await;
+                match download {
+                    Ok(revision) => remote_file = Some((temporary, revision)),
+                    Err(error) => {
+                        warn!(chapter_id = %chapter.id, error = %error, "Failed to download chapter for metadata writing");
+                        error_count += 1;
+                        continue;
+                    }
+                }
+            }
+            let path = remote_file
+                .as_ref()
+                .map(|(file, _)| file.0.as_path())
+                .unwrap_or(source_path);
             if !path.exists() {
                 error_count += 1;
                 continue;
             }
+            let successful_before = success_count;
 
-            // Detect the actual container instead of trusting the extension. Files downloaded
-            // from some sources may be M4A/MP4 data incorrectly named with a .mp3 suffix.
-            let detected_format = detect_audio_format(path).unwrap_or_else(|| ext.to_string());
-            if detected_format != ext {
-                warn!(
-                    "Audio extension mismatch for {:?}: extension={}, detected={}",
-                    path, ext, detected_format
-                );
-            }
-            let plugins = plugin_manager
-                .find_plugins_by_capability_kind("format_handler")
-                .await;
+            // A special format can have an ID3 header even when its payload
+            // is encrypted. Select its declared extension before generic
+            // container sniffing; the format registry verifies it with probe.
+            let special_format = plugin_manager
+                .find_capabilities_by_kind("format_handler")
+                .await
+                .into_iter()
+                .any(|registration| registration.capability.extensions().contains(&ext));
 
-            // Route by the detected container so mislabeled files use the correct tag writer.
-            let plugin_info = plugins.into_iter().find(|p| {
-                p.supported_extensions
-                    .as_ref()
-                    .map(|extensions| {
-                        extensions
-                            .iter()
-                            .any(|supported| supported.eq_ignore_ascii_case(&detected_format))
-                    })
-                    .unwrap_or(false)
-            });
-
-            if let Some(plugin) = plugin_info {
+            if special_format {
                 let artist = if let Some(narrator) = &book.narrator {
                     if !narrator.trim().is_empty() {
                         narrator.as_str()
@@ -494,32 +558,53 @@ impl TaskQueue {
                     book.author.as_deref().unwrap_or("")
                 };
 
-                let metadata = serde_json::json!({
-                    "file_path": chapter.path,
-                    "title": chapter.title.as_deref().unwrap_or(""),
-                    "artist": artist,
-                    "album": book.title.as_deref().unwrap_or(""),
-                    "genre": book.genre.as_deref().unwrap_or(""),
-                    "description": book.description.as_deref().unwrap_or(""),
-                    "cover_path": cover_path_str,
-                    "detected_format": detected_format,
-                });
-
+                let patch = ting_plugin_contract::format_calls::MetadataPatch {
+                    title: ting_plugin_contract::format_calls::PatchField::Set(
+                        chapter.title.clone().unwrap_or_default(),
+                    ),
+                    artist: ting_plugin_contract::format_calls::PatchField::Set(artist.into()),
+                    album: ting_plugin_contract::format_calls::PatchField::Set(
+                        book.title.clone().unwrap_or_default(),
+                    ),
+                    genre: ting_plugin_contract::format_calls::PatchField::Set(
+                        book.genre.clone().unwrap_or_default(),
+                    ),
+                    description: ting_plugin_contract::format_calls::PatchField::Set(
+                        book.description.clone().unwrap_or_default(),
+                    ),
+                    ..Default::default()
+                };
                 match plugin_manager
-                    .call_format(
-                        &plugin.id,
-                        crate::plugin::manager::FormatMethod::WriteMetadata,
-                        metadata,
+                    .write_local_format_metadata(
+                        path,
+                        patch,
+                        cover_path_str.as_deref().map(std::path::Path::new),
                     )
                     .await
                 {
-                    Ok(_) => success_count += 1,
+                    Ok(true) => success_count += 1,
+                    Ok(false) => {
+                        warn!(
+                            "Declared format plugin does not support metadata writing for {}",
+                            ext
+                        );
+                        error_count += 1;
+                    }
                     Err(e) => {
                         warn!("Failed to write metadata for {}: {}", chapter.path, e);
                         error_count += 1;
                     }
                 }
             } else {
+                // Generic formats may have a misleading filename extension.
+                // Sniff only after ruling out special format declarations.
+                let detected_format = detect_audio_format(path).unwrap_or_else(|| ext.to_string());
+                if detected_format != ext {
+                    warn!(
+                        "Audio extension mismatch for {:?}: extension={}, detected={}",
+                        path, ext, detected_format
+                    );
+                }
                 // No plugin found, try native/builtin support
                 if detected_format == "mp3" {
                     let path_clone = path.to_path_buf();
@@ -558,21 +643,22 @@ impl TaskQueue {
                         });
 
                         if let Some(cp) = cover_path_str_clone
-                            && let Ok(data) = std::fs::read(&cp) {
-                                let mime_type = if cp.to_lowercase().ends_with("png") {
-                                    "image/png".to_string()
-                                } else {
-                                    "image/jpeg".to_string()
-                                };
+                            && let Ok(data) = std::fs::read(&cp)
+                        {
+                            let mime_type = if cp.to_lowercase().ends_with("png") {
+                                "image/png".to_string()
+                            } else {
+                                "image/jpeg".to_string()
+                            };
 
-                                tag.remove_all_pictures();
-                                tag.add_frame(Picture {
-                                    mime_type,
-                                    picture_type: Id3PictureType::CoverFront,
-                                    description: "Cover".to_string(),
-                                    data,
-                                });
-                            }
+                            tag.remove_all_pictures();
+                            tag.add_frame(Picture {
+                                mime_type,
+                                picture_type: Id3PictureType::CoverFront,
+                                description: "Cover".to_string(),
+                                data,
+                            });
+                        }
 
                         tag.write_to_path(&path_clone, Version::Id3v23)
                             .map_err(|e| {
@@ -603,6 +689,49 @@ impl TaskQueue {
                         }
                     }
                 } else {
+                    error_count += 1;
+                }
+            }
+            if success_count > successful_before
+                && let Some((temporary, revision)) = &remote_file
+                && let Some(storage) = storage
+            {
+                // A library setting changed while downloading/writing must
+                // take effect before committing anything to the drive.
+                let commit = async {
+                    let current = library_repo.find_by_id(&library.id).await?.ok_or_else(|| {
+                        TingError::NotFound("WebDAV library no longer exists".into())
+                    })?;
+                    if !current.can_write_metadata_files() {
+                        return Err(TingError::PermissionDenied(
+                            "WebDAV metadata writing has been disabled".into(),
+                        ));
+                    }
+                    if self
+                        .task_repo
+                        .find_by_id(task_id)
+                        .await?
+                        .is_some_and(|task| task.status == "cancelled")
+                    {
+                        return Err(TingError::TaskError(
+                            "Metadata writing was cancelled".into(),
+                        ));
+                    }
+                    storage
+                        .put_webdav_audio_file(
+                            &current,
+                            &book.path,
+                            &chapter.path,
+                            &temporary.0,
+                            revision,
+                            key,
+                        )
+                        .await
+                }
+                .await;
+                if let Err(error) = commit {
+                    warn!(chapter_id = %chapter.id, error = %error, "Failed to commit WebDAV chapter metadata");
+                    success_count -= 1;
                     error_count += 1;
                 }
             }
@@ -644,7 +773,20 @@ impl TaskQueue {
             "Book metadata write completed"
         );
 
+        if remote && error_count > 0 {
+            return Err(TingError::TaskError(format!(
+                "WebDAV metadata writing: {success_count} succeeded, {error_count} failed, {skipped_count} skipped"
+            )));
+        }
         Ok(())
+    }
+}
+
+struct TemporaryMetadataFile(PathBuf);
+
+impl Drop for TemporaryMetadataFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
     }
 }
 

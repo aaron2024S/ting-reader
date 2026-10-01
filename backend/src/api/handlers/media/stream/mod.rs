@@ -2,7 +2,7 @@ mod decrypt;
 mod hls;
 mod hls_serve;
 mod hls_session;
-mod preload;
+pub(crate) mod preload;
 mod strm;
 
 use crate::api::handlers::AppState;
@@ -11,7 +11,6 @@ use crate::core::error::{Result, TingError};
 use crate::core::signing::{constant_time_eq, sign_media_stream_request, signature_has_expired};
 use crate::db::models::{Chapter, Library};
 use crate::db::repository::Repository;
-use crate::plugin::manager::{FormatMethod, PluginInfo};
 use axum::{
     body::Body,
     extract::{Path, Query, State},
@@ -23,8 +22,8 @@ pub use hls::handle_hls_request;
 pub use hls_serve::{get_hls_playlist, get_hls_segment, seek_hls_stream};
 pub use hls_session::HlsSessionManager;
 use std::process::Stdio;
+use ting_plugin_contract::format::FormatOperation;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
-use tokio::process::Command;
 use tokio_util::io::ReaderStream;
 
 /// Query parameters for stream chapter
@@ -34,6 +33,7 @@ pub struct StreamQuery {
     pub transcode: Option<String>,
     pub seek: Option<String>,
     pub download: Option<String>,
+    pub preload: Option<bool>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -108,7 +108,6 @@ async fn get_remote_media_reader(
 }
 
 struct PluginTranscodeOptions<'a> {
-    ffmpeg_path: &'a str,
     format: &'a str,
     content_type: &'a str,
     seek: Option<&'a str>,
@@ -118,19 +117,17 @@ async fn transcode_plugin_stream(
     state: &AppState,
     chapter: &Chapter,
     library: &Library,
-    plugin: &PluginInfo,
     options: PluginTranscodeOptions<'_>,
 ) -> Result<axum::response::Response> {
     let PluginTranscodeOptions {
-        ffmpeg_path,
         format,
         content_type,
         seek,
     } = options;
     let (plugin_stream, _, _, _, _, _, _) =
-        create_decrypted_stream(state, chapter, library, plugin, None).await?;
+        create_decrypted_stream(state, chapter, library, None).await?;
 
-    let mut cmd = Command::new(ffmpeg_path);
+    let mut cmd = crate::core::audio::AudioService::ffmpeg_command()?;
     cmd.arg("-y").arg("-loglevel").arg("error");
     if let Some(seek_time) = seek {
         cmd.arg("-ss").arg(seek_time);
@@ -168,7 +165,6 @@ async fn transcode_plugin_stream(
 
     tracing::info!(
         chapter_id = %chapter.id,
-        plugin = %plugin.name,
         format = %format,
         "Using format plugin decoded stream for transcoded output"
     );
@@ -176,9 +172,7 @@ async fn transcode_plugin_stream(
     let mut child = cmd.spawn().map_err(TingError::IoError)?;
 
     let mut stdin = child.stdin.take().ok_or_else(|| {
-        TingError::IoError(std::io::Error::other(
-            "Failed to capture ffmpeg stdin",
-        ))
+        TingError::IoError(std::io::Error::other("Failed to capture ffmpeg stdin"))
     })?;
 
     tokio::spawn(async move {
@@ -219,20 +213,13 @@ async fn transcode_plugin_stream(
         });
     }
 
-    let stdout = child.stdout.take().ok_or_else(|| {
-        TingError::IoError(std::io::Error::other(
-            "Failed to capture ffmpeg stdout",
-        ))
-    })?;
-
-    let stream = ReaderStream::new(stdout);
+    let stream = crate::core::audio::AudioService::output_stream(child)?;
     let body = Body::from_stream(stream);
     use axum::http::header;
     Ok((
         StatusCode::OK,
         [
             (header::CONTENT_TYPE, content_type.to_string()),
-            (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*".to_string()),
             (
                 "Cross-Origin-Resource-Policy".parse().unwrap(),
                 "cross-origin".to_string(),
@@ -288,33 +275,31 @@ pub async fn stream_chapter(
 
     let is_download_request = is_download_query(&params);
 
-    // Handle .strm files (URL Redirect or Proxy)
+    // STRM playback redirects to the source unless transcoding was requested.
     if ext == "strm" {
-        return strm::handle_strm_stream(
-            state,
-            &chapter_id,
-            chapter,
-            book,
-            library,
-            &params,
-            &headers,
-        )
-        .await;
+        if !is_download_request {
+            preload::cancel_auto_preload(&state, user.as_ref()).await;
+        }
+        return strm::handle_strm_stream(state, &chapter_id, chapter, book, library, &params).await;
+    }
+    if params.transcode.is_some() && !is_download_request {
+        preload::cancel_auto_preload(&state, user.as_ref()).await;
     }
     // Handle HLS Transcoding Request
     if let Some(format) = &params.transcode
-        && format == "hls" {
-            tracing::info!("Requested HLS transcoding: {}", chapter.path);
-            return handle_hls_request(
-                state,
-                chapter,
-                book,
-                library,
-                ext == "strm",
-                params.seek.clone(),
-            )
-            .await;
-        }
+        && format == "hls"
+    {
+        tracing::info!("Requested HLS transcoding: {}", chapter.path);
+        return handle_hls_request(
+            state,
+            chapter,
+            book,
+            library,
+            ext == "strm",
+            params.seek.clone(),
+        )
+        .await;
+    }
 
     // Handle Transcoding Request
     if let Some(format) = &params.transcode {
@@ -326,30 +311,23 @@ pub async fn stream_chapter(
             _ => {
                 return Err(TingError::InvalidRequest(
                     "Unsupported transcode format".to_string(),
-                ))
+                ));
             }
         };
 
-        let ffmpeg_path = state
-            .plugin_manager
-            .get_ffmpeg_path()
-            .await
-            .ok_or_else(|| {
-                TingError::IoError(std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    "FFmpeg plugin binary not found",
-                ))
-            })?;
         let cache_path = state.cache_manager.get_cache_path(&chapter_id);
-        let plugin_info = state
+        let plugin_handles_format = state
             .plugin_manager
-            .find_plugin_for_format(std::path::Path::new(&chapter.path))
-            .await;
+            .has_format_operation(
+                std::path::Path::new(&chapter.path),
+                FormatOperation::OpenDecrypt,
+            )
+            .await?;
 
         // Check if we can use direct URL transcoding (for WebDAV or cached files).
         // Plugin-backed formats must be decoded/decrypted before FFmpeg sees them.
         let can_use_direct_url =
-            library.library_type != "local" && !cache_path.exists() && plugin_info.is_none();
+            library.library_type != "local" && !cache_path.exists() && !plugin_handles_format;
 
         if can_use_direct_url {
             // WebDAV files: Use direct URL transcoding (same as STRM)
@@ -405,23 +383,12 @@ pub async fn stream_chapter(
 
             tracing::info!("Transcoding from direct URL: {}", webdav_url_str);
 
-            let ffmpeg_tools = state
-                .plugin_manager
-                .get_ffmpeg_tool_paths()
-                .await
-                .ok_or_else(|| {
-                    TingError::IoError(std::io::Error::new(
-                        std::io::ErrorKind::NotFound,
-                        "FFmpeg plugin binaries not found",
-                    ))
-                })?;
-
             // Get duration using FFprobe
 
             // Add delay to avoid overwhelming the server
             tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
-            let duration_output = Command::new(&ffmpeg_tools.ffprobe)
+            let duration_output = crate::core::audio::AudioService::ffprobe_command()?
                 .arg("-v")
                 .arg("error")
                 .arg("-show_entries")
@@ -465,7 +432,7 @@ pub async fn stream_chapter(
             }
 
             // Build FFmpeg command to transcode directly from URL
-            let mut cmd = Command::new(&ffmpeg_tools.ffmpeg);
+            let mut cmd = crate::core::audio::AudioService::ffmpeg_command()?;
             cmd.arg("-y").arg("-loglevel").arg("warning");
 
             // Add seek parameter if present (must be before -i for input seeking)
@@ -510,12 +477,6 @@ pub async fn stream_chapter(
             // Spawn FFmpeg process
             let mut child = cmd.spawn().map_err(TingError::IoError)?;
 
-            let stdout = child.stdout.take().ok_or_else(|| {
-                TingError::IoError(std::io::Error::other(
-                    "Failed to capture ffmpeg stdout",
-                ))
-            })?;
-
             let stderr = child.stderr.take();
 
             // Log FFmpeg errors
@@ -530,7 +491,7 @@ pub async fn stream_chapter(
             }
 
             // Create streaming response from FFmpeg stdout
-            let stream = ReaderStream::new(stdout);
+            let stream = crate::core::audio::AudioService::output_stream(child)?;
             let body = Body::from_stream(stream);
 
             // Build response with duration header if available
@@ -539,7 +500,6 @@ pub async fn stream_chapter(
                     StatusCode::OK,
                     [
                         (header::CONTENT_TYPE, content_type.to_string()),
-                        (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*".to_string()),
                         (
                             "Cross-Origin-Resource-Policy".parse().unwrap(),
                             "cross-origin".to_string(),
@@ -554,7 +514,6 @@ pub async fn stream_chapter(
                     StatusCode::OK,
                     [
                         (header::CONTENT_TYPE, content_type.to_string()),
-                        (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*".to_string()),
                         (
                             "Cross-Origin-Resource-Policy".parse().unwrap(),
                             "cross-origin".to_string(),
@@ -566,287 +525,218 @@ pub async fn stream_chapter(
             }
         }
 
-        // Fallback: Use plugin or pipe-based transcoding for local/cached files
-        // 1. Try to get transcode command from plugin
-        let mut plugin_command: Option<Vec<String>> = None;
-
-        if let Some(plugin) = &plugin_info {
-            let res = state
-                .plugin_manager
-                .call_format(
-                    &plugin.id,
-                    FormatMethod::GetStreamUrl,
-                    serde_json::json!({
-                        "file_path": chapter.path,
-                        "transcode": format,
-                        "seek": params.seek,
-                        "download": is_download_request
-                    }),
-                )
-                .await;
-
-            if let Ok(val) = res
-                && let Some(cmd) = val.get("command").and_then(|c| c.as_array()) {
-                    let cmd_vec: Vec<String> = cmd
-                        .iter()
-                        .filter_map(|v| v.as_str())
-                        .map(|s| s.to_string())
-                        .collect();
-                    if !cmd_vec.is_empty() {
-                        plugin_command = Some(cmd_vec);
-                        tracing::info!(
-                            "Using plugin-provided transcode command for {}",
-                            chapter.path
-                        );
-                    }
-                }
+        if plugin_handles_format {
+            return transcode_plugin_stream(
+                &state,
+                &chapter,
+                &library,
+                PluginTranscodeOptions {
+                    format,
+                    content_type,
+                    seek: params.seek.as_deref(),
+                },
+            )
+            .await;
         }
 
-        if let Some(cmd_vec) = plugin_command {
-            let mut cmd = Command::new(&cmd_vec[0]);
-            cmd.args(&cmd_vec[1..]);
-
-            // If the plugin command uses "-" or "pipe:0" for input, we need to enable stdin pipe
-            // The plugin should return "-" as input argument for piped input
-            let use_pipe = !cache_path.exists() && library.library_type != "local";
-            if use_pipe {
-                cmd.stdin(Stdio::piped());
-            }
-
-            cmd.stdout(Stdio::piped());
-
-            // Spawn
-            let mut child = cmd.spawn().map_err(TingError::IoError)?;
-
-            // Handle input pipe if needed (Only if we are using the fallback pipe logic)
-            if use_pipe && child.stdin.is_some()
-                && let Some(mut stdin) = child.stdin.take() {
-                    // Get reader
-                    let (mut reader, _) =
-                        get_remote_media_reader(&state, &library, &chapter.path, None).await?;
-
-                    tokio::spawn(async move {
-                        if let Err(e) = tokio::io::copy(&mut reader, &mut stdin).await {
-                            tracing::error!(
-                                error = %e,
-                                message_key = "media.ffmpeg.pipe_failed",
-                                message_params = %serde_json::json!({ "error": e.to_string() }),
-                                "Failed to pipe input to FFmpeg"
-                            );
-                        }
-                    });
-                }
-
-            let stdout = child.stdout.take().ok_or_else(|| {
-                TingError::IoError(std::io::Error::other(
-                    "Failed to capture ffmpeg stdout",
-                ))
-            })?;
-
-            let stream = ReaderStream::new(stdout);
-            let body = Body::from_stream(stream);
-
-            return Ok((
-                StatusCode::OK,
-                [
-                    (header::CONTENT_TYPE, content_type.to_string()),
-                    (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*".to_string()),
-                    (
-                        "Cross-Origin-Resource-Policy".parse().unwrap(),
-                        "cross-origin".to_string(),
-                    ),
-                ],
-                body,
-            )
-                .into_response());
-        } else {
-            if let Some(plugin) = &plugin_info {
-                return transcode_plugin_stream(
-                    &state,
-                    &chapter,
-                    &library,
-                    plugin,
-                    PluginTranscodeOptions {
-                        ffmpeg_path: &ffmpeg_path,
-                        format,
-                        content_type,
-                        seek: params.seek.as_deref(),
-                    },
-                )
-                .await;
-            }
-
-            // Fallback to hardcoded logic
-            let mut cmd = Command::new(&ffmpeg_path);
-            cmd.arg("-y").arg("-loglevel").arg("error");
-
-            if let Some(seek_time) = &params.seek {
-                cmd.arg("-ss").arg(seek_time);
-            }
-
-            cmd.arg("-i");
-
-            // Input Source
-            if cache_path.exists() {
-                cmd.arg(cache_path.to_string_lossy().as_ref());
+        // Streaming MP3 output may not expose a finite duration to clients.
+        // Recover missing metadata from the full local/cache source before seeking.
+        let mut duration_seconds = chapter
+            .duration
+            .filter(|duration| *duration > 0)
+            .map(f64::from);
+        if duration_seconds.is_none() {
+            let source_path = if cache_path.exists() {
+                Some(cache_path.as_path())
             } else if library.library_type == "local" {
-                cmd.arg(&chapter.path);
+                Some(std::path::Path::new(&chapter.path))
             } else {
-                // Pipe input
-                cmd.arg("-");
-                cmd.stdin(Stdio::piped());
-            }
-
-            if format == "mp3" {
-                cmd.arg("-fflags")
-                    .arg("+genpts+igndts")
-                    .arg("-avoid_negative_ts")
-                    .arg("make_zero")
-                    .arg("-acodec")
-                    .arg("libmp3lame")
-                    .arg("-b:a")
-                    .arg("128k")
-                    .arg("-ac")
-                    .arg("2")
-                    .arg("-ar")
-                    .arg("44100")
-                    .arg("-vn")
-                    .arg("-map")
-                    .arg("0:a:0");
-            }
-
-            cmd.arg("-f").arg(format).arg("-");
-
-            cmd.stdout(Stdio::piped());
-
-            let mut child = cmd.spawn().map_err(TingError::IoError)?;
-
-            // Handle input pipe if needed (Only if we are using the fallback pipe logic)
-            let use_pipe = !cache_path.exists() && library.library_type != "local";
-            if use_pipe && child.stdin.is_some()
-                && let Some(mut stdin) = child.stdin.take() {
-                    // Get reader
-                    let (mut reader, _) =
-                        get_remote_media_reader(&state, &library, &chapter.path, None).await?;
-
-                    tokio::spawn(async move {
-                        if let Err(e) = tokio::io::copy(&mut reader, &mut stdin).await {
-                            tracing::error!(
-                                error = %e,
-                                message_key = "media.ffmpeg.pipe_failed",
-                                message_params = %serde_json::json!({ "error": e.to_string() }),
-                                "Failed to pipe input to FFmpeg"
-                            );
+                None
+            };
+            if let Some(source_path) = source_path {
+                match crate::core::audio::AudioService::probe_duration(source_path).await {
+                    Ok(Some(duration)) => {
+                        duration_seconds = Some(duration);
+                        if let Ok(Some(mut chapter_record)) =
+                            state.chapter_repo.find_by_id(&chapter_id).await
+                            && chapter_record.duration.unwrap_or(0) <= 0
+                        {
+                            chapter_record.duration = Some(duration.round() as i32);
+                            if let Err(error) = state.chapter_repo.update(&chapter_record).await {
+                                tracing::warn!(
+                                    chapter_id = %chapter_id,
+                                    %error,
+                                    "Failed to save transcoded source duration"
+                                );
+                            }
                         }
-                    });
-                }
-
-            let stdout = child.stdout.take().ok_or_else(|| {
-                TingError::IoError(std::io::Error::other(
-                    "Failed to capture ffmpeg stdout",
-                ))
-            })?;
-
-            let stream = ReaderStream::new(stdout);
-            let body = Body::from_stream(stream);
-
-            return Ok((
-                StatusCode::OK,
-                [
-                    (header::CONTENT_TYPE, content_type.to_string()),
-                    (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*".to_string()),
-                    (
-                        "Cross-Origin-Resource-Policy".parse().unwrap(),
-                        "cross-origin".to_string(),
+                    }
+                    Ok(None) => {}
+                    Err(error) => tracing::warn!(
+                        chapter_id = %chapter_id,
+                        %error,
+                        "Failed to detect transcoded source duration"
                     ),
-                ],
-                body,
-            )
-                .into_response());
+                }
+            }
         }
+
+        let mut cmd = crate::core::audio::AudioService::ffmpeg_command()?;
+        cmd.arg("-y").arg("-loglevel").arg("error");
+
+        if let Some(seek_time) = &params.seek {
+            cmd.arg("-ss").arg(seek_time);
+        }
+
+        cmd.arg("-i");
+
+        // Input Source
+        if cache_path.exists() {
+            cmd.arg(cache_path.to_string_lossy().as_ref());
+        } else if library.library_type == "local" {
+            cmd.arg(&chapter.path);
+        } else {
+            // Pipe input
+            cmd.arg("-");
+            cmd.stdin(Stdio::piped());
+        }
+
+        if format == "mp3" {
+            cmd.arg("-fflags")
+                .arg("+genpts+igndts")
+                .arg("-avoid_negative_ts")
+                .arg("make_zero")
+                .arg("-acodec")
+                .arg("libmp3lame")
+                .arg("-b:a")
+                .arg("128k")
+                .arg("-ac")
+                .arg("2")
+                .arg("-ar")
+                .arg("44100")
+                .arg("-vn")
+                .arg("-map")
+                .arg("0:a:0");
+        }
+
+        cmd.arg("-f").arg(format).arg("-");
+
+        cmd.stdout(Stdio::piped());
+
+        let mut child = cmd.spawn().map_err(TingError::IoError)?;
+
+        // Handle input pipe if needed (Only if we are using the fallback pipe logic)
+        let use_pipe = !cache_path.exists() && library.library_type != "local";
+        if use_pipe
+            && child.stdin.is_some()
+            && let Some(mut stdin) = child.stdin.take()
+        {
+            // Get reader
+            let (mut reader, _) =
+                get_remote_media_reader(&state, &library, &chapter.path, None).await?;
+
+            tokio::spawn(async move {
+                if let Err(e) = tokio::io::copy(&mut reader, &mut stdin).await {
+                    tracing::error!(
+                        error = %e,
+                        message_key = "media.ffmpeg.pipe_failed",
+                        message_params = %serde_json::json!({ "error": e.to_string() }),
+                        "Failed to pipe input to FFmpeg"
+                    );
+                }
+            });
+        }
+
+        let stream = crate::core::audio::AudioService::output_stream(child)?;
+        let body = Body::from_stream(stream);
+
+        let mut response = (
+            StatusCode::OK,
+            [
+                (header::CONTENT_TYPE, content_type.to_string()),
+                (
+                    "Cross-Origin-Resource-Policy".parse().unwrap(),
+                    "cross-origin".to_string(),
+                ),
+            ],
+            body,
+        )
+            .into_response();
+        if let Some(duration) = duration_seconds {
+            response
+                .headers_mut()
+                .insert("X-Audio-Duration", duration.to_string().parse().unwrap());
+        }
+        return Ok(response);
     }
 
     // ... existing code ...
 
-    preload::maybe_spawn_auto_preload(&state, user.as_ref(), &book, &chapter_id, &library).await;
-    // 1. Check Preload Cache (Memory)
+    if !is_download_request && !params.preload.unwrap_or(false) {
+        preload::maybe_spawn_auto_preload(&state, user.as_ref(), &book, &chapter_id, &library)
+            .await;
+    }
+    let cached = preload::cached_chapter(&state, &chapter_id).await;
+    let cached_size_unknown = cached
+        .as_ref()
+        .is_some_and(|entry| entry.total_size.is_none());
+    let plugin_handles_format = if cached.is_some() {
+        state
+            .plugin_manager
+            .has_format_operation(
+                std::path::Path::new(&chapter.path),
+                FormatOperation::OpenDecrypt,
+            )
+            .await?
+    } else {
+        false
+    };
+    // 1. Serve a bounded memory prefix, then stream the source remainder.
+    if let Some(entry) = cached
+        && !plugin_handles_format
     {
-        let mut cache = state.preload_cache.write().await;
-        if let Some((data, last_access)) = cache.get_mut(&chapter_id) {
-            // Check if we need to use a format plugin even for cached files (source file is cached)
-            let plugin_info = state
-                .plugin_manager
-                .find_plugin_for_format(std::path::Path::new(&chapter.path))
-                .await;
-
-            if plugin_info.is_some() {
-                // If a plugin handles this format, we CANNOT use the preload cache directly if it contains encrypted data.
-                // The current preload implementation stores raw bytes.
-                // TODO: Implement decrypted preload cache or handle decryption here.
-                // For now, skip preload cache for plugin-handled files to avoid sending encrypted data to client.
-                tracing::info!(chapter_id = %chapter_id, "Skipping preload cache for plugin-processed file");
-            } else {
-                // Update access time to implement LRU (keep frequently accessed chapters in memory)
-                *last_access = std::time::Instant::now();
-
-                tracing::debug!(target: "media", chapter_id = %chapter_id, "Serving from preload cache (memory)");
-                let data = data.clone(); // Clone bytes (cheap reference count increment)
-                                         // Drop write lock early
-                drop(cache);
-
-                let file_size = data.len() as u64;
-                let mime_type = stream_mime_type_from_path(&chapter.path);
-
-                let range_header = headers.get(header::RANGE).and_then(|v| v.to_str().ok());
-
-                if let Some(range_str) = range_header
-                    && let Ok(range) = state
-                        .audio_streamer
-                        .parse_range_header(range_str, file_size)
-                    {
-                        let start = range.start as usize;
-                        let end = range.end as usize;
-                        let content_length = (end - start) as u64;
-                        let body = data[start..end].to_vec();
-
-                        return Ok((
-                            StatusCode::PARTIAL_CONTENT,
-                            [
-                                (header::CONTENT_TYPE, mime_type),
-                                // (header::CONTENT_LENGTH, content_length.to_string()), // Removed to allow chunked transfer encoding for encrypted streams
-                                (
-                                    header::CONTENT_RANGE,
-                                    format!("bytes {}-{}/{}", start, end - 1, file_size),
-                                ),
-                                (header::CONTENT_LENGTH, content_length.to_string()),
-                                (header::ACCEPT_RANGES, "bytes".to_string()),
-                                (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*".to_string()),
-                                (
-                                    "Cross-Origin-Resource-Policy".parse().unwrap(),
-                                    "cross-origin".to_string(),
-                                ),
-                            ],
-                            body,
-                        )
-                            .into_response());
-                    }
-
-                return Ok((
-                    StatusCode::OK,
-                    [
-                        (header::CONTENT_TYPE, mime_type),
-                        (header::CONTENT_LENGTH, file_size.to_string()),
-                        (header::ACCEPT_RANGES, "bytes".to_string()),
-                        (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*".to_string()),
-                        (
-                            "Cross-Origin-Resource-Policy".parse().unwrap(),
-                            "cross-origin".to_string(),
-                        ),
-                    ],
-                    data.to_vec(),
-                )
-                    .into_response());
-            }
+        let tail_state = state.clone();
+        let tail_library = library.clone();
+        let tail_path = chapter.path.clone();
+        let tail_chapter_id = chapter_id.clone();
+        let response = preload::prefix_response(
+            entry,
+            &state.audio_streamer,
+            headers
+                .get(header::RANGE)
+                .and_then(|value| value.to_str().ok()),
+            stream_mime_type_from_path(&chapter.path),
+            is_head_request,
+            move |start, end| async move {
+                let cache_path = tail_state.cache_manager.get_cache_path(&tail_chapter_id);
+                if cache_path.exists() || tail_library.library_type == "local" {
+                    let path = if cache_path.exists() {
+                        cache_path
+                    } else {
+                        std::path::PathBuf::from(tail_path)
+                    };
+                    let (file, size) = tail_state
+                        .storage_service
+                        .get_local_reader(&path, Some((start, end)))
+                        .await?;
+                    Ok((
+                        Box::new(file) as Box<dyn tokio::io::AsyncRead + Send + Unpin>,
+                        size,
+                    ))
+                } else {
+                    get_remote_media_reader(
+                        &tail_state,
+                        &tail_library,
+                        &tail_path,
+                        Some((start, end)),
+                    )
+                    .await
+                }
+            },
+        )?;
+        if let Some(response) = response {
+            tracing::debug!(target: "media", chapter_id = %chapter_id, "Serving preloaded prefix with streaming remainder");
+            return Ok(response);
         }
     }
 
@@ -856,15 +746,21 @@ pub async fn stream_chapter(
         tracing::debug!(target: "media", chapter_id = %chapter_id, "Serving from disk cache");
 
         // Check if we need to use a format plugin even for cached files (source file is cached)
-        let plugin_info = state
+        let plugin_handles_format = state
             .plugin_manager
-            .find_plugin_for_format(std::path::Path::new(&chapter.path))
-            .await;
+            .has_format_operation(
+                std::path::Path::new(&chapter.path),
+                FormatOperation::OpenDecrypt,
+            )
+            .await?;
 
-        if let Some(plugin) = plugin_info {
+        if plugin_handles_format {
             // If a plugin handles this format, we use the cached file as the source for the plugin logic
             // instead of serving it directly.
-            tracing::info!(chapter_id = %chapter_id, plugin = %plugin.name, "Cached file requires format plugin processing");
+            tracing::info!(
+                chapter_id = %chapter_id,
+                "Cached file requires format plugin processing"
+            );
 
             // Fall through to the plugin handling logic below
             // We need to make sure the logic below knows to use the cache_path as source
@@ -878,33 +774,35 @@ pub async fn stream_chapter(
                 && let Ok(range) = state
                     .audio_streamer
                     .parse_range_header(range_str, file_size)
-                {
-                    let content_length = range.end - range.start;
-                    let mut file = tokio::fs::File::open(&cache_path).await?;
-                    file.seek(std::io::SeekFrom::Start(range.start)).await?;
-                    let mut buffer = vec![0u8; content_length as usize];
-                    file.read_exact(&mut buffer).await?;
+            {
+                let content_length = range.end - range.start;
+                let mut file = tokio::fs::File::open(&cache_path).await?;
+                file.seek(std::io::SeekFrom::Start(range.start)).await?;
+                let body = if is_head_request {
+                    Body::empty()
+                } else {
+                    Body::from_stream(ReaderStream::new(file.take(content_length)))
+                };
 
-                    return Ok((
-                        StatusCode::PARTIAL_CONTENT,
-                        [
-                            (header::CONTENT_TYPE, mime_type.clone()),
-                            (header::CONTENT_LENGTH, content_length.to_string()),
-                            (
-                                header::CONTENT_RANGE,
-                                format!("bytes {}-{}/{}", range.start, range.end - 1, file_size),
-                            ),
-                            (header::ACCEPT_RANGES, "bytes".to_string()),
-                            (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*".to_string()),
-                            (
-                                "Cross-Origin-Resource-Policy".parse().unwrap(),
-                                "cross-origin".to_string(),
-                            ),
-                        ],
-                        buffer,
-                    )
-                        .into_response());
-                }
+                return Ok((
+                    StatusCode::PARTIAL_CONTENT,
+                    [
+                        (header::CONTENT_TYPE, mime_type.clone()),
+                        (header::CONTENT_LENGTH, content_length.to_string()),
+                        (
+                            header::CONTENT_RANGE,
+                            format!("bytes {}-{}/{}", range.start, range.end - 1, file_size),
+                        ),
+                        (header::ACCEPT_RANGES, "bytes".to_string()),
+                        (
+                            "Cross-Origin-Resource-Policy".parse().unwrap(),
+                            "cross-origin".to_string(),
+                        ),
+                    ],
+                    body,
+                )
+                    .into_response());
+            }
 
             let file = tokio::fs::File::open(&cache_path).await?;
             let stream = ReaderStream::new(file);
@@ -915,13 +813,12 @@ pub async fn stream_chapter(
                     (header::CONTENT_TYPE, mime_type),
                     (header::CONTENT_LENGTH, file_size.to_string()),
                     (header::ACCEPT_RANGES, "bytes".to_string()),
-                    (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*".to_string()),
                     (
                         "Cross-Origin-Resource-Policy".parse().unwrap(),
                         "cross-origin".to_string(),
                     ),
                 ],
-                body,
+                if is_head_request { Body::empty() } else { body },
             )
                 .into_response());
         }
@@ -932,13 +829,16 @@ pub async fn stream_chapter(
 
     // Determine if we need to use a format plugin
     // Instead of hardcoding extensions, we ask the plugin manager if any loaded plugin supports this extension
-    let plugin_info = state
+    let plugin_handles_format = state
         .plugin_manager
-        .find_plugin_for_format(std::path::Path::new(&chapter.path))
-        .await;
+        .has_format_operation(
+            std::path::Path::new(&chapter.path),
+            FormatOperation::OpenDecrypt,
+        )
+        .await?;
 
-    if let Some(plugin) = plugin_info {
-        tracing::info!(chapter_id = %chapter_id, plugin = %plugin.name, "Processing file with format plugin");
+    if plugin_handles_format {
+        tracing::info!(chapter_id = %chapter_id, "Processing file with format plugin");
 
         let range_header = headers.get(header::RANGE).and_then(|v| v.to_str().ok());
         let (stream, mime_type, output_extension, content_length, start, end, logic_size) =
@@ -946,7 +846,6 @@ pub async fn stream_chapter(
                 &state,
                 &chapter,
                 &library,
-                &plugin,
                 range_header.map(|s| s.to_string()),
             )
             .await?;
@@ -967,6 +866,16 @@ pub async fn stream_chapter(
         let body = Body::from_stream(stream);
 
         if range_header.is_some() {
+            let content_length = content_length.ok_or_else(|| {
+                TingError::PluginExecutionError(
+                    "Format stream returned a range without a known length".into(),
+                )
+            })?;
+            let logic_size = logic_size.ok_or_else(|| {
+                TingError::PluginExecutionError(
+                    "Format stream returned a range without a known length".into(),
+                )
+            })?;
             let end_inclusive = if end > 0 { end.saturating_sub(1) } else { 0 };
             return Ok((
                 StatusCode::PARTIAL_CONTENT,
@@ -982,7 +891,6 @@ pub async fn stream_chapter(
                         "X-Download-Extension".parse().unwrap(),
                         download_extension.clone(),
                     ),
-                    (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*".to_string()),
                     (
                         "Cross-Origin-Resource-Policy".parse().unwrap(),
                         "cross-origin".to_string(),
@@ -992,14 +900,28 @@ pub async fn stream_chapter(
             )
                 .into_response());
         } else {
+            if let Some(content_length) = content_length {
+                return Ok((
+                    StatusCode::OK,
+                    [
+                        (header::CONTENT_TYPE, mime_type.to_string()),
+                        (header::CONTENT_LENGTH, content_length.to_string()),
+                        (header::ACCEPT_RANGES, "bytes".to_string()),
+                        ("X-Download-Extension".parse().unwrap(), download_extension),
+                        (
+                            "Cross-Origin-Resource-Policy".parse().unwrap(),
+                            "cross-origin".to_string(),
+                        ),
+                    ],
+                    if is_head_request { Body::empty() } else { body },
+                )
+                    .into_response());
+            }
             return Ok((
                 StatusCode::OK,
                 [
                     (header::CONTENT_TYPE, mime_type.to_string()),
-                    (header::CONTENT_LENGTH, content_length.to_string()),
-                    (header::ACCEPT_RANGES, "bytes".to_string()),
                     ("X-Download-Extension".parse().unwrap(), download_extension),
-                    (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*".to_string()),
                     (
                         "Cross-Origin-Resource-Policy".parse().unwrap(),
                         "cross-origin".to_string(),
@@ -1014,37 +936,52 @@ pub async fn stream_chapter(
     // Non-encrypted: Stream directly
     let range_header = headers.get(header::RANGE).and_then(|v| v.to_str().ok());
 
-    // Local files know their size, so use the shared parser to support suffix ranges
-    // like "bytes=-500". WebDAV keeps the lightweight open-ended parser because
-    // the upstream server owns the final range handling.
-    let range = if let Some(r) = range_header {
+    // A suffix range needs the total length before its starting offset is known.
+    // Keep the full reader if the source cannot advertise that length.
+    let mut remote_probe = None;
+    let mut range = if let Some(r) = range_header {
         if library.library_type == "local" {
             let file_size = tokio::fs::metadata(std::path::Path::new(&chapter.path))
                 .await?
                 .len();
             let parsed = state.audio_streamer.parse_range_header(r, file_size)?;
             Some((parsed.start, parsed.end))
-        } else {
-            let r_str = r.replace("bytes=", "");
-            let parts: Vec<&str> = r_str.split('-').collect();
-            let start = parts[0].parse::<u64>().unwrap_or(0);
-            let end = if parts.len() > 1 && !parts[1].is_empty() {
-                parts[1].parse::<u64>().unwrap_or(0)
+        } else if cached_size_unknown || r.starts_with("bytes=-") {
+            let (reader, total) =
+                get_remote_media_reader(&state, &library, &chapter.path, None).await?;
+            if total > 0 {
+                let parsed = state.audio_streamer.parse_range_header(r, total)?;
+                Some((parsed.start, parsed.end))
             } else {
-                0
-            };
-            // storage_service expects (start, end) where end=0 means "until end of file"
-            if end > 0 {
-                Some((start, end + 1))
-            } else {
-                Some((start, 0))
+                remote_probe = Some((reader, total));
+                None
             }
+        } else {
+            let (start, end) = r
+                .strip_prefix("bytes=")
+                .and_then(|value| value.split_once('-'))
+                .ok_or_else(|| TingError::InvalidRequest("Invalid Range header".into()))?;
+            let start = start
+                .parse::<u64>()
+                .map_err(|_| TingError::InvalidRequest("Invalid Range start".into()))?;
+            let end = if end.is_empty() {
+                0
+            } else {
+                let inclusive_end = end
+                    .parse::<u64>()
+                    .map_err(|_| TingError::InvalidRequest("Invalid Range end".into()))?;
+                if inclusive_end < start {
+                    return Err(TingError::InvalidRequest("Invalid Range bounds".into()));
+                }
+                inclusive_end.saturating_add(1)
+            };
+            Some((start, end))
         }
     } else {
         None
     };
 
-    let (mut reader, total_size) = if library.library_type == "local" {
+    let (mut reader, mut total_size) = if library.library_type == "local" {
         let (f, size) = state
             .storage_service
             .get_local_reader(std::path::Path::new(&chapter.path), range)
@@ -1054,9 +991,26 @@ pub async fn stream_chapter(
             Box::new(f) as Box<dyn tokio::io::AsyncRead + Send + Unpin>,
             size,
         )
+    } else if let Some(probe) = remote_probe {
+        probe
     } else {
         get_remote_media_reader(&state, &library, &chapter.path, range).await?
     };
+
+    // A source without a total length cannot resolve suffix/open-ended ranges.
+    // Ignore Range and stream the full representation without inventing a length.
+    if total_size == 0 && range.is_some() && library.library_type != "local" {
+        (reader, total_size) =
+            get_remote_media_reader(&state, &library, &chapter.path, None).await?;
+        range = None;
+    }
+
+    if range.is_some() && total_size > 0 {
+        let parsed = state
+            .audio_streamer
+            .parse_range_header(range_header.unwrap(), total_size)?;
+        range = Some((parsed.start, parsed.end));
+    }
 
     // Calculate actual content length and range for response headers
     let start = range.map(|r| r.0).unwrap_or(0);
@@ -1073,7 +1027,7 @@ pub async fn stream_chapter(
     let content_length = end.saturating_sub(start);
 
     // For local files, we need to limit the reader if a specific end was requested
-    if library.library_type == "local" && content_length < (total_size - start) {
+    if total_size > 0 && content_length < total_size.saturating_sub(start) {
         reader = Box::new(reader.take(content_length));
     }
 
@@ -1083,7 +1037,7 @@ pub async fn stream_chapter(
 
     let mime_type = stream_mime_type_from_path(&chapter.path);
 
-    if range_header.is_some() {
+    if range.is_some() {
         let content_range = format!("bytes {}-{}/{}", start, end.saturating_sub(1), total_size);
 
         Ok((
@@ -1093,7 +1047,6 @@ pub async fn stream_chapter(
                 (header::CONTENT_LENGTH, content_length.to_string()),
                 (header::CONTENT_RANGE, content_range),
                 (header::ACCEPT_RANGES, "bytes".to_string()),
-                (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*".to_string()),
                 (
                     "Cross-Origin-Resource-Policy".parse().unwrap(),
                     "cross-origin".to_string(),
@@ -1103,13 +1056,11 @@ pub async fn stream_chapter(
         )
             .into_response())
     } else {
-        Ok((
+        let mut response = (
             StatusCode::OK,
             [
                 (header::CONTENT_TYPE, mime_type),
-                (header::CONTENT_LENGTH, total_size.to_string()),
                 (header::ACCEPT_RANGES, "bytes".to_string()),
-                (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*".to_string()),
                 (
                     "Cross-Origin-Resource-Policy".parse().unwrap(),
                     "cross-origin".to_string(),
@@ -1117,7 +1068,13 @@ pub async fn stream_chapter(
             ],
             if is_head_request { Body::empty() } else { body },
         )
-            .into_response())
+            .into_response();
+        if total_size > 0 || library.library_type == "local" {
+            response
+                .headers_mut()
+                .insert(header::CONTENT_LENGTH, total_size.into());
+        }
+        Ok(response)
     }
 }
 
@@ -1150,6 +1107,7 @@ pub async fn stream_signed_chapter(
             transcode: params.transcode,
             seek: params.seek,
             download: params.download,
+            preload: None,
         }),
         method,
         headers,

@@ -2,7 +2,7 @@
 
 #[cfg(any(unix, test))]
 use anyhow::Context;
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 #[cfg(any(unix, test))]
 use serde::Deserialize;
 
@@ -57,18 +57,14 @@ fn language_for_system_language(system_language: Option<&str>) -> &'static str {
         .filter(|language| !language.is_empty())
         .is_some_and(|language| language.to_ascii_lowercase().starts_with("zh"));
 
-    if is_chinese {
-        "zh-CN"
-    } else {
-        "en-US"
-    }
+    if is_chinese { "zh-CN" } else { "en-US" }
 }
 
 #[cfg(unix)]
 async fn platform_system_language() -> Result<String> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::UnixStream;
-    use tokio::time::{timeout, Duration};
+    use tokio::time::{Duration, timeout};
 
     let token = std::env::var("TRIM_API_TOKEN")
         .context("TRIM_API_TOKEN is not available")?

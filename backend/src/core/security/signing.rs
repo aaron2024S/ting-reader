@@ -1,10 +1,67 @@
 use base64::Engine;
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::{Arc, RwLock};
 
 pub const DEFAULT_PLUGIN_ROUTE_SIGNATURE_TTL_SECONDS: u64 = 60 * 60;
 pub const MAX_PLUGIN_ROUTE_SIGNATURE_TTL_SECONDS: u64 = 30 * 24 * 60 * 60;
 pub const DEFAULT_MEDIA_SIGNATURE_TTL_SECONDS: u64 = 30 * 24 * 60 * 60;
 pub const MAX_MEDIA_SIGNATURE_TTL_SECONDS: u64 = 365 * 24 * 60 * 60;
+
+#[derive(Clone)]
+pub struct PluginRouteRevocations {
+    path: PathBuf,
+    entries: Arc<RwLock<HashMap<String, i64>>>,
+}
+
+impl PluginRouteRevocations {
+    pub fn new(path: impl Into<PathBuf>) -> std::io::Result<Self> {
+        let path = path.into();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let entries = if path.exists() {
+            serde_json::from_slice(&std::fs::read(&path)?).unwrap_or_default()
+        } else {
+            HashMap::new()
+        };
+        Ok(Self {
+            path,
+            entries: Arc::new(RwLock::new(entries)),
+        })
+    }
+
+    pub fn revoke(&self, signature: &str, expires: i64) -> std::io::Result<()> {
+        let mut entries = self
+            .entries
+            .write()
+            .map_err(|_| std::io::Error::other("route revocation lock poisoned"))?;
+        entries.insert(signature.to_string(), expires);
+        if entries.len() > 10_000 {
+            let oldest = entries
+                .iter()
+                .min_by_key(|(_, revoked_at)| **revoked_at)
+                .map(|(signature, _)| signature.clone());
+            if let Some(oldest) = oldest {
+                entries.remove(&oldest);
+            }
+        }
+        let bytes = serde_json::to_vec(&*entries)
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        let temporary = self.path.with_extension("json.tmp");
+        std::fs::write(&temporary, bytes)?;
+        std::fs::rename(temporary, &self.path)?;
+        Ok(())
+    }
+
+    pub fn is_revoked(&self, signature: &str) -> bool {
+        self.entries
+            .read()
+            .ok()
+            .is_some_and(|entries| entries.contains_key(signature))
+    }
+}
 
 pub fn signature_expires_from_ttl(
     ttl_seconds: Option<u64>,

@@ -391,10 +391,12 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(repository
-            .find("library-1", "/media/book", "local_dirty")
-            .await
-            .unwrap()
-            .is_none());
+        assert!(
+            repository
+                .find("library-1", "/media/book", "local_dirty")
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 }

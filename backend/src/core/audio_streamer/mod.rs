@@ -105,10 +105,11 @@ impl AudioStreamer {
         if self.config.cache_enabled {
             let cache_key = file_path.to_string_lossy().to_string();
             if let Ok(mut cache) = self.cache.write()
-                && let Some(metadata) = cache.get(&cache_key) {
-                    debug!("Cache hit for metadata: {:?}", file_path);
-                    return Ok(metadata);
-                }
+                && let Some(metadata) = cache.get(&cache_key)
+            {
+                debug!("Cache hit for metadata: {:?}", file_path);
+                return Ok(metadata);
+            }
         }
 
         // Skip metadata extraction for .strm files (they are URL redirects, not audio files)
@@ -257,10 +258,9 @@ impl AudioStreamer {
                             composer = Some(tag.value.to_string());
                         }
                     }
-                    Some(symphonia::core::meta::StandardTagKey::Genre)
-                        if genre.is_none() => {
-                            genre = Some(tag.value.to_string());
-                        }
+                    Some(symphonia::core::meta::StandardTagKey::Genre) if genre.is_none() => {
+                        genre = Some(tag.value.to_string());
+                    }
                     _ => {}
                 }
             }
@@ -361,7 +361,7 @@ impl AudioStreamer {
                 let end_val: u64 = parts[1].parse().map_err(|_| {
                     TingError::InvalidRequest("Invalid Range header: invalid end".to_string())
                 })?;
-                (end_val + 1).min(file_size) // Range is inclusive, so add 1
+                end_val.saturating_add(1).min(file_size) // Inclusive end
             };
 
             (start, end)
@@ -502,12 +502,16 @@ mod tests {
         assert_eq!(range, 500..1000);
 
         // Test invalid range
-        assert!(streamer
-            .parse_range_header("bytes=1000-", file_size)
-            .is_err());
-        assert!(streamer
-            .parse_range_header("bytes=500-400", file_size)
-            .is_err());
+        assert!(
+            streamer
+                .parse_range_header("bytes=1000-", file_size)
+                .is_err()
+        );
+        assert!(
+            streamer
+                .parse_range_header("bytes=500-400", file_size)
+                .is_err()
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use crate::core::error::{Result, TingError};
 use crate::db::{manager::DatabaseManager, models::Progress};
-use rusqlite::{params_from_iter, OptionalExtension, ToSql};
+use rusqlite::{OptionalExtension, ToSql, params_from_iter};
 use std::sync::Arc;
 
 /// Number of days retained in the daily listening activity table.

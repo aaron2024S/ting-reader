@@ -8,9 +8,9 @@ fn create_test_plugin(dir: &Path, name: &str, version: &str) -> Result<()> {
         "id": name,
         "name": name,
         "version": version,
-        "min_core_version": "1.4.8",
+        "min_core_version": "2.0.0",
         "author": "Test Author",
-        "description": "Test plugin",
+        "description": {"en": "Test plugin"},
         "license": "MIT",
         "entry_point": "plugin.js",
         "runtime": "javascript",
@@ -37,9 +37,9 @@ fn create_test_plugin_with_dependencies(
         "id": name,
         "name": name,
         "version": version,
-        "min_core_version": "1.4.8",
+        "min_core_version": "2.0.0",
         "author": "Test Author",
-        "description": "Test plugin with dependencies",
+        "description": {"en": "Test plugin with dependencies"},
         "license": "MIT",
         "entry_point": "plugin.js",
         "runtime": "javascript",
@@ -57,13 +57,9 @@ fn create_test_plugin_with_dependencies(
 }
 
 fn test_capabilities() -> serde_json::Value {
-    serde_json::json!([
-        {
-            "id": "test.tools",
-            "kind": "tool_provider",
-            "invoke": "execute"
-        }
-    ])
+    serde_json::json!([{
+        "id":"test.store","kind":"plugin_store","operations":["list_plugins"]
+    }])
 }
 
 #[tokio::test]
@@ -132,6 +128,31 @@ async fn test_install_plugin_rejects_path_traversal_identity() {
         fs::read_to_string(outside_dir.join("sentinel.txt")).unwrap(),
         "keep"
     );
+}
+
+#[tokio::test]
+async fn test_installer_rejects_legacy_core_requirement_before_writing_files() {
+    let temp_dir = TempDir::new().unwrap();
+    let plugin_dir = temp_dir.path().join("plugins");
+    let source_dir = temp_dir.path().join("source");
+    fs::create_dir_all(&source_dir).unwrap();
+    create_test_plugin(&source_dir, "old-plugin", "1.0.0").unwrap();
+    let path = source_dir.join("plugin.yml");
+    let old_manifest = fs::read_to_string(&path).unwrap();
+    fs::write(&path, old_manifest.replace("2.0.0", "1.4.8")).unwrap();
+
+    let installer = PluginInstaller::new(plugin_dir.clone(), temp_dir.path().join("temp")).unwrap();
+    let error = installer
+        .install_plugin(&source_dir, |_| Ok(()))
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("min_core_version is below the 2.0 plugin contract"),
+        "{error}"
+    );
+    assert!(!plugin_dir.join("old-plugin@1.0.0").exists());
 }
 
 #[tokio::test]
@@ -345,7 +366,7 @@ async fn test_validate_package_nonexistent_path() {
 }
 
 #[tokio::test]
-async fn test_install_tr_package_success() {
+async fn test_install_tr_package_with_valid_signature() {
     let Some(trpack) = local_trpack_binary() else {
         eprintln!("skipping .tr install test: trpack binary not found");
         return;
@@ -382,6 +403,12 @@ async fn test_install_tr_package_success() {
     assert_eq!(plugin_id, "test-plugin@1.0.0");
     assert!(plugin_dir.join(&plugin_id).join("plugin.yml").exists());
     assert!(plugin_dir.join(&plugin_id).join("plugin.js").exists());
+    assert!(
+        plugin_dir
+            .join(&plugin_id)
+            .join(".trpack/signature.json")
+            .exists()
+    );
 }
 
 #[tokio::test]

@@ -15,6 +15,7 @@ export interface Book {
   updated_at?: string;
   is_favorite?: boolean;
   library_type?: 'webdav' | 'local' | 'rss';
+  can_write_metadata_files?: boolean;
   skip_intro?: number;
   skip_outro?: number;
   tags?: string;
@@ -22,6 +23,7 @@ export interface Book {
   year?: number;
   chapter_regex?: string;
   manual_corrected?: boolean;
+  progress_percent?: number;
 }
 
 export interface BookMetadata {

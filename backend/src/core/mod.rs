@@ -46,12 +46,15 @@ pub mod text_cleaner;
 pub mod time;
 #[path = "storage/webdav_client.rs"]
 pub mod webdav_client;
+#[path = "books/webdav_metadata.rs"]
+pub mod webdav_metadata;
 
 #[path = "common/lru_cache.rs"]
 pub mod lru_cache;
 #[path = "common/utils.rs"]
 pub mod utils;
 
+pub mod audio;
 pub mod audio_streamer;
 pub mod event_bus;
 pub mod library_scanner;
@@ -60,6 +63,7 @@ pub mod notifications;
 pub mod services;
 pub mod task_queue;
 
+pub use audio::AudioService;
 pub use audio_streamer::{AudioFormat, AudioMetadata, AudioStreamer, StreamerConfig};
 pub use config::Config;
 pub use decryption_cache::{CacheStats, DecryptionCacheConfig, DecryptionCacheService};

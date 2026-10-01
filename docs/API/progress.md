@@ -46,12 +46,15 @@
 
 ## POST /api/progress/recent/delete
 
-隐藏当前用户选中的可见收听历史。用于按章节、整本书或全选删除历史记录。
+清除当前用户选中的收听历史，可按章节、整本书或全部清除。
 
 请求体：
 
 ```json
 {
+  "all": false,
+  "clear_progress": false,
+  "book_ids": ["string"],
   "progress_ids": ["string"],
   "chapter_ids": ["string"]
 }
@@ -61,6 +64,9 @@
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
+| `all` | boolean | 默认 false，true 时清除全部历史。 |
+| `clear_progress` | boolean | 默认 false；true 时删除选中进度并移除相关书籍的手动已读标记，包含此前隐藏的进度。 |
+| `book_ids` | string[] | 按整本书清除。 |
 | `progress_ids` | string[] | 要隐藏的进度记录 ID，优先用于精确删除。 |
 | `chapter_ids` | string[] | 要隐藏的章节 ID。 |
 
@@ -74,7 +80,9 @@
 
 说明：
 
-- `deleted` 表示本次被隐藏的可见历史记录数。
+- 未设置 `clear_progress` 时，`deleted` 表示本次被隐藏的可见历史记录数；设置时表示删除的进度记录数。
+- 三种 ID 列表合计最多 500 项，重复或重叠选择只处理一次。后台收听统计和书签保留。
+- 按书籍分页加载历史与汇总接口见 [阅读与书签](reading.md)。
 
 ## GET /api/progress/:bookId
 

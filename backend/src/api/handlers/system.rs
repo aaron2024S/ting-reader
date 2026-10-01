@@ -13,11 +13,11 @@ use crate::api::models::{
 use crate::api::require_admin;
 use crate::auth::middleware::AuthUser;
 use crate::core::error::{Result, TingError};
-use crate::db::repository::{progress::LISTENING_EVENTS_RETENTION_DAYS, Repository};
+use crate::db::repository::{Repository, progress::LISTENING_EVENTS_RETENTION_DAYS};
 use axum::{
+    Json,
     extract::{Path, Query, State},
     response::IntoResponse,
-    Json,
 };
 use chrono::Utc;
 use serde_json::Value;
@@ -27,8 +27,8 @@ use std::path::PathBuf;
 mod logs;
 
 pub use logs::{
-    clear_system_logs, export_system_logs, get_system_logs, ClearSystemLogsResponse, LogsQuery,
-    LogsResponse,
+    ClearSystemLogsResponse, LogsQuery, LogsResponse, clear_system_logs, export_system_logs,
+    get_system_logs,
 };
 
 /// Return the application-wide time zone. Reading is available to every
@@ -325,15 +325,16 @@ pub async fn get_admin_statistics(
                 )
                 .map_err(TingError::DatabaseError)?;
 
-            let (total_libraries, local_libraries, webdav_libraries): (i64, i64, i64) = conn
+            let (total_libraries, local_libraries, webdav_libraries, rss_libraries): (i64, i64, i64, i64) = conn
                 .query_row(
                     "SELECT \
                         COUNT(*), \
                         COALESCE(SUM(CASE WHEN LOWER(type) = 'local' THEN 1 ELSE 0 END), 0), \
-                        COALESCE(SUM(CASE WHEN LOWER(type) = 'webdav' THEN 1 ELSE 0 END), 0) \
+                        COALESCE(SUM(CASE WHEN LOWER(type) = 'webdav' THEN 1 ELSE 0 END), 0), \
+                        COALESCE(SUM(CASE WHEN LOWER(type) = 'rss' THEN 1 ELSE 0 END), 0) \
                      FROM libraries",
                     [],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
                 )
                 .map_err(TingError::DatabaseError)?;
 
@@ -495,6 +496,7 @@ pub async fn get_admin_statistics(
                     total_libraries,
                     local_libraries,
                     webdav_libraries,
+                    rss_libraries,
                     total_users,
                     admin_users,
                     active_users,

@@ -4,6 +4,7 @@ import apiClient from '../../core/api/client';
 import type { Book, Chapter, Progress } from '../../core/types';
 import { usePlayerStore } from '../../core/stores/playerStore';
 import { useTranslation } from 'react-i18next';
+import { invalidateBookCover } from '../../core/utils/image';
 
 import ChapterManagerModal from '../../shared/modals/ChapterManagerModal';
 import ScrapeDiffModal from '../../shared/modals/ScrapeDiffModal';
@@ -96,6 +97,9 @@ const BookDetailPage: React.FC = () => {
   const [deleteSourceFiles, setDeleteSourceFiles] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [editData, setEditData] = useState<Partial<Book>>({});
+  const [editCoverFile, setEditCoverFile] = useState<File | null>(null);
+  const [editSaving, setEditSaving] = useState(false);
+  const [editSaveError, setEditSaveError] = useState<string | null>(null);
   const [editLockTouched, setEditLockTouched] = useState(false);
   const [isDescriptionExpanded, setIsDescriptionExpanded] = useState(false);
   const [isOverflowing, setIsOverflowing] = useState(false);
@@ -638,6 +642,9 @@ const BookDetailPage: React.FC = () => {
   };
 
   const handleEditSave = async () => {
+    if (editSaving) return;
+    setEditSaving(true);
+    setEditSaveError(null);
     try {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const payload: Record<string, any> = {
@@ -657,7 +664,18 @@ const BookDetailPage: React.FC = () => {
         manual_corrected: editLockTouched ? editData.manual_corrected === true : true,
       };
       
-      const res = await apiClient.patch(`/api/books/${id}`, payload);
+      let res;
+      if (editCoverFile) {
+        const form = new FormData();
+        form.append('file', editCoverFile);
+        form.append('metadata', JSON.stringify(payload));
+        res = await apiClient.post(`/api/books/${id}/cover`, form, {
+          headers: { 'Content-Type': 'multipart/form-data' },
+        });
+        invalidateBookCover(book!.id);
+      } else {
+        res = await apiClient.patch(`/api/books/${id}`, payload);
+      }
       const updatedBookData = res.data;
 
       if (book && findChapterGroupOrder(chapterGroupOrders, book.id) !== editChapterGroupOrder) {
@@ -699,9 +717,12 @@ const BookDetailPage: React.FC = () => {
       }
 
       setIsEditModalOpen(false);
+      setEditCoverFile(null);
       setEditLockTouched(false);
     } catch {
-      alert(t('common.saveFailed'));
+      setEditSaveError(t(editCoverFile ? 'bookshelf.coverUploadFailed' : 'common.saveFailed'));
+    } finally {
+      setEditSaving(false);
     }
   };
 
@@ -841,6 +862,8 @@ const BookDetailPage: React.FC = () => {
           onOpenScrapeDiff={() => setIsScrapeDiffOpen(true)}
           onOpenEditModal={() => {
             setEditLockTouched(false);
+            setEditCoverFile(null);
+            setEditSaveError(null);
             setEditData({
               ...book,
               cover_url: displayCoverUrl,
@@ -924,6 +947,10 @@ const BookDetailPage: React.FC = () => {
       {isEditModalOpen && book && (
         <EditBookModal
           editData={editData}
+          coverFile={editCoverFile}
+          onChangeCoverFile={setEditCoverFile}
+          saving={editSaving}
+          saveError={editSaveError}
           showRegexGenerator={showRegexGenerator}
           genFilename={genFilename}
           genNum={genNum}
@@ -951,7 +978,7 @@ const BookDetailPage: React.FC = () => {
           }}
           onSave={handleEditSave}
           onWriteMetadata={handleWriteMetadata}
-          showWriteMetadata={book.library_type !== 'webdav' && book.library_type !== 'rss'}
+          showWriteMetadata={book.library_type === 'local' || book.can_write_metadata_files === true}
         />
       )}
 

@@ -107,20 +107,21 @@ impl CacheManager {
 
             // Only process .cache files
             if path.extension().and_then(|s| s.to_str()) == Some("cache")
-                && let Some(file_stem) = path.file_stem().and_then(|s| s.to_str()) {
-                    let chapter_id = file_stem.to_string();
+                && let Some(file_stem) = path.file_stem().and_then(|s| s.to_str())
+            {
+                let chapter_id = file_stem.to_string();
 
-                    let metadata = entry.metadata().await?;
-                    let file_size = metadata.len();
-                    let created_at = metadata.created().ok();
+                let metadata = entry.metadata().await?;
+                let file_size = metadata.len();
+                let created_at = metadata.created().ok();
 
-                    cached_chapters.push(CacheInfo {
-                        chapter_id,
-                        file_size,
-                        file_path: path,
-                        created_at,
-                    });
-                }
+                cached_chapters.push(CacheInfo {
+                    chapter_id,
+                    file_size,
+                    file_path: path,
+                    created_at,
+                });
+            }
         }
 
         Ok(cached_chapters)

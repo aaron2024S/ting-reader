@@ -8,8 +8,8 @@ use crate::db::models::Progress;
 use crate::db::repository::Repository;
 use axum::{
     extract::{
-        ws::{Message, WebSocket, WebSocketUpgrade},
         Query, State,
+        ws::{Message, WebSocket, WebSocketUpgrade},
     },
     response::IntoResponse,
 };

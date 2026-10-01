@@ -2,13 +2,15 @@ import React, { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Link } from "react-router";
 import apiClient from "../../core/api/client";
-import type { Book, Playlist, Progress } from "../../core/types";
+import type { Book, Playlist } from "../../core/types";
+import type { HistorySummary } from "../../core/api/reading";
 import { useAuthStore } from "../../core/stores/authStore";
 import { usePlayerStore } from "../../core/stores/playerStore";
 import { formatMinuteMetric } from "../../core/utils/duration";
 import {
   ChevronRight,
   BarChart3,
+  BookMarked,
   BellRing,
   Download,
   Heart,
@@ -25,7 +27,7 @@ const MyPage: React.FC = () => {
   const user = useAuthStore((state) => state.user);
   const setUser = useAuthStore((state) => state.setUser);
   const currentChapter = usePlayerStore((state) => state.currentChapter);
-  const [recentPlays, setRecentPlays] = useState<Progress[]>([]);
+  const [historySummary, setHistorySummary] = useState<HistorySummary>({ books: 0, chapters: 0, position_seconds: 0 });
   const [favorites, setFavorites] = useState<Book[]>([]);
   const [playlistCount, setPlaylistCount] = useState(0);
   const [accountData, setAccountData] = useState({
@@ -38,13 +40,13 @@ const MyPage: React.FC = () => {
     const fetchData = async () => {
       const [recentRes, favoritesRes, playlistsRes] =
         await Promise.allSettled([
-          apiClient.get("/api/progress/recent"),
+          apiClient.get<HistorySummary>("/api/history/summary"),
           apiClient.get("/api/favorites"),
           apiClient.get("/api/playlists"),
         ]);
 
       if (recentRes.status === "fulfilled") {
-        setRecentPlays(recentRes.value.data || []);
+        setHistorySummary(recentRes.value.data);
       }
       if (favoritesRes.status === "fulfilled") {
         setFavorites(favoritesRes.value.data || []);
@@ -69,16 +71,9 @@ const MyPage: React.FC = () => {
     }));
   }, [user?.username]);
 
-  const listenedMinutes = Math.round(
-    recentPlays.reduce(
-      (total, progress) => total + Math.max(0, progress.position || 0),
-      0,
-    ) / 60,
-  );
+  const listenedMinutes = Math.round(historySummary.position_seconds / 60);
   const listenedMetric = formatMinuteMetric(listenedMinutes);
-  const recentBookCount = new Set(
-    recentPlays.map((progress) => progress.book_id).filter(Boolean),
-  ).size;
+  const recentBookCount = historySummary.books;
   const userInitial = user?.username?.charAt(0).toUpperCase() || "U";
 
   const handleAccountUpdate = async (event: React.FormEvent) => {
@@ -228,16 +223,23 @@ const MyPage: React.FC = () => {
               icon={<History size={22} />}
               title={t("mine.historyTitle")}
               description={
-                recentPlays.length > 0
+                historySummary.chapters > 0
                   ? t("mine.historyDescription", {
                       books: recentBookCount,
-                      chapters: recentPlays.length,
+                      chapters: historySummary.chapters,
                       durationValue: listenedMetric.value,
                       durationUnit: t(`mine.${listenedMetric.unit}Unit`),
                     })
                   : t("mine.historyEmptyDescription")
               }
               tone="text-primary-600 bg-primary-50 dark:bg-primary-900/20"
+            />
+            <EntryItem
+              to="/bookmarks"
+              icon={<BookMarked size={22} />}
+              title={t("bookmarks.title", "我的书签")}
+              description={t("bookmarks.subtitle", "按书籍查看保存的位置和备注")}
+              tone="text-amber-600 bg-amber-50 dark:bg-amber-900/20"
             />
             <EntryItem
               to="/favorites"

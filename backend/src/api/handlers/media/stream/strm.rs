@@ -1,4 +1,4 @@
-use super::{handle_hls_request, StreamQuery};
+use super::{StreamQuery, handle_hls_request};
 use crate::api::handlers::AppState;
 use crate::core::error::{Result, TingError};
 use crate::db::models::{Book, Chapter, Library};
@@ -10,8 +10,6 @@ use axum::{
 };
 use std::process::Stdio;
 use tokio::io::AsyncReadExt;
-use tokio::process::Command;
-use tokio_util::io::ReaderStream;
 
 pub(super) async fn handle_strm_stream(
     state: AppState,
@@ -20,52 +18,34 @@ pub(super) async fn handle_strm_stream(
     book: Book,
     library: Library,
     params: &StreamQuery,
-    headers: &axum::http::HeaderMap,
 ) -> Result<Response> {
     use axum::http::header;
     // Read the URL from the file
     let url = if library.library_type == "local" {
-        std::fs::read_to_string(&chapter.path)
-            .map_err(TingError::IoError)?
-            .trim()
-            .to_string()
+        let file = tokio::fs::File::open(&chapter.path)
+            .await
+            .map_err(TingError::IoError)?;
+        read_strm_url(file).await?
     } else if library.library_type == "webdav" {
-        // WebDAV library
-        let (mut reader, _) = state
+        let (reader, _) = state
             .storage_service
             .get_webdav_reader(&library, &chapter.path, None, state.encryption_key.as_ref())
             .await
             .map_err(|e| TingError::NotFound(format!("Failed to read strm file: {}", e)))?;
 
-        let mut content = String::new();
-        reader
-            .read_to_string(&mut content)
-            .await
-            .map_err(TingError::IoError)?;
-        content.trim().to_string()
+        read_strm_url(reader).await?
     } else {
-        let (mut reader, _) = state
+        let (reader, _) = state
             .storage_service
             .get_http_reader(&chapter.path, None)
             .await
             .map_err(|e| TingError::NotFound(format!("Failed to read strm URL: {}", e)))?;
 
-        let mut content = String::new();
-        reader
-            .read_to_string(&mut content)
-            .await
-            .map_err(TingError::IoError)?;
-        content.trim().to_string()
+        read_strm_url(reader).await?
     };
 
-    if url.is_empty() || !url.starts_with("http") {
-        return Err(TingError::InvalidRequest(format!(
-            "Invalid strm file content: '{}'",
-            url
-        )));
-    }
-
-    tracing::info!("Handling strm file: {}", url);
+    validate_strm_url(&url)?;
+    tracing::debug!(chapter_id, "Handling strm file");
 
     // Handle Transcoding Request for .strm files
     // Frontend will request transcoding via &transcode=mp3 when playback fails
@@ -85,7 +65,7 @@ pub(super) async fn handle_strm_stream(
             .await;
         }
 
-        tracing::info!("Transcoding strm URL: {} -> {}", url, format);
+        tracing::info!(chapter_id, format, "Transcoding strm audio");
 
         let content_type = match format.as_str() {
             "mp3" => "audio/mpeg",
@@ -93,20 +73,9 @@ pub(super) async fn handle_strm_stream(
             _ => {
                 return Err(TingError::InvalidRequest(
                     "Unsupported transcode format".to_string(),
-                ))
+                ));
             }
         };
-
-        let ffmpeg_tools = state
-            .plugin_manager
-            .get_ffmpeg_tool_paths()
-            .await
-            .ok_or_else(|| {
-                TingError::IoError(std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    "FFmpeg plugin binaries not found",
-                ))
-            })?;
 
         // 优先使用数据库中的时长，避免重复调用 FFprobe
         let duration_seconds = if let Some(db_duration) = chapter.duration {
@@ -127,7 +96,7 @@ pub(super) async fn handle_strm_stream(
             // Add delay to avoid overwhelming the server
             tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
-            let duration_output = Command::new(&ffmpeg_tools.ffprobe)
+            let duration_output = crate::core::audio::AudioService::ffprobe_command()?
                 .arg("-v")
                 .arg("error")
                 .arg("-show_entries")
@@ -179,14 +148,11 @@ pub(super) async fn handle_strm_stream(
             duration_seconds
         };
 
-        tracing::info!(
-            "Using FFmpeg to read directly from URL: {}",
-            ffmpeg_tools.ffmpeg
-        );
+        tracing::info!("Using bundled FFmpeg to read directly from URL");
 
         // Build FFmpeg command to transcode directly from URL
         // This allows seeking support
-        let mut cmd = Command::new(&ffmpeg_tools.ffmpeg);
+        let mut cmd = crate::core::audio::AudioService::ffmpeg_command()?;
         cmd.arg("-y").arg("-loglevel").arg("warning");
 
         // Add seek parameter if present (must be before -i for input seeking)
@@ -231,12 +197,6 @@ pub(super) async fn handle_strm_stream(
         // Spawn FFmpeg process
         let mut child = cmd.spawn().map_err(TingError::IoError)?;
 
-        let stdout = child.stdout.take().ok_or_else(|| {
-            TingError::IoError(std::io::Error::other(
-                "Failed to capture ffmpeg stdout",
-            ))
-        })?;
-
         let stderr = child.stderr.take();
 
         // Log FFmpeg errors
@@ -251,7 +211,7 @@ pub(super) async fn handle_strm_stream(
         }
 
         // Create streaming response from FFmpeg stdout
-        let stream = ReaderStream::new(stdout);
+        let stream = crate::core::audio::AudioService::output_stream(child)?;
         let body = Body::from_stream(stream);
 
         // Build response with duration header if available
@@ -260,7 +220,6 @@ pub(super) async fn handle_strm_stream(
                 StatusCode::OK,
                 [
                     (header::CONTENT_TYPE, content_type.to_string()),
-                    (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*".to_string()),
                     (
                         "Cross-Origin-Resource-Policy".parse().unwrap(),
                         "cross-origin".to_string(),
@@ -275,7 +234,6 @@ pub(super) async fn handle_strm_stream(
                 StatusCode::OK,
                 [
                     (header::CONTENT_TYPE, content_type.to_string()),
-                    (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*".to_string()),
                     (
                         "Cross-Origin-Resource-Policy".parse().unwrap(),
                         "cross-origin".to_string(),
@@ -287,188 +245,143 @@ pub(super) async fn handle_strm_stream(
         }
     }
 
-    // Check if URL contains authentication (username:password@)
-    // If it does, we need to proxy the request to avoid CORS issues
-    let has_auth = url.contains("://")
-        && url
-            .split("://")
-            .nth(1)
-            .map(|s| s.contains('@'))
-            .unwrap_or(false);
+    Ok(redirect_strm_url(url))
+}
 
-    // Safari/iOS browsers may need proxy if the upstream source doesn't support
-    // Range requests. Do a quick HEAD probe first — most CDNs support Range,
-    // so we only proxy when actually necessary.
-    let user_agent = headers
-        .get(header::USER_AGENT)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    let is_safari = user_agent.contains("Safari")
-        && !user_agent.contains("Chrome")
-        && !user_agent.contains("CriOS");
-    let is_ios =
-        user_agent.contains("iPhone") || user_agent.contains("iPad") || user_agent.contains("iPod");
+fn redirect_strm_url(url: String) -> Response {
+    use axum::http::header;
+    tracing::info!("Redirecting strm playback to origin");
+    (
+        StatusCode::FOUND,
+        [
+            (header::LOCATION, url),
+            (header::CACHE_CONTROL, "private, no-store".to_string()),
+            (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*".to_string()),
+            (
+                header::ACCESS_CONTROL_ALLOW_METHODS,
+                "GET, HEAD, OPTIONS".to_string(),
+            ),
+            (
+                header::ACCESS_CONTROL_EXPOSE_HEADERS,
+                "Content-Length, Content-Range, Accept-Ranges".to_string(),
+            ),
+            (
+                "Cross-Origin-Resource-Policy".parse().unwrap(),
+                "cross-origin".to_string(),
+            ),
+        ],
+        Body::empty(),
+    )
+        .into_response()
+}
 
-    let needs_proxy = if has_auth {
-        true
-    } else if is_safari || is_ios {
-        // HEAD probe: check if upstream supports Range
-        let probe = reqwest::Client::builder()
-                .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-                .timeout(std::time::Duration::from_secs(10))
-                .build()
-                .unwrap_or_else(|_| reqwest::Client::new());
-        let supports_range = probe
-            .head(&url)
-            .send()
-            .await
-            .map(|r| {
-                r.headers()
-                    .get("accept-ranges")
-                    .and_then(|v| v.to_str().ok())
-                    .map(|v| v.contains("bytes"))
-                    .unwrap_or(false)
-            })
-            .unwrap_or(false);
-        if !supports_range {
-            tracing::info!("Upstream does not support Range; Safari/iOS will use proxy");
-            true
-        } else {
-            tracing::info!("Upstream supports Range; Safari/iOS will use 302 redirect");
-            false
+async fn read_strm_url(reader: impl tokio::io::AsyncRead + Unpin) -> Result<String> {
+    let mut content = String::new();
+    reader.take(65_537).read_to_string(&mut content).await?;
+    if content.len() > 65_536 {
+        return Err(TingError::InvalidRequest(
+            "strm file exceeds 64 KiB".to_string(),
+        ));
+    }
+    Ok(content.trim().to_string())
+}
+
+fn validate_strm_url(url: &str) -> Result<()> {
+    let parsed_url = reqwest::Url::parse(url)
+        .map_err(|_| TingError::InvalidRequest("Invalid strm URL".to_string()))?;
+    if !matches!(parsed_url.scheme(), "http" | "https") || parsed_url.host_str().is_none() {
+        return Err(TingError::InvalidRequest("Invalid strm URL".to_string()));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strm_url_validation_accepts_credentials_and_signed_urls() {
+        for url in [
+            "https://audio.example.test/chapter.mp3",
+            "https://user:pass@audio.example.test/chapter.mp3",
+            "https://user@audio.example.test/chapter.mp3",
+            "https://audio.example.test/chapter.mp3?token=abc&signature=xyz",
+        ] {
+            validate_strm_url(url).unwrap();
         }
-    } else {
-        false
-    };
-
-    if needs_proxy {
-        // Proxy the request through our server:
-        // - Auth URLs: strip credentials from URL, avoid CORS issues
-        // - Safari/iOS + no Range: forward Range headers, add Accept-Ranges for seeking
-        tracing::info!("Proxying strm URL");
-
-        let range_header = headers.get(header::RANGE).and_then(|v| v.to_str().ok());
-
-        // Build request with authentication and browser-like headers
-        let client = reqwest::Client::builder()
-                .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-                .timeout(std::time::Duration::from_secs(30))
-                .build()
-                .unwrap_or_else(|_| reqwest::Client::new());
-        let mut req = client
-            .get(&url)
-            .header("Accept", "*/*")
-            .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
-            .header("Accept-Encoding", "gzip, deflate, br")
-            .header("Connection", "keep-alive");
-
-        // Forward range header if present (use string literal to avoid type conflicts)
-        if let Some(range) = range_header {
-            req = req.header("range", range);
+        for url in ["javascript:alert(1)", "file:///chapter.mp3", "not a URL"] {
+            assert!(validate_strm_url(url).is_err());
         }
+    }
 
-        // Make the request
-        let response = req.send().await.map_err(|e| {
-            TingError::IoError(std::io::Error::other(
-                format!("Failed to fetch strm URL: {}", e),
-            ))
-        })?;
+    #[tokio::test]
+    async fn strm_direct_redirect_does_not_fetch_origin() {
+        // An unreachable source still yields a redirect, including URL credentials.
+        for url in [
+            "http://127.0.0.1:9/never-requested.mp3",
+            "http://user:pass@127.0.0.1:9/never-requested.mp3",
+        ] {
+            let response = redirect_strm_url(url.into());
+            assert_eq!(response.status(), StatusCode::FOUND);
+            assert_eq!(response.headers()["location"], url);
+            assert_eq!(response.headers()["cache-control"], "private, no-store");
+            assert_eq!(response.headers()["access-control-allow-origin"], "*");
+            assert_eq!(
+                response.headers()["access-control-allow-methods"],
+                "GET, HEAD, OPTIONS"
+            );
+            assert!(
+                axum::body::to_bytes(response.into_body(), 1)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+    }
 
-        let status = response.status();
-
-        // Use string literals to avoid type conflicts between axum::http and reqwest::http
-        let content_type = response
-            .headers()
-            .get("content-type")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("audio/mpeg")
-            .to_string();
-
-        let content_length = response
-            .headers()
-            .get("content-length")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.parse::<u64>().ok());
-
-        let content_range = response
-            .headers()
-            .get("content-range")
-            .and_then(|v| v.to_str().ok())
-            .map(|v| v.to_string());
-
-        // Stream the response
-        let stream = response.bytes_stream();
-        let body = Body::from_stream(stream);
-
-        // Build response with proper status code
-        let response_status = if status == reqwest::StatusCode::PARTIAL_CONTENT {
-            StatusCode::PARTIAL_CONTENT
-        } else {
-            StatusCode::OK
-        };
-
-        let response_builder = (
-            response_status,
-            [
-                (header::CONTENT_TYPE, content_type),
-                (header::ACCEPT_RANGES, "bytes".to_string()),
-                (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*".to_string()),
-                (
-                    "Cross-Origin-Resource-Policy".parse().unwrap(),
-                    "cross-origin".to_string(),
-                ),
-            ],
+    #[tokio::test]
+    async fn strm_reader_rejects_oversize_even_with_whitespace() {
+        let oversized = format!("https://audio.example.test/a.mp3{}", " ".repeat(65_536));
+        assert!(read_strm_url(oversized.as_bytes()).await.is_err());
+        assert_eq!(
+            read_strm_url(b" https://audio.example.test/a.mp3\n".as_slice())
+                .await
+                .unwrap(),
+            "https://audio.example.test/a.mp3",
         );
+    }
 
-        // Add optional headers
-        if let Some(cl) = content_length {
-            if let Some(cr) = content_range {
-                Ok((
-                    response_builder.0,
-                    [
-                        response_builder.1[0].clone(),
-                        response_builder.1[1].clone(),
-                        response_builder.1[2].clone(),
-                        response_builder.1[3].clone(),
-                        (header::CONTENT_LENGTH, cl.to_string()),
-                        (header::CONTENT_RANGE, cr),
-                    ],
-                    body,
-                )
-                    .into_response())
-            } else {
-                Ok((
-                    response_builder.0,
-                    [
-                        response_builder.1[0].clone(),
-                        response_builder.1[1].clone(),
-                        response_builder.1[2].clone(),
-                        response_builder.1[3].clone(),
-                        (header::CONTENT_LENGTH, cl.to_string()),
-                    ],
-                    body,
-                )
-                    .into_response())
-            }
-        } else if let Some(cr) = content_range {
-            Ok((
-                response_builder.0,
-                [
-                    response_builder.1[0].clone(),
-                    response_builder.1[1].clone(),
-                    response_builder.1[2].clone(),
-                    response_builder.1[3].clone(),
-                    (header::CONTENT_RANGE, cr),
-                ],
-                body,
-            )
-                .into_response())
-        } else {
-            Ok((response_builder.0, response_builder.1, body).into_response())
-        }
-    } else {
-        // 302 redirect (zero bandwidth cost)
-        tracing::info!("Redirecting to strm URL");
-        Ok((StatusCode::FOUND, [(header::LOCATION, url)], Body::empty()).into_response())
+    #[tokio::test]
+    async fn credentialed_strm_redirect_preserves_url_without_requesting_media() {
+        use axum::{Router, routing::get};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let hits = Arc::new(AtomicUsize::new(0));
+        let recorded = hits.clone();
+        let app = Router::new().route(
+            "/audio.mp3",
+            get(move || {
+                recorded.fetch_add(1, Ordering::SeqCst);
+                async { "audio" }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let url = format!("http://user:p%40ss@{address}/audio.mp3?signature=a%2Fb");
+        validate_strm_url(&url).unwrap();
+        let response = redirect_strm_url(url.clone());
+        assert_eq!(response.status(), StatusCode::FOUND);
+        assert_eq!(response.headers()["location"], url);
+        assert!(
+            axum::body::to_bytes(response.into_body(), 1)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
+        server.abort();
     }
 }

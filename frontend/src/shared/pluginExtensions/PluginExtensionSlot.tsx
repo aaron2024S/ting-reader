@@ -1,16 +1,12 @@
 import { Loader2, MoreHorizontal, X } from "lucide-react";
-import type { FormEvent, ReactNode } from "react";
-import { useEffect, useState } from "react";
-import {
-  invokePluginCapability,
-  invokePluginHost,
-} from "../../core/api/pluginCapabilities";
+import type { ReactNode } from "react";
+import { useState } from "react";
+import { invokePluginCapability } from "../../core/api/pluginCapabilities";
 import { useClientExtensions } from "../../core/hooks/useClientExtensions";
 import type {
   ClientExtensionDescriptor,
   ClientExtensionSlot,
 } from "../../core/pluginExtensions";
-import DocumentReaderPanel from "./DocumentReaderPanel";
 import PluginExtensionIcon from "./PluginExtensionIcon";
 import PluginWebContainer from "./PluginWebContainer";
 
@@ -32,64 +28,6 @@ const extensionLabel = (extension: ClientExtensionDescriptor) =>
 
 const defaultButtonClassName =
   "inline-flex h-9 w-9 items-center justify-center rounded-md text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-900 dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-white";
-
-type SchemaFieldConfig = {
-  name: string;
-  label?: string;
-  type?: "text" | "textarea" | "number" | "boolean" | "select";
-  placeholder?: string;
-  required?: boolean;
-  default?: unknown;
-  options?: Array<string | { label?: string; value?: unknown }>;
-};
-
-const schemaFieldsFor = (
-  extension: ClientExtensionDescriptor,
-): SchemaFieldConfig[] => {
-  const schema = (extension.render?.schema || {}) as Record<string, unknown>;
-  const fields = Array.isArray(schema.fields) ? schema.fields : [];
-  return fields
-    .filter(
-      (field): field is Record<string, unknown> =>
-        typeof field === "object" &&
-        field !== null &&
-        typeof field.name === "string",
-    )
-    .map((field) => ({
-      name: field.name as string,
-      label: typeof field.label === "string" ? field.label : undefined,
-      type:
-        field.type === "textarea" ||
-        field.type === "number" ||
-        field.type === "boolean" ||
-        field.type === "select"
-          ? field.type
-          : "text",
-      placeholder:
-        typeof field.placeholder === "string" ? field.placeholder : undefined,
-      required: field.required === true,
-      default: field.default,
-      options: Array.isArray(field.options)
-        ? (field.options as SchemaFieldConfig["options"])
-        : undefined,
-    }));
-};
-
-const builtinConfigFor = (extension: ClientExtensionDescriptor) => ({
-  component:
-    extension.render?.builtin?.component ||
-    extension.render?.component ||
-    "capability_result",
-  method: extension.render?.builtin?.method || extension.render?.method,
-  params: extension.render?.builtin?.params || extension.render?.params || {},
-  autoRun:
-    extension.render?.builtin?.auto_run === true ||
-    extension.render?.auto_run === true,
-  submitLabel:
-    extension.render?.builtin?.submit_label ||
-    extension.render?.submit_label ||
-    "Run",
-});
 
 const PluginExtensionSlot = ({
   slot,
@@ -160,9 +98,7 @@ const PluginExtensionSlot = ({
   const openExtension = (extension: ClientExtensionDescriptor) => {
     setMenuOpen(false);
     if (
-      extension.renderMode === "web_container" ||
-      extension.renderMode === "schema" ||
-      extension.renderMode === "builtin"
+      extension.renderMode === "web_container"
     ) {
       setActiveExtension(extension);
       setActionState("idle");
@@ -264,16 +200,6 @@ const PluginExtensionSlot = ({
                   extension={visibleActiveExtension}
                   context={context}
                 />
-              ) : visibleActiveExtension.renderMode === "schema" ? (
-                <PluginSchemaForm
-                  extension={visibleActiveExtension}
-                  context={context}
-                />
-              ) : visibleActiveExtension.renderMode === "builtin" ? (
-                <PluginBuiltinView
-                  extension={visibleActiveExtension}
-                  context={context}
-                />
               ) : actionState === "running" ? (
                 <div className="flex items-center justify-center gap-2 text-slate-500 dark:text-slate-400">
                   <Loader2 size={16} className="animate-spin" />
@@ -295,253 +221,6 @@ const PluginExtensionSlot = ({
         </div>
       ) : null}
     </>
-  );
-};
-
-const PluginBuiltinView = ({
-  extension,
-  context,
-}: {
-  extension: ClientExtensionDescriptor;
-  context?: Record<string, unknown>;
-}) => {
-  const config = builtinConfigFor(extension);
-  const [running, setRunning] = useState(false);
-  const [message, setMessage] = useState<string>();
-  const [failed, setFailed] = useState(false);
-
-  const run = async () => {
-    setRunning(true);
-    setMessage(undefined);
-    setFailed(false);
-    try {
-      const result =
-        config.component === "host_method"
-          ? await invokePluginHost({
-              plugin_id: extension.pluginId,
-              ui_capability_id: extension.capability.id,
-              ui_grant: extension.clientGrant || "",
-              method: config.method || "",
-              params: config.params,
-            })
-          : await invokePluginCapability(
-              extension.pluginId,
-              extension.capability.id,
-              {
-                slot: extension.slot,
-                contexts: extension.contexts,
-                context: context || {},
-                params: config.params,
-              },
-              extension.capability.id,
-              extension.clientGrant,
-            );
-      setMessage(
-        typeof result === "string"
-          ? result
-          : JSON.stringify(result ?? { ok: true }, null, 2),
-      );
-    } catch (error) {
-      setFailed(true);
-      setMessage(error instanceof Error ? error.message : String(error));
-    } finally {
-      setRunning(false);
-    }
-  };
-
-  useEffect(() => {
-    const timer = window.setTimeout(() => {
-      if (config.autoRun) void run();
-    }, 0);
-    return () => window.clearTimeout(timer);
-    // Run once per opened extension; config is derived from the extension.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [extension.id]);
-
-  if (config.component === "host_method" && !config.method) {
-    return (
-      <div className="flex flex-1 items-center justify-center px-6 text-center text-sm text-slate-500 dark:text-slate-400">
-        Missing builtin host method.
-      </div>
-    );
-  }
-
-  if (config.component === "document_reader") {
-    return <DocumentReaderPanel context={context} />;
-  }
-
-  return (
-    <div className="flex flex-1 flex-col gap-4 p-5">
-      <button
-        type="button"
-        onClick={() => void run()}
-        disabled={running}
-        className="inline-flex h-10 items-center justify-center gap-2 rounded-md bg-primary-600 px-4 text-sm font-semibold text-white transition-colors hover:bg-primary-700 disabled:cursor-not-allowed disabled:opacity-60"
-      >
-        {running ? <Loader2 size={16} className="animate-spin" /> : null}
-        {config.submitLabel}
-      </button>
-      <pre
-        className={`min-h-0 flex-1 overflow-auto rounded-md border px-3 py-2 text-xs ${
-          failed
-            ? "border-red-200 bg-red-50 text-red-700 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-300"
-            : "border-slate-200 bg-slate-50 text-slate-700 dark:border-slate-800 dark:bg-slate-950 dark:text-slate-300"
-        }`}
-      >
-        {message || "Ready."}
-      </pre>
-    </div>
-  );
-};
-
-const PluginSchemaForm = ({
-  extension,
-  context,
-}: {
-  extension: ClientExtensionDescriptor;
-  context?: Record<string, unknown>;
-}) => {
-  const fields = schemaFieldsFor(extension);
-  const [values, setValues] = useState<Record<string, unknown>>(() =>
-    Object.fromEntries(
-      fields.map((field) => [field.name, field.default ?? ""]),
-    ),
-  );
-  const [running, setRunning] = useState(false);
-  const [message, setMessage] = useState<string>();
-  const [failed, setFailed] = useState(false);
-  const submitLabel =
-    typeof extension.render?.submit_label === "string"
-      ? extension.render.submit_label
-      : "Run";
-
-  const update = (name: string, value: unknown) => {
-    setValues((current) => ({ ...current, [name]: value }));
-  };
-
-  const submit = async (event: FormEvent) => {
-    event.preventDefault();
-    setRunning(true);
-    setMessage(undefined);
-    setFailed(false);
-    try {
-      const result = await invokePluginCapability(
-        extension.pluginId,
-        extension.capability.id,
-        {
-          slot: extension.slot,
-          contexts: extension.contexts,
-          context: context || {},
-          values,
-        },
-        extension.capability.id,
-        extension.clientGrant,
-      );
-      setMessage(
-        typeof result === "string"
-          ? result
-          : JSON.stringify(result ?? { ok: true }, null, 2),
-      );
-    } catch (error) {
-      setFailed(true);
-      setMessage(error instanceof Error ? error.message : String(error));
-    } finally {
-      setRunning(false);
-    }
-  };
-
-  if (fields.length === 0) {
-    return (
-      <div className="flex flex-1 items-center justify-center px-6 text-center text-sm text-slate-500 dark:text-slate-400">
-        Missing schema fields.
-      </div>
-    );
-  }
-
-  return (
-    <form onSubmit={submit} className="flex flex-1 flex-col gap-4 p-5">
-      <div className="min-h-0 flex-1 space-y-4 overflow-auto pr-1">
-        {fields.map((field) => (
-          <label key={field.name} className="block text-sm">
-            <span className="mb-1.5 block font-medium text-slate-700 dark:text-slate-200">
-              {field.label || field.name}
-            </span>
-            {field.type === "textarea" ? (
-              <textarea
-                required={field.required}
-                value={String(values[field.name] ?? "")}
-                placeholder={field.placeholder}
-                onChange={(event) => update(field.name, event.target.value)}
-                className="min-h-24 w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:border-primary-500 dark:border-slate-700 dark:bg-slate-950 dark:text-white"
-              />
-            ) : field.type === "boolean" ? (
-              <input
-                type="checkbox"
-                checked={values[field.name] === true}
-                onChange={(event) => update(field.name, event.target.checked)}
-                className="h-4 w-4 rounded border-slate-300 text-primary-600"
-              />
-            ) : field.type === "select" ? (
-              <select
-                required={field.required}
-                value={String(values[field.name] ?? "")}
-                onChange={(event) => update(field.name, event.target.value)}
-                className="h-10 w-full rounded-md border border-slate-200 bg-white px-3 text-sm text-slate-900 outline-none focus:border-primary-500 dark:border-slate-700 dark:bg-slate-950 dark:text-white"
-              >
-                {(field.options || []).map((option) => {
-                  const value =
-                    typeof option === "string"
-                      ? option
-                      : String(option.value ?? "");
-                  const label =
-                    typeof option === "string" ? option : option.label || value;
-                  return (
-                    <option key={value} value={value}>
-                      {label}
-                    </option>
-                  );
-                })}
-              </select>
-            ) : (
-              <input
-                type={field.type === "number" ? "number" : "text"}
-                required={field.required}
-                value={String(values[field.name] ?? "")}
-                placeholder={field.placeholder}
-                onChange={(event) =>
-                  update(
-                    field.name,
-                    field.type === "number"
-                      ? Number(event.target.value)
-                      : event.target.value,
-                  )
-                }
-                className="h-10 w-full rounded-md border border-slate-200 bg-white px-3 text-sm text-slate-900 outline-none focus:border-primary-500 dark:border-slate-700 dark:bg-slate-950 dark:text-white"
-              />
-            )}
-          </label>
-        ))}
-        {message ? (
-          <pre
-            className={`max-h-48 overflow-auto rounded-md border px-3 py-2 text-xs ${
-              failed
-                ? "border-red-200 bg-red-50 text-red-700 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-300"
-                : "border-slate-200 bg-slate-50 text-slate-700 dark:border-slate-800 dark:bg-slate-950 dark:text-slate-300"
-            }`}
-          >
-            {message}
-          </pre>
-        ) : null}
-      </div>
-      <button
-        type="submit"
-        disabled={running}
-        className="inline-flex h-10 items-center justify-center gap-2 rounded-md bg-primary-600 px-4 text-sm font-semibold text-white transition-colors hover:bg-primary-700 disabled:cursor-not-allowed disabled:opacity-60"
-      >
-        {running ? <Loader2 size={16} className="animate-spin" /> : null}
-        {submitLabel}
-      </button>
-    </form>
   );
 };
 
@@ -594,7 +273,7 @@ const PluginActionView = ({
         className="inline-flex h-10 items-center justify-center gap-2 rounded-md bg-primary-600 px-4 text-sm font-semibold text-white transition-colors hover:bg-primary-700 disabled:cursor-not-allowed disabled:opacity-60"
       >
         {running ? <Loader2 size={16} className="animate-spin" /> : null}
-        {running ? "Running..." : extension.render?.submit_label || "Run"}
+        {running ? "Running..." : "Run"}
       </button>
       {message ? (
         <pre
@@ -620,12 +299,6 @@ export const PluginExtensionContent = ({
 }) => {
   if (extension.renderMode === "web_container") {
     return <PluginWebContainer extension={extension} context={context} />;
-  }
-  if (extension.renderMode === "schema") {
-    return <PluginSchemaForm extension={extension} context={context} />;
-  }
-  if (extension.renderMode === "builtin") {
-    return <PluginBuiltinView extension={extension} context={context} />;
   }
   return <PluginActionView extension={extension} context={context} />;
 };

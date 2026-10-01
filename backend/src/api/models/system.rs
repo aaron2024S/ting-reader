@@ -31,6 +31,7 @@ pub struct AdminStatisticsOverview {
     pub total_libraries: i64,
     pub local_libraries: i64,
     pub webdav_libraries: i64,
+    pub rss_libraries: i64,
     pub total_users: i64,
     pub admin_users: i64,
     pub active_users: i64,

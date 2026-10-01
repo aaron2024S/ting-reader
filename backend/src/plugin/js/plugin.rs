@@ -18,8 +18,8 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 use tracing::info;
 
+use super::super::types::PluginMetadata;
 use super::super::types::metadata::read_plugin_metadata;
-use super::super::types::{PluginMetadata, PluginType};
 use super::runtime::JsRuntimeWrapper;
 use crate::core::error::TingError;
 use crate::plugin::PluginHostGatewayHandle;
@@ -87,10 +87,6 @@ impl JavaScriptPluginLoader {
     }
 
     /// Get the plugin type
-    pub fn plugin_type(&self) -> PluginType {
-        self.metadata.plugin_type
-    }
-
     /// Create an executor for this plugin
     ///
     /// The executor must be used in a single-threaded context (e.g., LocalSet)
@@ -107,64 +103,6 @@ impl JavaScriptPluginLoader {
             self.metadata.clone(),
             host_gateway,
         )
-    }
-
-    /// Install npm dependencies for this plugin
-    ///
-    /// This method generates a package.json and runs npm install if the plugin
-    /// has npm dependencies declared.
-    ///
-    /// # Arguments
-    /// * `npm_manager` - The npm manager instance to use
-    ///
-    /// # Returns
-    /// Result indicating success or failure
-    pub fn install_npm_dependencies(&self, npm_manager: &super::npm::NpmManager) -> Result<()> {
-        // Check if plugin has npm dependencies
-        if self.metadata.npm_dependencies.is_empty() {
-            info!(
-                "Plugin {} has no npm dependencies, skipping npm install",
-                self.metadata.name
-            );
-            return Ok(());
-        }
-
-        info!(
-            "Installing npm dependencies for plugin: {}",
-            self.metadata.name
-        );
-
-        // Generate package.json
-        npm_manager.generate_package_json(super::npm::PackageJsonSpec {
-            plugin_dir: &self.plugin_dir,
-            plugin_name: &self.metadata.id,
-            plugin_version: &self.metadata.version,
-            description: Some(&self.metadata.description),
-            author: Some(&self.metadata.author),
-            license: self.metadata.license.as_deref(),
-            npm_dependencies: &self.metadata.npm_dependencies,
-        })?;
-
-        // Install dependencies, reusing the shared cache when configured.
-        npm_manager.install_dependencies_with_cache(
-            &self.plugin_dir,
-            &self.metadata.name,
-            &self.metadata.npm_dependencies,
-        )?;
-
-        info!(
-            "npm dependencies installed successfully for plugin: {}",
-            self.metadata.name
-        );
-        Ok(())
-    }
-
-    /// Check if npm dependencies are installed
-    pub fn has_npm_dependencies_installed(&self, npm_manager: &super::npm::NpmManager) -> bool {
-        if self.metadata.npm_dependencies.is_empty() {
-            return true; // No dependencies means nothing to install
-        }
-        npm_manager.has_node_modules(&self.plugin_dir)
     }
 
     /// Verify that the plugin metadata specifies JavaScript runtime
@@ -234,7 +172,8 @@ impl JavaScriptPluginExecutor {
 
     /// Load the JavaScript module
     pub async fn load_module(&mut self) -> Result<()> {
-        self.runtime.load_module().await
+        self.runtime.load_module().await?;
+        Ok(())
     }
 
     /// Initialize the plugin
@@ -248,7 +187,7 @@ impl JavaScriptPluginExecutor {
         // Call the initialize function if it exists
         let init_code = format!(
             r#"
-            const context = {};
+            const context = {context_json};
             globalThis.Ting = globalThis.Ting || {{}};
             globalThis.Ting.config = context.config || {{}};
             globalThis.Ting.dataDir = context.data_dir || null;
@@ -256,7 +195,7 @@ impl JavaScriptPluginExecutor {
                 initialize(context);
             }}
             "#,
-            serde_json::to_string(&serde_json::json!({
+            context_json = serde_json::to_string(&serde_json::json!({
                 "config": config,
                 "data_dir": data_dir.to_string_lossy(),
             }))
@@ -303,7 +242,28 @@ impl JavaScriptPluginExecutor {
         T: serde::Serialize,
         R: for<'de> serde::Deserialize<'de>,
     {
-        self.runtime.call_function(function_name, args).await
+        self.runtime
+            .call_function(
+                function_name,
+                args,
+                &crate::plugin::types::PluginInvocationContext::default(),
+            )
+            .await
+    }
+
+    pub async fn call_function_with_context<T, R>(
+        &mut self,
+        function_name: &str,
+        args: T,
+        context: &crate::plugin::types::PluginInvocationContext,
+    ) -> Result<R>
+    where
+        T: serde::Serialize,
+        R: for<'de> serde::Deserialize<'de>,
+    {
+        self.runtime
+            .call_function(function_name, args, context)
+            .await
     }
 
     /// Get the plugin metadata
@@ -334,9 +294,9 @@ mod tests {
             "id": name,
             "name": name,
             "version": "1.0.0",
-            "min_core_version": "1.4.8",
+            "min_core_version": "2.0.0",
             "author": "Test Author",
-            "description": "Test JavaScript plugin",
+            "description": {"en": "Test JavaScript plugin"},
             "runtime": runtime,
             "entry_point": "plugin.js",
             "dependencies": [],
@@ -344,8 +304,8 @@ mod tests {
             "capabilities": [
                 {
                     "id": "test.tools",
-                    "kind": "tool_provider",
-                    "invoke": "hello"
+                    "kind": "plugin_store",
+                    "operations": ["list_plugins"]
                 }
             ]
         });
@@ -371,6 +331,7 @@ mod tests {
             function hello(args) {
                 return { message: "Hello, " + args.name + "!" };
             }
+            export function list_plugins() { return { plugins: [] }; }
             "#,
         )
         .unwrap();
@@ -387,7 +348,6 @@ mod tests {
 
         assert_eq!(metadata.name, "test-plugin");
         assert_eq!(metadata.version, "1.0.0");
-        assert_eq!(metadata.plugin_type, PluginType::Utility);
         assert_eq!(metadata.author, "Test Author");
         assert_eq!(metadata.entry_point, "plugin.js");
     }
@@ -408,14 +368,8 @@ mod tests {
         let temp_dir = create_test_plugin_dir("test-plugin", "wasm");
         let plugin_dir = temp_dir.path().join("test-plugin");
 
-        let metadata = read_plugin_metadata(&plugin_dir).unwrap();
-        let result = JavaScriptPluginLoader::verify_runtime(&metadata, &plugin_dir);
-
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("expected 'javascript'"));
+        let error = read_plugin_metadata(&plugin_dir).unwrap_err();
+        assert!(error.to_string().contains("runtime must match"));
     }
 
     #[test]
@@ -428,7 +382,6 @@ mod tests {
         assert!(loader.is_ok());
         let loader = loader.unwrap();
         assert_eq!(loader.metadata().name, "test-plugin");
-        assert_eq!(loader.plugin_type(), PluginType::Utility);
     }
 
     #[test]
@@ -442,16 +395,16 @@ mod tests {
             "id": "test-plugin",
             "name": "test-plugin",
             "version": "1.0.0",
-            "min_core_version": "1.4.8",
+            "min_core_version": "2.0.0",
             "author": "Test Author",
-            "description": "Test plugin",
+            "description": {"en": "Test plugin"},
             "runtime": "javascript",
             "entry_point": "plugin.js",
             "capabilities": [
                 {
                     "id": "test.tools",
-                    "kind": "tool_provider",
-                    "invoke": "hello"
+                    "kind": "plugin_store",
+                    "operations": ["list_plugins"]
                 }
             ]
         });
@@ -465,23 +418,12 @@ mod tests {
         let result = JavaScriptPluginLoader::new(plugin_dir);
 
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Entry point file not found"));
-    }
-
-    #[test]
-    fn test_install_npm_dependencies_skips_when_empty() {
-        let temp_dir = create_test_plugin_dir("test-plugin", "javascript");
-        let plugin_dir = temp_dir.path().join("test-plugin");
-        let loader = JavaScriptPluginLoader::new(plugin_dir.clone()).unwrap();
-        let npm_manager =
-            super::super::npm::NpmManager::new(Some(PathBuf::from("missing-npm")), None);
-
-        loader.install_npm_dependencies(&npm_manager).unwrap();
-
-        assert!(!plugin_dir.join("package.json").exists());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Entry point file not found")
+        );
     }
 
     #[tokio::test]
@@ -494,5 +436,92 @@ mod tests {
 
         let result = executor.load_module().await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn rejects_missing_declared_export_at_module_load() {
+        let temp_dir = create_test_plugin_dir("test-plugin", "javascript");
+        let plugin_dir = temp_dir.path().join("test-plugin");
+        fs::write(
+            plugin_dir.join("plugin.js"),
+            "export function unrelated() { return { plugins: [] }; }",
+        )
+        .unwrap();
+        let loader = JavaScriptPluginLoader::new(plugin_dir).unwrap();
+        let mut executor = loader.create_executor().unwrap();
+        let error = executor.load_module().await.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Missing declared plugin exports"),
+            "{error:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn loads_package_relative_esm_and_invokes_declared_export() {
+        let temp_dir = create_test_plugin_dir("test-plugin", "javascript");
+        let plugin_dir = temp_dir.path().join("test-plugin");
+        fs::write(
+            plugin_dir.join("sdk.js"),
+            "export function items() { return [{ id: 'ok' }]; }",
+        )
+        .unwrap();
+        fs::write(
+            plugin_dir.join("plugin.js"),
+            "import { items } from './sdk.js'; export async function list_plugins() { return { plugins: items() }; }",
+        )
+        .unwrap();
+        let loader = JavaScriptPluginLoader::new(plugin_dir).unwrap();
+        let mut executor = loader.create_executor().unwrap();
+        executor.load_module().await.unwrap();
+        let result: Value = executor
+            .call_function("list_plugins", serde_json::json!({}))
+            .await
+            .unwrap();
+        assert_eq!(result["plugins"][0]["id"], "ok");
+    }
+
+    #[tokio::test]
+    async fn esm_imports_cannot_escape_package_or_load_remote_code() {
+        let temp_dir = create_test_plugin_dir("test-plugin", "javascript");
+        let plugin_dir = temp_dir.path().join("test-plugin");
+        for request in ["../other.js", "https://example.com/remote.js", "left-pad"] {
+            fs::write(
+                plugin_dir.join("plugin.js"),
+                format!("import '{request}'; export function list_plugins() {{ return {{}}; }}"),
+            )
+            .unwrap();
+            let loader = JavaScriptPluginLoader::new(plugin_dir.clone()).unwrap();
+            let mut executor = loader.create_executor().unwrap();
+            assert!(executor.load_module().await.is_err(), "{request}");
+        }
+    }
+
+    #[tokio::test]
+    async fn initialization_supplies_config_and_data_directory_to_plugin() {
+        let temp_dir = create_test_plugin_dir("test-plugin", "javascript");
+        let plugin_dir = temp_dir.path().join("test-plugin");
+        fs::write(
+            plugin_dir.join("plugin.js"),
+            "export function list_plugins() { return { plugins: [], token: Ting.config.token, data_dir: Ting.dataDir }; }",
+        )
+        .unwrap();
+        let loader = JavaScriptPluginLoader::new(plugin_dir.clone()).unwrap();
+        let mut executor = loader.create_executor().unwrap();
+        executor.load_module().await.unwrap();
+        executor
+            .initialize(
+                serde_json::json!({"token": "configured"}),
+                plugin_dir.join("data"),
+            )
+            .await
+            .unwrap();
+        let result: Value = executor
+            .call_function("list_plugins", serde_json::json!({}))
+            .await
+            .unwrap();
+        assert_eq!(result["token"], "configured");
+        assert!(result["data_dir"].as_str().unwrap().ends_with("data"));
     }
 }

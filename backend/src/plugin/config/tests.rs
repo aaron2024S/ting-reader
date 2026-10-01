@@ -73,23 +73,29 @@ fn test_config_validation() {
     let plugin_id = "test-plugin@1.0.0".to_string();
 
     let valid_config = serde_json::json!({"port": 8080, "host": "localhost"});
-    assert!(manager
-        .initialize_config(
-            plugin_id.clone(),
-            "Test Plugin".to_string(),
-            Some(schema.clone()),
-            valid_config
-        )
-        .is_ok());
-    assert!(manager
-        .update_config(&plugin_id, serde_json::json!({"port": 8080}))
-        .is_err());
-    assert!(manager
-        .update_config(
-            &plugin_id,
-            serde_json::json!({"port": "not a number", "host": "localhost"})
-        )
-        .is_err());
+    assert!(
+        manager
+            .initialize_config(
+                plugin_id.clone(),
+                "Test Plugin".to_string(),
+                Some(schema.clone()),
+                valid_config
+            )
+            .is_ok()
+    );
+    assert!(
+        manager
+            .update_config(&plugin_id, serde_json::json!({"port": 8080}))
+            .is_err()
+    );
+    assert!(
+        manager
+            .update_config(
+                &plugin_id,
+                serde_json::json!({"port": "not a number", "host": "localhost"})
+            )
+            .is_err()
+    );
 }
 
 #[test]
@@ -215,10 +221,12 @@ fn test_ensure_config_syncs_schema_and_encrypts_existing_sensitive_values() {
     let configs = manager.configs.read().unwrap();
     let entry = configs.get(&plugin_id).unwrap();
     assert_eq!(entry.encrypted_fields, vec!["api_key".to_string()]);
-    assert!(entry.config["api_key"]
-        .as_str()
-        .unwrap()
-        .starts_with("encrypted:"));
+    assert!(
+        entry.config["api_key"]
+            .as_str()
+            .unwrap()
+            .starts_with("encrypted:")
+    );
 }
 
 #[test]
@@ -528,19 +536,25 @@ fn test_import_with_validation() {
         )
         .unwrap();
 
-    assert!(manager
-        .import_config(&plugin_id, serde_json::json!({"config": {}}))
-        .is_err());
-    assert!(manager
-        .import_config(
-            &plugin_id,
-            serde_json::json!({"config": {"port": "not a number"}})
-        )
-        .is_err());
+    assert!(
+        manager
+            .import_config(&plugin_id, serde_json::json!({"config": {}}))
+            .is_err()
+    );
+    assert!(
+        manager
+            .import_config(
+                &plugin_id,
+                serde_json::json!({"config": {"port": "not a number"}})
+            )
+            .is_err()
+    );
 
-    assert!(manager
-        .import_config(&plugin_id, serde_json::json!({"config": {"port": 9000}}))
-        .is_ok());
+    assert!(
+        manager
+            .import_config(&plugin_id, serde_json::json!({"config": {"port": 9000}}))
+            .is_ok()
+    );
     assert_eq!(manager.get_config(&plugin_id).unwrap()["port"], 9000);
 }
 
@@ -577,8 +591,10 @@ fn test_import_missing_config_field() {
         serde_json::json!({"plugin_id": plugin_id, "plugin_name": "Test Plugin"}),
     );
     assert!(result.is_err());
-    assert!(result
-        .unwrap_err()
-        .to_string()
-        .contains("missing 'config' field"));
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("missing 'config' field")
+    );
 }

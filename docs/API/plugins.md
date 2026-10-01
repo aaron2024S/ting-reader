@@ -1,225 +1,43 @@
-# 插件管理
+# 插件管理与调用
 
-## 数据结构
+以下接口需要登录；同时提供 `/api/...` 和 `/api/v1/...` 前缀。本文使用 `/api/v1`。安装、卸载、重新加载、修改配置、商店安装、清除商店缓存和查询日志需要管理员身份。读取接口按插件的 `admin_only` 和当前用户权限过滤。
 
-### LocalizedText
+## 插件身份和声明
 
-```json
-{
-  "zh": "中文文本",
-  "en": "English text"
-}
-```
+清单中的 `id` 是稳定插件 ID，例如 `example-metadata`。已安装实例的 ID 包含版本，例如 `example-metadata@1.0.0`；管理、配置、资产及能力调用使用接口返回的实例 ID。商店安装使用商店条目的稳定 ID。
 
-### ScraperSearchField
+`capabilities` 保持清单中的结构化声明。每项包含唯一 `id` 和 `kind`，操作由能力定义确定。元数据插件声明 `operations: ["search"]`；工具能力声明 `invoke: "invokeTool"`。能力和输入输出说明见 [能力声明](../plugins/capabilities.md)。
+
+权限使用对象：
 
 ```json
-{
-  "key": "title",
-  "label": "书名",
-  "label_i18n": {
-    "zh": "书名",
-    "en": "Title"
-  },
-  "required": true,
-  "type": "text",
-  "field_type": "text",
-  "placeholder": "输入书名",
-  "placeholder_i18n": {
-    "zh": "输入书名",
-    "en": "Enter title"
-  },
-  "default_from": "book.title"
-}
+[
+  { "type": "network_access", "domain": "example.com" },
+  { "type": "books_read" },
+  { "type": "file_read", "path": "books/*" }
+]
 ```
 
-### ScraperCapabilities
-
-```json
-{
-  "auto_scrape": true,
-  "search_fields": [
-    {
-      "key": "title",
-      "label": "书名",
-      "label_i18n": {
-        "zh": "书名",
-        "en": "Title"
-      },
-      "required": true,
-      "type": "text",
-      "placeholder": "输入书名",
-      "placeholder_i18n": {
-        "zh": "输入书名",
-        "en": "Enter title"
-      },
-      "default_from": "book.title"
-    }
-  ],
-  "result_fields": ["title", "author", "cover_url", "intro", "tags"],
-  "result_field_labels": {
-    "title": {
-      "zh": "书名",
-      "en": "Title"
-    },
-    "cover_url": {
-      "zh": "封面",
-      "en": "Cover"
-    },
-    "intro": {
-      "zh": "简介",
-      "en": "Description"
-    },
-    "description": {
-      "zh": "简介",
-      "en": "Description"
-    }
-  }
-}
-```
-
-### PluginInfo
-
-插件管理 API 中的展示/业务摘要字段由服务端从 `capabilities` 派生；插件能力以 manifest 中的 `capabilities` 为准。
-
-```json
-{
-  "id": "string",
-  "name": "string",
-  "version": "string",
-  "plugin_type": "scraper | format | utility",
-  "runtime": "wasm | javascript | native | null",
-  "author": "string | null",
-  "description": "string | null",
-  "description_i18n": {
-    "zh": "中文描述",
-    "en": "English description"
-  },
-  "is_enabled": true,
-  "state": "loading | loaded | active | unloading | unloaded | failed",
-  "error": "string | null",
-  "stats": {
-    "total_calls": 0,
-    "successful_calls": 0,
-    "failed_calls": 0,
-    "avg_execution_time_ms": 0.0
-  },
-  "config_schema": {
-    "type": "object",
-    "properties": {
-      "api_key": {
-        "type": "string",
-        "title": "API 密钥",
-        "title_i18n": {
-          "zh": "API 密钥",
-          "en": "API Key"
-        },
-        "description": "用于访问 API 的密钥",
-        "description_i18n": {
-          "zh": "用于访问 API 的密钥",
-          "en": "Key used to access the API"
-        }
-      }
-    }
-  },
-  "permissions": ["network_access: example.com"],
-  "license": "string | null",
-  "repo": "string | null",
-  "capabilities": [
-    {
-      "id": "metadata.search",
-      "kind": "metadata_provider",
-      "invoke": "search",
-      "auto_scrape": true,
-      "search_fields": [],
-      "result_fields": []
-    }
-  ],
-  "scraper": {
-    "auto_scrape": true,
-    "search_fields": [],
-    "result_fields": [],
-    "result_field_labels": {}
-  }
-}
-```
-
-### StorePlugin
-
-```json
-{
-  "id": "ximalaya-scraper-wasm",
-  "name": "ximalaya scraper",
-  "description": "从喜马拉雅获取有声书元数据（WASM 实现）",
-  "description_i18n": {
-    "zh": "从喜马拉雅获取有声书元数据（WASM 实现）",
-    "en": "Fetch audiobook metadata from Ximalaya (WASM implementation)"
-  },
-  "version": "1.0.2",
-  "download_url": "/plugins/ximalaya-scraper-wasm.tr",
-  "size": "347.63 KB",
-  "date": "2026-06-27T14:20:49.000Z",
-  "runtime": "wasm",
-  "license": "MIT",
-  "author": "Ting Reader Team",
-  "repo": "dqsq2e2/example-plugin",
-  "permissions": ["network_access: www.ximalaya.com"],
-  "dependencies": ["ffmpeg-utils"],
-  "min_core_version": "1.4.8",
-  "config_schema": {},
-  "capabilities": [
-    {
-      "id": "metadata.search",
-      "kind": "metadata_provider",
-      "invoke": "search",
-      "auto_scrape": true,
-      "search_fields": [],
-      "result_fields": []
-    }
-  ],
-  "downloads": [
-    {
-      "name": "Download Plugin",
-      "url": "https://www.tingreader.cn/plugins/ximalaya-scraper-wasm.tr"
-    }
-  ]
-}
-```
-
-`download_url` 可以是字符串，也可以是平台映射：
-
-```json
-{
-  "download_url": {
-    "linux-x86_64": "https://example.com/plugin-linux-x86_64.tr",
-    "linux-aarch64": "https://example.com/plugin-linux-arm64.tr",
-    "windows-x86_64": "https://example.com/plugin-windows-amd64.tr"
-  }
-}
-```
+`network_access`、`file_read/file_write`、`event_subscribe` 分别使用 `domain`、`path`、`event` 作用域；`capability_invoke` 使用目标 `plugin_id` 和 `capability_id`。当前用户、书库及资源授权仍由宿主校验。
 
 ## 已安装插件
 
 ### GET /api/v1/plugins
 
-获取已安装插件列表。
-
-响应：`200 OK`
+返回当前用户可见的已安装实例数组：
 
 ```json
 [
   {
-    "id": "string",
-    "name": "string",
-    "version": "string",
-    "plugin_type": "scraper",
+    "id": "example-metadata@1.0.0",
+    "name": "Example Metadata",
+    "version": "1.0.0",
     "runtime": "wasm",
-    "author": "Ting Reader Team",
-    "description": "从示例站点获取元数据",
-    "description_i18n": {
-      "zh": "从示例站点获取元数据",
-      "en": "Fetch metadata from the example site"
-    },
+    "author": "Example Author",
+    "description": "元数据搜索示例",
+    "description_i18n": { "zh": "元数据搜索示例", "en": "Metadata search example" },
+    "min_core_version": "2.0.0",
+    "admin_only": false,
     "is_enabled": true,
     "state": "active",
     "error": null,
@@ -229,493 +47,286 @@
       "failed_calls": 0,
       "avg_execution_time_ms": 0.0
     },
-    "config_schema": {},
-    "permissions": ["network_access: example.com"],
-    "license": "MIT",
-    "repo": "owner/repo",
-    "capabilities": [
-      {
-        "id": "metadata.search",
-        "kind": "metadata_provider",
-        "invoke": "search",
-        "auto_scrape": true,
-        "search_fields": [],
-        "result_fields": []
-      }
-    ],
+    "permissions": [{ "type": "network_access", "domain": "example.com" }],
+    "capabilities": [{
+      "id": "metadata.search",
+      "kind": "metadata_provider",
+      "operations": ["search"],
+      "auto_scrape": true,
+      "search_fields": [{ "key": "title", "label": { "zh": "书名", "en": "Title" }, "type": "text", "required": true }],
+      "result_fields": [{ "key": "title", "label": { "zh": "书名", "en": "Title" } }]
+    }],
     "scraper": {
       "auto_scrape": true,
-      "search_fields": [],
-      "result_fields": [],
-      "result_field_labels": {}
+      "search_fields": [{ "key": "title", "label": "书名", "label_i18n": { "zh": "书名", "en": "Title" }, "required": true, "type": "text" }],
+      "result_fields": ["title"],
+      "result_field_labels": { "title": { "zh": "书名", "en": "Title" } }
     }
   }
 ]
 ```
 
+可选字段还包括 `license`、`repo`、`min_flutter_version` 和 `config_schema`。`scraper` 是供搜索表单使用的派生摘要；能力声明以 `capabilities` 为准。`runtime` 为 `javascript`、`wasm` 或 `native`。
+
+`state` 为 `discovered/loading/loaded/initializing/active/executing/unloading/unloaded/failed`。`is_enabled` 表示实例已注册，判断是否可调用应同时检查 `state` 和 `error`。
+
 ### GET /api/v1/plugins/:id
 
-获取插件详情。
+返回指定实例的详情。除列表中的业务字段外，包含：
 
-路径参数：
-
-| 参数 | 类型 | 说明 |
+| 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| `id` | string | 插件 ID |
-
-响应：`200 OK`
-
-```json
-{
-  "id": "string",
-  "name": "string",
-  "version": "string",
-  "plugin_type": "format",
-  "runtime": "native",
-  "author": "Ting Reader Team",
-  "description": "通过 FFmpeg 提供原生音频格式支持",
-  "description_i18n": {
-    "zh": "通过 FFmpeg 提供原生音频格式支持",
-    "en": "Native audio format support via FFmpeg"
-  },
-  "license": "MIT",
-  "repo": "owner/repo",
-  "is_enabled": true,
-  "state": "active",
-  "error": null,
-  "entry_point": "native_audio_support.dll",
-  "dependencies": [
-    {
-      "plugin_name": "ffmpeg-utils",
-      "version_requirement": "*"
-    }
-  ],
-  "permissions": ["FileRead(\"./data/audio\")"],
-  "supported_extensions": ["m4a", "flac"],
-  "capabilities": [
-    {
-      "id": "format.audio",
-      "kind": "format_handler",
-      "invoke": "get_stream_url",
-      "extensions": ["m4a", "flac"]
-    }
-  ],
-  "config_schema": {},
-  "scraper": null,
-  "stats": {
-    "total_calls": 0,
-    "successful_calls": 0,
-    "failed_calls": 0,
-    "avg_execution_time_ms": 0.0
-  }
-}
-```
+| `entry_point` | string | 包内业务入口 |
+| `dependencies` | object[] | 每项包含 `plugin_name`、`version_requirement` |
+| `supported_extensions` | string[] 或 null | 声明的扩展名摘要 |
+| `config_schema` | object 或 null | 插件配置表单 schema |
 
 ### POST /api/v1/plugins/install
 
-上传安装插件（`multipart/form-data`，最大 50MB）。
+管理员以 `multipart/form-data` 上传插件包：
 
-请求：字段名 `file`，值为 `.tr` 插件包。
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `file` | 文件 | `trpack build` 生成并签名的 `.tr` 包 |
+| `accept_unverified` | boolean 文本 | 默认 false；确认安装未受信任发布者的已签名包时设为 true |
 
-`.tr` 包由 `trpack build` 生成，并会在安装前完成有效性校验。
+上传上限 50 MiB。宿主校验清单、最低版本、能力、入口、包结构、文件哈希和签名。最多 10,000 个条目，单文件展开后最大 128 MiB，总展开大小最大 256 MiB。JavaScript 依赖须在开发机完成构建，并作为相对模块纳入包。
 
-安装接口仅允许管理员调用。manifest 的 `id`、`name`、`version` 和 `entry_point` 会按安全规则校验；压缩包最多 10,000 个条目，单文件展开后最大 128 MiB，总展开大小最大 256 MiB。上传和商店下载包最大 50 MiB。JavaScript 依赖安装会禁用 npm 生命周期脚本。
-
-响应：`201 Created`
+成功返回 `201 Created`，安装后自动加载和初始化：
 
 ```json
 {
-  "plugin_id": "string",
-  "message": "Plugin xxx installed successfully"
+  "plugin_id": "example-metadata@1.0.0",
+  "message": "Plugin example-metadata@1.0.0 installed successfully"
 }
 ```
 
-如果包未签名或签名 key id 不在受信任列表中，后端返回 `428 Precondition Required`，客户端应显示安全提示。用户同意后，用同一个文件重新提交，并增加字段 `accept_unverified=true`。
+未受信任发布者的有效签名包返回 `428 Precondition Required`：
 
 ```json
 {
   "requires_confirmation": true,
-  "verification_status": "unsigned",
-  "plugin_id": "example-plugin",
-  "plugin_name": "Example Plugin",
+  "verification_status": "untrusted",
+  "plugin_id": "example-metadata",
+  "plugin_name": "Example Metadata",
   "plugin_version": "1.0.0",
   "publisher": "未知发布者",
-  "warning": "Example Plugin由未知发布者提供，未经Ting Reader验证。单击同意，即表示你同意全权负责因使用该插件而可能导致的任何设备损坏或数据丢失。"
+  "warning": "服务端提供的安装确认提示"
 }
 ```
 
+客户端展示服务端提供的提示，确认后上传同一个包并设置 `accept_unverified=true`。未签名或签名无效的包会被拒绝，确认标志不能绕过签名校验。升级保持同一发布者签名身份；发布者身份不同的包不能覆盖已安装实例。
+
 ### DELETE /api/v1/plugins/:id
 
-卸载插件。
-
-路径参数：
-
-| 参数 | 类型 | 说明 |
-| --- | --- | --- |
-| `id` | string | 插件 ID |
-
-响应：`200 OK`
+管理员卸载实例，返回 `200 OK`：
 
 ```json
-{
-  "message": "Plugin xxx uninstalled successfully"
-}
+{ "message": "Plugin example-metadata@1.0.0 uninstalled successfully" }
 ```
 
 ### POST /api/v1/plugins/:id/reload
 
-重新加载插件。
-
-路径参数：
-
-| 参数 | 类型 | 说明 |
-| --- | --- | --- |
-| `id` | string | 插件 ID |
-
-响应：`200 OK`
-
-```json
-{
-  "message": "Plugin xxx reloaded successfully"
-}
-```
+管理员重新创建已安装实例，返回 `200 OK` 和 `message`。重新加载使用已安装文件；更新代码应先重新编译、打包并安装。
 
 ## 插件配置
 
 ### GET /api/v1/plugins/:id/config
 
-获取插件配置。
-
-路径参数：
-
-| 参数 | 类型 | 说明 |
-| --- | --- | --- |
-| `id` | string | 插件 ID |
-
-响应：`200 OK`
+返回当前用户可见实例的配置，敏感字段按 schema 脱敏：
 
 ```json
 {
-  "plugin_id": "string",
-  "config": {}
+  "plugin_id": "example-metadata@1.0.0",
+  "config": { "endpoint": "https://example.com", "api_key": "" }
 }
 ```
+
+脱敏值以实际响应为准；客户端保存未修改的敏感字段时保留服务端返回的占位值，不把它当作业务密钥。
 
 ### PUT /api/v1/plugins/:id/config
 
-更新插件配置。
-
-路径参数：
-
-| 参数 | 类型 | 说明 |
-| --- | --- | --- |
-| `id` | string | 插件 ID |
-
-请求体：
+管理员保存配置，服务端校验 schema、保留未修改的敏感值、加密存储并重新加载实例。
 
 ```json
-{
-  "config": {
-    "api_key": "string"
-  }
-}
+{ "config": { "endpoint": "https://example.com", "api_key": "new-secret" } }
 ```
 
-响应：`200 OK`
-
-```json
-{
-  "message": "Plugin xxx configuration updated successfully"
-}
-```
+成功返回 `200 OK` 和 `message`。配置表单说明见 [配置指南](../plugins/plugin-config.md)。
 
 ## 插件商店
 
 ### GET /api/v1/store/plugins
 
-获取商店插件列表。服务端会查找已安装且启用的 `plugin_store` capability，调用该 capability 的 `invoke` 方法获取列表；如果未安装插件商店插件，返回空数组。
+返回商店条目数组；查询参数 `refresh=true` 刷新缓存。普通用户看不到 `admin_only: true` 的条目。
 
-查询参数：
+每项包含稳定 `id`、`name`、`description`、`description_i18n`、`version`、`runtime`、`capabilities`，以及可选的 `author/license/repo/permissions/dependencies/config_schema/min_core_version/min_flutter_version/admin_only/size/date/downloads`。
 
-| 参数 | 类型 | 必填 | 说明 |
-| --- | --- | --- | --- |
-| `refresh` | boolean | 否 | 为 `true` 时跳过后端商店缓存，并向商店插件传入 `force_refresh: true`。 |
-
-响应：`200 OK`
+权限和能力结构与包内清单一致。下载地址必须对应该条目版本的签名包：
 
 ```json
-[
-  {
-    "id": "ximalaya-scraper-wasm",
-    "name": "ximalaya scraper",
-    "description": "从喜马拉雅获取有声书元数据（WASM 实现）",
-    "description_i18n": {
-      "zh": "从喜马拉雅获取有声书元数据（WASM 实现）",
-      "en": "Fetch audiobook metadata from Ximalaya (WASM implementation)"
-    },
-    "version": "1.0.2",
-    "download_url": "https://www.tingreader.cn/plugins/ximalaya-scraper-wasm.tr",
-    "runtime": "wasm",
-    "author": "Ting Reader Team",
-    "permissions": ["network_access: www.ximalaya.com"],
-    "capabilities": [
-      {
-        "id": "metadata.search",
-        "kind": "metadata_provider",
-        "invoke": "search",
-        "auto_scrape": true,
-        "search_fields": [
-          {
-            "key": "title",
-            "label": "书名",
-            "label_i18n": {
-              "zh": "书名",
-              "en": "Title"
-            },
-            "required": true,
-            "type": "text",
-            "placeholder": "输入书名",
-            "placeholder_i18n": {
-              "zh": "输入书名",
-              "en": "Enter title"
-            },
-            "default_from": "book.title"
-          }
-        ],
-        "result_fields": ["title", "author", "cover_url", "intro"],
-        "result_field_labels": {
-          "title": {
-            "zh": "书名",
-            "en": "Title"
-          },
-          "intro": {
-            "zh": "简介",
-            "en": "Description"
-          },
-          "description": {
-            "zh": "简介",
-            "en": "Description"
-          }
-        }
-      }
-    ]
-  }
-]
+{
+  "id": "example-metadata",
+  "name": "Example Metadata",
+  "description": "元数据搜索示例",
+  "version": "1.0.0",
+  "runtime": "wasm",
+  "min_core_version": "2.0.0",
+  "download_url": "https://example.com/plugins/example-metadata-1.0.0.tr",
+  "permissions": [{ "type": "network_access", "domain": "example.com" }],
+  "capabilities": [{
+    "id": "metadata.search", "kind": "metadata_provider", "operations": ["search"],
+    "search_fields": [], "result_fields": []
+  }]
+}
+```
+
+Native 包的 `download_url` 可以是平台映射：
+
+```json
+{
+  "linux-x86_64": "https://example.com/plugin-linux-amd64.tr",
+  "linux-aarch64": "https://example.com/plugin-linux-arm64.tr",
+  "windows-x86_64": "https://example.com/plugin-windows-amd64.tr",
+  "macos-x86_64": "https://example.com/plugin-darwin-amd64.tr",
+  "macos-aarch64": "https://example.com/plugin-darwin-arm64.tr"
+}
 ```
 
 ### POST /api/v1/store/install
 
-从商店安装插件。
-
-仅管理员可调用。插件商店返回的安装包下载地址必须使用 HTTPS；HTTP 和其他协议会被拒绝。服务端使用宿主生成的随机临时文件名流式下载插件，不使用下载 URL 拼接本地路径；单次商店下载最大 50 MiB，随后仍执行与上传安装相同的 manifest、签名和压缩包安全校验。
-
-请求体：
+管理员请求安装指定稳定 ID：
 
 ```json
-{
-  "plugin_id": "string"
-}
+{ "plugin_id": "example-metadata", "accept_unverified": false }
 ```
 
-响应：`201 Created`
+成功返回 `201 Created`，结构与上传安装相同。发布者确认使用相同的 `428` 响应，确认后重新提交 `accept_unverified: true`。
 
-```json
-{
-  "plugin_id": "string",
-  "message": "Plugin xxx installed successfully from store"
-}
-```
+仅下载 HTTPS 地址，最多跟随 5 次重定向，每跳检查地址；单包最大 50 MiB。下载结束后执行与上传相同的安装校验。
 
 ### POST /api/v1/store/cache/clear
 
-清除插件商店缓存。客户端执行“更新插件列表”时应先调用此接口，再以 `refresh=true` 拉取 `/api/v1/store/plugins`。
+管理员清除商店缓存，返回 `200 OK` 和 `message`。之后可通过 `GET /api/v1/store/plugins?refresh=true` 获取更新后的条目。
 
-响应：`200 OK`
-
-```json
-{
-  "message": "Plugin cache cleared successfully"
-}
-```
-
-## 插件能力 API
+## 能力发现与调用
 
 ### GET /api/v1/plugin-capabilities
 
-列出已启用插件声明的 capability。可用 `kind` 过滤，例如 `ui_extension`、`client_extension`、`content_processor`、`tool_provider`、`task_handler`、`event_handler`、`http_route`。
-
-查询参数：
-
-| 参数 | 类型 | 必填 | 说明 |
-| --- | --- | :---: | --- |
-| `kind` | string | 否 | capability kind 过滤。 |
-
-响应：`200 OK`
+列出当前用户可见的已注册能力；可用 `kind` 查询参数过滤。九类能力为 `metadata_provider/format_handler/tool_provider/http_route/ui_extension/plugin_store/content_processor/task_handler/event_handler`。
 
 ```json
 [
   {
-    "plugin_id": "advanced-capabilities-example@0.1.0",
-    "plugin_name": "Advanced Capabilities Example",
+    "plugin_id": "example-panel@1.0.0",
+    "plugin_name": "Example Panel",
+    "admin_only": false,
     "client_grant": "<opaque-client-grant>",
     "capability": {
       "id": "assistant.panel",
       "kind": "ui_extension",
-      "invoke": "openAssistant",
-      "slot": "global.panel",
+      "slots": ["global.panel"],
+      "contexts": ["global"],
+      "title": { "zh": "助手", "en": "Assistant" },
       "render": {
         "mode": "web_container",
-        "entry": "ui/assistant.html"
+        "entry": "ui/panel.html",
+        "bridge": { "capabilities": ["assistant.tools"], "host_methods": ["user_settings.get"] }
       }
     }
   }
 ]
 ```
 
-`client_grant` 只会出现在 `ui_extension` / `client_extension` 注册项中。它由服务端签名，绑定当前用户、插件和来源 UI capability，并带有过期时间。客户端必须把它当作不透明的临时凭据和秘密处理：不要解析、持久化到可公开读取的位置、写入日志或发送给插件页面之外的第三方；过期后重新调用本接口获取。其他 capability 不返回该字段。
+只有 UI 注册项返回 `client_grant`。凭据绑定当前用户、插件实例、来源 UI 和有效期；由受信客户端保存，过期后重新获取。不要写入日志或发送给第三方。
 
 ### POST /api/v1/plugins/:plugin_id/capabilities/:capability_id/invoke
 
-调用指定插件 capability。后端会自动附加可信 `_context`，包含插件、capability 和当前认证用户上下文。
-
-从插件 UI 发起调用时必须同时传 `ui_capability_id` 和对应注册项返回的 `client_grant`（请求字段名为 `ui_grant`）。后端会验证签名、有效期、当前用户、插件和来源 UI capability，再只允许调用当前 UI capability 或其 `render.bridge.capabilities` 中显式声明的 capability。`tool_provider` 不接受缺少 UI 来源的直接 HTTP 调用。
-
-请求体：
+受信客户端转发 UI 能力请求：
 
 ```json
 {
   "ui_capability_id": "assistant.panel",
   "ui_grant": "<opaque-client-grant>",
-  "params": {
-    "slot": "book.detail_action",
-    "context": {
-      "book_id": "book-id"
-    },
-    "values": {
-      "note": "example"
-    }
-  }
+  "params": { "tool_name": "books.search", "params": { "query": "示例" } }
 }
 ```
 
-`ui_capability_id` 和 `ui_grant` 只有核心文档读取流程调用 `content_processor` 时可以一起省略。其他通过此客户端 HTTP 接口触发的 capability（包括 tool、task、event、metadata 和 UI）都必须携带来源 UI 和匹配的服务端签名凭据，并通过已安装 manifest 的 bridge 白名单校验；宿主内部调度不经过此客户端接口。
+宿主验证来源 UI、签名、用户和 `render.bridge.capabilities`。UI 调用固定为 `open`，工具调用固定为 `invokeTool`；其他能力在 `params.operation` 中指定已声明的操作。宿主附加可信 `_context`，页面提交的数据不能覆盖该上下文。
 
-响应：`200 OK`
+只有内容处理能力的受控读取入口可以不携带来源 UI。其他客户端调用均需同时提供 `ui_capability_id` 和 `ui_grant`；内部搜索、格式、任务和事件调度使用各自业务入口。
+
+成功返回 `200 OK`，`result` 保留插件结果信封：
 
 ```json
-{
-  "result": {
-    "ok": true
-  }
-}
+{ "result": { "ok": true, "data": { "items": [] } } }
 ```
 
 ### GET /api/v1/plugin-capabilities/content-processors
 
-按扩展名查询内容处理插件。
-
-查询参数：
-
-| 参数 | 类型 | 必填 | 说明 |
-| --- | --- | :---: | --- |
-| `extension` | string | 是 | 文件扩展名，例如 `txt`、`pdf`。 |
-| `operation` | string | 否 | 操作过滤：`probe`、`extract_metadata`、`list_sections`、`read_chunk`、`render_page`。 |
+查询参数：`extension` 必填，`operation` 可选。操作为 `probe/open/close/cancel/extract_metadata/read_text/render_page/seek`，仅返回声明了对应操作的处理器。
 
 ### GET /api/v1/plugin-capabilities/tools
 
-查询 `tool_provider`。可用 `name` 过滤工具名。
+查询参数 `name` 可选，过滤工具名称。响应项包含插件实例、`admin_only`、能力声明及匹配的 `tool`。
 
 ### GET /api/v1/plugin-capabilities/task-handlers
 
-查询 `task_handler`。可用 `task_type` 过滤任务类型。
+查询参数 `task_type` 可选，返回匹配的任务能力注册项。
 
 ### GET /api/v1/plugin-capabilities/event-handlers
 
-查询 `event_handler`。可用 `event` 过滤事件名。
+查询参数 `event` 可选，返回匹配的事件能力注册项。
 
-## 插件 UI 资产
-
-### GET /api/v1/plugin-assets/:client_grant/:plugin_id/*path
-
-读取处于 `active` / `executing` 状态插件的 UI 静态文件。`:client_grant` 使用 `GET /api/v1/plugin-capabilities` 中对应 UI 注册项返回的 `client_grant`；后端会验证它仍绑定当前用户、插件和 UI capability，并重新检查 capability 可见性及 `admin_only`。仅允许访问插件包内 `ui/` 和 `assets/` 目录，路径会经过规范化、canonical containment 和符号链接逃逸检查。
-
-所有资源响应使用 `no-store`、`nosniff`、`DENY` framing、无 referrer 和禁止执行的 CSP；HTML、XHTML 与 XML 还会强制下载。资源以流式方式返回，单文件最大 64 MiB。客户端获取入口 HTML 后，会由受信宿主解析并在注入 CSP、`base` 与桥接启动脚本后放入无同源 sandbox。签名凭据只限制谁能取得当前 UI 资产，不会把客户端代码变成秘密存储；插件包仍不应包含 API key、令牌、私钥或其他秘密。
-
-浏览器/WebView 内部的 bridge 使用每文档随机 `bridgeToken`，并绑定到宿主在插件代码执行前创建的首个 `MessagePort`。`bridgeToken` 不是 `client_grant` / `ui_grant`，也不能用于插件资产或 HTTP API；服务端签名凭据由受信客户端获取并附加，不会作为 `bridgeToken` 或 `ting-plugin:init` 字段传入。由于 grant 同时是资产 URL 的路径段，插件 UI 仍可能从自身资源地址观察到它，因此也必须视为秘密，不得记录或外传。端口绑定用于阻止 iframe 跳转后的页面复用 `WindowProxy` 接管能力。插件请求必须通过 `window.__TING_PLUGIN_BRIDGE__.postMessage()` 发出，详见插件 HostGateway 指南。
-
-## HostGateway API
+## HostGateway
 
 ### POST /api/v1/plugin-host/invoke
 
-由前端受控调用插件可访问的 HostGateway 方法。后端会同时校验：
-
-- `ui_capability_id` 是否属于同一插件的 UI capability。
-- `ui_grant` 的签名、有效期、用户、插件和来源 UI capability 是否匹配。
-- 对应 UI capability 的 `render.bridge.host_methods` 是否声明目标方法。
-- 插件 manifest 是否声明了对应权限。
-- 当前用户是否有目标书籍/书库访问权限。
-- 目标方法是否允许在当前认证上下文中调用。
-
-请求体：
+由受信客户端转发页面的 Host 请求：
 
 ```json
 {
-  "plugin_id": "advanced-capabilities-example@0.1.0",
+  "plugin_id": "example-panel@1.0.0",
   "ui_capability_id": "assistant.panel",
   "ui_grant": "<opaque-client-grant>",
-  "method": "progress.recent",
-  "params": {
-    "limit": 5
-  }
+  "method": "user_settings.get",
+  "params": {}
 }
 ```
 
-`ui_capability_id` 和 `ui_grant` 均为必填字段。旧客户端在升级后必须从 capability 注册响应保存当前 UI 的不透明凭据，并在转发 bridge 请求时附加；插件页面只处理每文档 `bridgeToken`，不应接触或缓存 `ui_grant`。仅修改请求字段而未在 manifest 声明 `render.bridge.host_methods` 仍会被拒绝。
+这三个身份字段均为必填。后端验证 UI 来源、凭据、`render.bridge.host_methods` 白名单、清单权限及当前用户对目标资源的授权。成功返回 `200 OK` 和 `{ "result": ... }`。
 
-响应：`200 OK`
+Host 包含书籍、媒体、配置、私有文件、持久存储、HTML、跨插件能力、任务、事件、缓存和用户数据入口；权限和资源生命周期见 [Host 接口](../plugins/hostgateway.md)。后台 JavaScript、WASM 和 Native 通过各自运行时的 Host 接口访问这些方法。
 
-```json
-{
-  "result": []
-}
-```
+## UI 资产
 
-当前常用方法：
+### GET /api/v1/plugin-assets/:client_grant/:plugin_id/*path
 
-| 方法 | 权限 |
-| --- | --- |
-| `books.list` / `books.get` | `books_read` |
-| `libraries.list` / `libraries.get` | `books_read` |
-| `chapters.list` / `chapters.get` | `chapters_read` |
-| `progress.recent` | `progress_read` |
-| `media.get_url` | `media_read_url` 或 `media_read` |
-| `metadata.write` | `metadata_write` + admin |
-| `library.file.list` / `library.file.stat` / `library.file.read` | `file_read` |
-| `library.file.write` | `file_write` + admin |
-| `database.get` / `database.list` | `database_read` |
-| `database.update` | `database_write` + admin |
-| `tasks.create` | `task_create` |
-| `cache.get` / `cache.has` | `cache_read` 或 `cache_write` |
-| `cache.set` / `cache.delete` | `cache_write` |
+读取 `active` 或 `executing` 实例的 `ui/`、`assets/` 文件。凭据绑定用户、实例和来源 UI；服务端再次检查用户、插件可见性、规范化路径、符号链接和目录范围。单文件上限 64 MiB，流式返回。
 
-## 插件路由签名
+响应禁止缓存和直接执行，并使用 `nosniff`、禁止 framing 的响应头和限制性 CSP。HTML 由受信客户端读取，注入 CSP、资源基址及桥接脚本后放入 sandbox。
+
+页面使用每文档随机 `bridgeToken` 和宿主创建的 `MessagePort`，通过 `window.__TING_PLUGIN_BRIDGE__.postMessage()` 调用。`bridgeToken` 用于页面通信；HTTP 凭据由客户端附加。页面代码、消息格式、主题和语言处理见 [界面与日志](../plugins/ui-logging-migration.md)。
+
+## 插件 HTTP 路由
+
+### ANY /api/v1/plugin-routes/*path
+
+调用声明 `route.auth: authenticated` 的路由，需要用户登录。方法和路径必须匹配清单，由宿主调用固定 `handle` 操作。
+
+### ANY /api/v1/public/plugin-routes/*path
+
+调用声明 `route.auth: public` 的路由。声明 `require_signature: true` 时需要有效签名；签名绑定用户时恢复该用户的权限上下文。返回状态、允许的响应头和正文由插件的路由结果决定。
 
 ### POST /api/v1/plugin-route-signatures
 
-为公共插件路由生成签名 URL。默认绑定当前用户，签名中包含 `user`，公共请求校验后会恢复 signed-user 上下文。RSS 订阅等外部客户端可用该 URL 访问当前用户有权限的内容。
-
-请求体：
+为已声明的公共插件路由签名，默认绑定当前用户：
 
 ```json
-{
-  "method": "GET",
-  "path": "/rss/library-id.xml",
-  "expires_in_seconds": 86400,
-  "bind_current_user": true
-}
+{ "method": "GET", "path": "/rss/library-id.xml", "expires_in_seconds": 86400, "bind_current_user": true }
 ```
 
-响应：`200 OK`
+成功返回：
 
 ```json
 {
@@ -726,3 +337,29 @@
   "signed_url": "/api/v1/public/plugin-routes/rss/library-id.xml?expires=1790000000&signature=hex&user=user-id"
 }
 ```
+
+## 插件日志
+
+### GET /api/v1/plugins/:id/logs
+
+### GET /api/v1/plugin-logs
+
+管理员查询指定实例或全部插件日志：
+
+| 参数 | 说明 |
+| --- | --- |
+| `plugin_id` | 全局查询时按插件过滤 |
+| `level` | 日志级别 |
+| `source` | `code/lifecycle/runtime/gateway/security` |
+| `q` | 检索消息和结构化字段 |
+| `since`、`until` | RFC 3339 时间；起始不能晚于结束 |
+| `page` | 从 1 开始，默认 1 |
+| `page_size` | 默认 100，范围 1–500 |
+
+响应为 `{ "logs": [...], "total": 0, "page": 1, "page_size": 100 }`。日志包含时间、级别、消息和结构化字段；插件身份、运行时及来源由宿主记录，业务 `op` 和结果数量等在 `plugin_fields` 中。
+
+### GET /api/v1/plugins/:id/logs/export
+
+### GET /api/v1/plugin-logs/export
+
+管理员导出文本日志，支持上述过滤参数。响应 `Content-Type: text/plain; charset=utf-8`，带附件文件名。导出按过滤条件获取匹配记录，不按查询列表的页码截断。

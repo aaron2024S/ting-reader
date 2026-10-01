@@ -10,73 +10,24 @@ type JsonRecord = Record<string, unknown>;
 const isJsonRecord = (value: unknown): value is JsonRecord =>
   value !== null && typeof value === "object" && !Array.isArray(value);
 
-const normalizeCapability = (value: unknown): PluginCapability | undefined => {
-  if (!isJsonRecord(value)) return undefined;
-  if (typeof value.id !== "string" || typeof value.kind !== "string") {
-    return undefined;
-  }
-  return value as PluginCapability;
-};
-
-const normalizeRegistration = (
-  value: unknown,
-): PluginCapabilityRegistration | undefined => {
-  if (!isJsonRecord(value)) return undefined;
-
-  // The current API wraps the capability in `capability`. Keep accepting the
-  // legacy flattened form so a gateway serving an older backend cannot crash
-  // the authenticated shell.
-  const capability =
-    normalizeCapability(value.capability) || normalizeCapability(value);
-  if (!capability) return undefined;
-
-  const pluginId =
-    typeof value.plugin_id === "string"
-      ? value.plugin_id
-      : typeof value.pluginId === "string"
-        ? value.pluginId
-        : undefined;
-  const pluginName =
-    typeof value.plugin_name === "string"
-      ? value.plugin_name
-      : typeof value.pluginName === "string"
-        ? value.pluginName
-        : undefined;
-  if (!pluginId || !pluginName) return undefined;
-
-  return {
-    plugin_id: pluginId,
-    plugin_name: pluginName,
-    admin_only: value.admin_only === true,
-    client_grant:
-      typeof value.client_grant === "string" ? value.client_grant : undefined,
-    capability,
-  };
-};
-
 const normalizeRegistrationList = (
   payload: unknown,
 ): PluginCapabilityRegistration[] => {
-  let values: unknown[] = [];
-  if (Array.isArray(payload)) {
-    values = payload;
-  } else if (isJsonRecord(payload)) {
-    const wrapped = payload.capabilities ?? payload.items ?? payload.data;
-    if (Array.isArray(wrapped)) values = wrapped;
-  }
-
-  const registrations = values.flatMap((value) => {
-    const registration = normalizeRegistration(value);
-    return registration ? [registration] : [];
+  if (!Array.isArray(payload)) throw new Error("Invalid capability registration list");
+  return payload.map((value): PluginCapabilityRegistration => {
+    if (!isJsonRecord(value) || !isJsonRecord(value.capability) ||
+        typeof value.plugin_id !== "string" || typeof value.plugin_name !== "string" ||
+        typeof value.capability.id !== "string" || typeof value.capability.kind !== "string") {
+      throw new Error("Invalid capability registration");
+    }
+    return {
+      plugin_id: value.plugin_id,
+      plugin_name: value.plugin_name,
+      admin_only: value.admin_only === true,
+      client_grant: typeof value.client_grant === "string" ? value.client_grant : undefined,
+      capability: value.capability as PluginCapability,
+    };
   });
-
-  if (registrations.length !== values.length) {
-    console.warn(
-      `Ignored ${values.length - registrations.length} invalid plugin capability registration(s)`,
-    );
-  }
-
-  return registrations;
 };
 
 export type PluginCapabilityInvokeResult<T = unknown> = {

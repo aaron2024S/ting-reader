@@ -1,10 +1,10 @@
 //! Authentication middleware
 
-use crate::auth::jwt::{validate_token_with_secrets, Claims};
+use crate::auth::jwt::{Claims, validate_token_with_secrets};
 use crate::core::error::{Result, TingError};
 use axum::{
     extract::{Request, State},
-    http::{header, HeaderMap},
+    http::{HeaderMap, header},
     middleware::Next,
     response::{IntoResponse, Response},
 };

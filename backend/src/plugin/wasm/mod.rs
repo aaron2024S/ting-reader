@@ -1,7 +1,9 @@
 //! WebAssembly plugin subsystem
 
 pub mod host_functions;
+mod invocation;
 pub mod plugin;
+mod resource_bindings;
 pub mod runtime;
 pub mod sandbox;
 #[cfg(test)]

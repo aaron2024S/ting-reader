@@ -2,7 +2,7 @@
 
 use crate::auth::AuthUser;
 use crate::core::error::{Result, TingError};
-use axum::http::{header, HeaderMap};
+use axum::http::{HeaderMap, header};
 use std::net::{IpAddr, SocketAddr};
 
 #[derive(Debug, Clone)]

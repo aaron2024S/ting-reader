@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{RwLock, mpsc};
 use tracing::{error, info, warn};
 
 pub struct LibraryWatcher {
@@ -211,17 +211,13 @@ impl LibraryWatcher {
                 }
             })
             .map_err(|e| {
-                crate::core::error::TingError::IoError(std::io::Error::other(
-                    e.to_string(),
-                ))
+                crate::core::error::TingError::IoError(std::io::Error::other(e.to_string()))
             })?;
 
         watcher
             .watch(&path_buf, RecursiveMode::Recursive)
             .map_err(|e| {
-                crate::core::error::TingError::IoError(std::io::Error::other(
-                    e.to_string(),
-                ))
+                crate::core::error::TingError::IoError(std::io::Error::other(e.to_string()))
             })?;
 
         self.watchers.write().await.insert(lib_id.clone(), watcher);

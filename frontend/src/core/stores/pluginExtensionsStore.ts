@@ -81,13 +81,10 @@ export const usePluginExtensionsStore = create<PluginExtensionsStore>(
       });
       const refreshPromise = (async () => {
         try {
-          const [uiExtensions, clientExtensions] = await Promise.all([
-            listPluginCapabilities("ui_extension"),
-            listPluginCapabilities("client_extension"),
-          ]);
+          const uiExtensions = await listPluginCapabilities("ui_extension");
           if (generation !== loadGeneration) return;
           set({
-            registrations: [...uiExtensions, ...clientExtensions],
+            registrations: uiExtensions,
             loading: false,
             loaded: true,
             loadedForToken: token,

@@ -7,9 +7,9 @@ use super::{FailedPlugin, PluginEntry, PluginManager};
 use crate::core::error::{Result, TingError};
 use crate::plugin::tr_package::{self, TrPackageSignatureIdentity};
 use crate::plugin::types::metadata::has_plugin_manifest;
-use crate::plugin::types::{Plugin, PluginMetadata, PluginState, PluginType};
+use crate::plugin::types::{Plugin, PluginMetadata, PluginState};
 
-const RESERVED_PLUGIN_DIRS: [&str; 3] = ["configs", "data", "temp"];
+const RESERVED_PLUGIN_DIRS: [&str; 4] = ["configs", "data", "temp", "staging"];
 
 impl PluginManager {
     /// Discover and load all plugins from the plugin directory
@@ -36,14 +36,6 @@ impl PluginManager {
             }
 
             if !has_plugin_manifest(&path) {
-                let error = "plugin.yml/plugin.yaml not found";
-                warn!(
-                    "Failed to discover plugin from {}: {}",
-                    path.display(),
-                    error
-                );
-                self.register_failed_plugin_directory(&path, error.to_string())
-                    .await;
                 continue;
             }
 
@@ -280,7 +272,6 @@ fn failed_plugin_metadata(path: &Path) -> PluginMetadata {
         id.clone(),
         id,
         version,
-        PluginType::Utility,
         "Unknown".to_string(),
         "Plugin failed to load".to_string(),
         String::new(),
@@ -295,11 +286,23 @@ mod tests {
     use std::time::Duration;
 
     #[tokio::test]
-    async fn manifestless_directory_is_registered_as_failed() {
+    async fn discovery_ignores_workspace_and_manifestless_directories() {
         let temp_dir = tempfile::tempdir().unwrap();
         let plugin_dir = temp_dir.path().join("plugins");
         let missing_manifest_dir = plugin_dir.join("missing-manifest@1.2.3");
         tokio::fs::create_dir_all(&missing_manifest_dir)
+            .await
+            .unwrap();
+        for name in ["staging", "data", "configs", "temp", "notes"] {
+            tokio::fs::create_dir_all(plugin_dir.join(name))
+                .await
+                .unwrap();
+        }
+        // Even stray manifests inside Host-owned staging are not plugin candidates.
+        tokio::fs::write(plugin_dir.join("staging/plugin.yml"), "invalid: [")
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(plugin_dir.join("not-a-plugin/plugin.yaml"))
             .await
             .unwrap();
 
@@ -314,14 +317,8 @@ mod tests {
         manager.discover_plugins(&plugin_dir).await.unwrap();
         let plugins = manager.list_plugins().await;
 
-        assert_eq!(plugins.len(), 1);
-        assert_eq!(plugins[0].id, "missing-manifest@1.2.3");
-        assert_eq!(plugins[0].state, PluginState::Failed);
-        assert!(plugins[0]
-            .error
-            .as_deref()
-            .unwrap_or_default()
-            .contains("plugin.yml/plugin.yaml not found"));
+        assert!(plugins.is_empty());
+        assert!(manager.metadata_cache.read().await.is_empty());
     }
 
     #[test]
@@ -330,7 +327,6 @@ mod tests {
             "base-plugin".to_string(),
             "Base Plugin".to_string(),
             "1.0.0".to_string(),
-            PluginType::Utility,
             "Ting Reader".to_string(),
             "Base plugin".to_string(),
             "plugin.js".to_string(),
@@ -339,7 +335,6 @@ mod tests {
             "dependent-plugin".to_string(),
             "Dependent Plugin".to_string(),
             "1.0.0".to_string(),
-            PluginType::Utility,
             "Ting Reader".to_string(),
             "Dependent plugin".to_string(),
             "plugin.js".to_string(),

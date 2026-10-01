@@ -3,11 +3,11 @@
 //! This module provides a wrapper that implements the Plugin trait for native dynamic libraries.
 //! It bridges the NativeLoader functionality with the Plugin interface.
 
-use super::super::types::{Plugin, PluginContext, PluginMetadata, PluginType};
-use super::host_api::{self, NativeHostInvocationContext};
+use super::super::types::{Plugin, PluginContext, PluginInvocationContext, PluginMetadata};
+use super::host_api::NativeHostInvocationContext;
 use super::loader::NativeLoader;
 use crate::core::error::{Result, TingError};
-use crate::plugin::{plugin_host_user_from_invocation_args, PluginHostGatewayHandle};
+use crate::plugin::PluginHostGatewayHandle;
 use serde_json::Value;
 use std::sync::{Arc, RwLock};
 
@@ -65,26 +65,17 @@ impl NativePlugin {
     ///
     /// # Returns
     /// JSON result from the plugin
-    pub async fn call_method(&self, method: &str, params: Value) -> Result<Value> {
-        // Initialization check logic...
-        // For utility plugins (like ffmpeg-utils), we might need to allow calls before full initialization
-        // or ensure they are initialized quickly.
-        // Actually, NativePlugin::initialize calls "initialize" method on the plugin.
-        // But get_ffmpeg_path might be called very early.
-        // Let's keep the check but ensure initialize() is called.
-
-        // Check if initialized
+    pub async fn call_method(
+        &self,
+        method: &str,
+        params: Value,
+        context: &PluginInvocationContext,
+    ) -> Result<Value> {
         let is_initialized = *self.initialized.read().map_err(|e| {
             TingError::PluginExecutionError(format!("Failed to check initialization state: {}", e))
         })?;
 
-        // Allow utility methods to be called even if not fully initialized?
-        // No, we should ensure initialization first.
-
         if !is_initialized {
-            // If not initialized, maybe we can try to initialize it implicitly?
-            // Or just warn.
-            // For now, strict check.
             return Err(TingError::PluginExecutionError(format!(
                 "Plugin {} is not initialized",
                 self.plugin_id
@@ -98,16 +89,15 @@ impl NativePlugin {
         let host_context = NativeHostInvocationContext {
             plugin_id: self.plugin_id.clone(),
             permissions: self.metadata.permissions.clone(),
-            user: plugin_host_user_from_invocation_args(&params),
+            user: context.user.clone(),
             host_gateway: self.host_gateway.as_ref().and_then(|handle| handle.get()),
+            resources: context.resources.clone(),
             runtime_handle: tokio::runtime::Handle::current(),
         };
 
         // Offload to blocking thread pool to avoid blocking the async runtime
         tokio::task::spawn_blocking(move || {
-            host_api::with_invocation_context(host_context, || {
-                loader.call_function(&plugin_id, &method, params)
-            })
+            loader.call_function_with_context(&plugin_id, &method, params, Some(host_context))
         })
         .await
         .map_err(|e| TingError::PluginExecutionError(format!("Task join error: {}", e)))?
@@ -120,48 +110,53 @@ impl Plugin for NativePlugin {
         &self.metadata
     }
 
+    async fn invoke(
+        &self,
+        operation: &str,
+        input: Value,
+        context: &PluginInvocationContext,
+    ) -> Result<Value> {
+        self.call_method(operation, input, context).await
+    }
+
     async fn initialize(&self, context: &PluginContext) -> Result<()> {
         tracing::info!(
             plugin_id = %self.plugin_id,
             "Initializing native plugin"
         );
 
-        // Call the plugin's initialize method if it exists
+        // The new instance is created during library loading. Initialize its
+        // effective settings before exposing it to callers.
         let init_params = serde_json::json!({
             "config": context.config,
             "data_dir": context.data_dir.to_string_lossy(),
             "plugin_path": self.plugin_path.to_string_lossy(),
         });
 
-        // Try to call initialize method (optional for plugins)
-        // Since native calls are blocking, we rely on them being fast
-        // or wrap in spawn_blocking if needed. For init/shutdown, direct call is usually fine.
         let loader = self.native_loader.clone();
         let plugin_id = self.plugin_id.clone();
+        let host_context = NativeHostInvocationContext {
+            plugin_id: self.plugin_id.clone(),
+            permissions: self.metadata.permissions.clone(),
+            user: None,
+            host_gateway: self.host_gateway.as_ref().and_then(|handle| handle.get()),
+            resources: context.resources.clone(),
+            runtime_handle: tokio::runtime::Handle::current(),
+        };
 
         // Offload to blocking thread pool
         let result = tokio::task::spawn_blocking(move || {
-            loader.call_function(&plugin_id, "initialize", init_params)
+            loader.call_function_with_context(
+                &plugin_id,
+                "initialize",
+                init_params,
+                Some(host_context),
+            )
         })
         .await
         .map_err(|e| TingError::PluginExecutionError(format!("Task join error: {}", e)))?;
 
-        match result {
-            Ok(_) => {
-                tracing::debug!(
-                    plugin_id = %self.plugin_id,
-                    "Native plugin initialize method called successfully"
-                );
-            }
-            Err(e) => {
-                // If the plugin doesn't have an initialize method, that's okay
-                tracing::debug!(
-                    plugin_id = %self.plugin_id,
-                    error = %e,
-                    "Native plugin initialize method not found or failed (this is optional)"
-                );
-            }
-        }
+        crate::plugin::require_successful_lifecycle_result(result?, "initialize")?;
 
         // Mark as initialized
         let mut initialized = self.initialized.write().map_err(|e| {
@@ -183,10 +178,8 @@ impl Plugin for NativePlugin {
             "Shutting down native plugin"
         );
 
-        // Call the plugin's shutdown method if it exists
         let shutdown_params = serde_json::json!({});
 
-        // Try to call shutdown method (optional for plugins)
         let loader = self.native_loader.clone();
         let plugin_id = self.plugin_id.clone();
 
@@ -197,22 +190,7 @@ impl Plugin for NativePlugin {
         .await
         .map_err(|e| TingError::PluginExecutionError(format!("Task join error: {}", e)))?;
 
-        match result {
-            Ok(_) => {
-                tracing::debug!(
-                    plugin_id = %self.plugin_id,
-                    "Native plugin shutdown method called successfully"
-                );
-            }
-            Err(e) => {
-                // If the plugin doesn't have a shutdown method, that's okay
-                tracing::debug!(
-                    plugin_id = %self.plugin_id,
-                    error = %e,
-                    "Native plugin shutdown method not found or failed (this is optional)"
-                );
-            }
-        }
+        crate::plugin::require_successful_lifecycle_result(result?, "shutdown")?;
 
         // Mark as not initialized
         let mut initialized = self.initialized.write().map_err(|e| {
@@ -229,33 +207,9 @@ impl Plugin for NativePlugin {
     }
 
     async fn garbage_collect(&self) -> Result<()> {
-        // Native plugins manage their own memory.
-        tracing::debug!(plugin_id = %self.plugin_id, "Requesting native plugin garbage collection");
-
-        // Try to call the plugin's garbage_collect method if it exists
-        // We use spawn_blocking because this is a native call
-        let loader = self.native_loader.clone();
-        let plugin_id = self.plugin_id.clone();
-
-        let _ = tokio::task::spawn_blocking(move || {
-            if let Ok(true) = loader.has_symbol(&plugin_id, "plugin_invoke") {
-                // We don't check if "garbage_collect" is supported by the invoke dispatch,
-                // we just try to call it. If the plugin doesn't handle it, it should return an error
-                // or ignore it.
-                let _ = loader.call_function(&plugin_id, "garbage_collect", serde_json::json!({}));
-            }
-        })
-        .await;
-
+        // ABI v2 does not declare a GC hook. Instance resources are reclaimed
+        // at shutdown and the Host reclaims each control buffer after invoke.
         Ok(())
-    }
-
-    fn plugin_type(&self) -> PluginType {
-        self.metadata.plugin_type
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
     }
 }
 
@@ -273,7 +227,6 @@ mod tests {
             "test-plugin@1.0.0".to_string(),
             "test-plugin".to_string(),
             "1.0.0".to_string(),
-            crate::plugin::types::PluginType::Format,
             "Test Author".to_string(),
             "Test plugin".to_string(),
             "plugin.dll".to_string(),

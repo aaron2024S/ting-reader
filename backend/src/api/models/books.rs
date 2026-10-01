@@ -36,7 +36,8 @@ pub struct SearchResponse {
     /// List of book items
     pub items: Vec<BookItem>,
     /// Total number of results
-    pub total: u32,
+    pub total: Option<u64>,
+    pub has_more: Option<bool>,
     /// Current page number
     pub page: u32,
     /// Number of items per page
@@ -166,7 +167,10 @@ pub struct BookResponse {
     pub year: Option<i32>,
     pub created_at: String,
     pub library_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub can_write_metadata_files: Option<bool>,
     pub is_favorite: bool,
+    pub progress_percent: f64,
     pub manual_corrected: bool,
     pub match_pattern: Option<String>,
     pub chapter_regex: Option<String>,
@@ -192,7 +196,9 @@ impl From<Book> for BookResponse {
             year: book.year,
             created_at: book.created_at,
             library_type: None, // To be filled by handler
+            can_write_metadata_files: None,
             is_favorite: false, // To be filled by handler
+            progress_percent: 0.0,
             manual_corrected: book.manual_corrected != 0,
             match_pattern: book.match_pattern,
             chapter_regex: book.chapter_regex,

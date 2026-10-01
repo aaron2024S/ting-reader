@@ -24,10 +24,12 @@
     "description": "string | null",
     "created_at": "RFC3339",
     "updated_at": "RFC3339",
-    "books": [BookResponse]
+    "books": []
   }
 ]
 ```
+
+`books` 为书籍对象数组，字段见 [BookResponse](books.md)。
 
 ---
 

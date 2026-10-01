@@ -46,17 +46,12 @@ impl LibraryScanner {
     > {
         // Simple BFS or recursive traversal
         // Start from root
-        let root_url = if library.root_path.starts_with('/') {
-            // Combine library.url + root_path
-            let base = library.url.trim_end_matches('/');
-            let path = library.root_path.trim_start_matches('/');
-            if path.is_empty() {
-                base.to_string()
-            } else {
-                format!("{}/{}", base, path)
-            }
+        let base = library.url.trim_end_matches('/');
+        let path = library.root_path.trim_matches('/');
+        let root_url = if path.is_empty() {
+            base.to_string()
         } else {
-            library.url.clone()
+            format!("{base}/{path}")
         };
 
         let mut files = HashMap::new(); // URL -> (LastModified, ETag/LastModified validator)
@@ -106,21 +101,21 @@ impl LibraryScanner {
                 .scan_state_repo
                 .find(&library.id, &root_url, "webdav_sync")
                 .await?
-                && let Some(synced_files) = self
-                    .try_webdav_sync_collection(
-                        library,
-                        &root_url,
-                        &sync_state.fingerprint,
-                        &client,
-                        username,
-                        password.as_deref(),
-                        &cached_dirs,
-                        &cached_files,
-                    )
-                    .await?
-                {
-                    return Ok(synced_files);
-                }
+            && let Some(synced_files) = self
+                .try_webdav_sync_collection(
+                    library,
+                    &root_url,
+                    &sync_state.fingerprint,
+                    &client,
+                    username,
+                    password.as_deref(),
+                    &cached_dirs,
+                    &cached_files,
+                )
+                .await?
+        {
+            return Ok(synced_files);
+        }
 
         // Capture the collection token before the fallback/full traversal.
         // Saving a token obtained after traversal could miss a change that
@@ -714,9 +709,11 @@ impl LibraryScanner {
                     }
                     b"sync-token" => {
                         if let Ok(value) = reader.read_text(event.name())
-                            && !in_response && !value.trim().is_empty() {
-                                report.next_token = Some(value.to_string());
-                            }
+                            && !in_response
+                            && !value.trim().is_empty()
+                        {
+                            report.next_token = Some(value.to_string());
+                        }
                     }
                     _ => {}
                 },
@@ -794,10 +791,9 @@ impl LibraryScanner {
                         current_etag = None;
                     }
                     b"D:href" | b"d:href" | b"href" => {
-                        if in_response
-                            && let Ok(txt) = reader.read_text(e.name()) {
-                                current_href = txt.to_string();
-                            }
+                        if in_response && let Ok(txt) = reader.read_text(e.name()) {
+                            current_href = txt.to_string();
+                        }
                     }
                     b"D:collection" | b"d:collection" | b"collection" => {
                         if in_response {
@@ -805,24 +801,21 @@ impl LibraryScanner {
                         }
                     }
                     b"D:getlastmodified" | b"d:getlastmodified" | b"getlastmodified" => {
-                        if in_response
-                            && let Ok(txt) = reader.read_text(e.name()) {
-                                current_last_mod = Some(txt.to_string());
-                            }
+                        if in_response && let Ok(txt) = reader.read_text(e.name()) {
+                            current_last_mod = Some(txt.to_string());
+                        }
                     }
                     b"D:getetag" | b"d:getetag" | b"getetag" => {
-                        if in_response
-                            && let Ok(txt) = reader.read_text(e.name()) {
-                                current_etag = Some(txt.to_string());
-                            }
+                        if in_response && let Ok(txt) = reader.read_text(e.name()) {
+                            current_etag = Some(txt.to_string());
+                        }
                     }
                     _ => {}
                 },
                 Ok(Event::Empty(e)) => match e.name().as_ref() {
-                    b"D:collection" | b"d:collection" | b"collection"
-                        if in_response => {
-                            is_collection = true;
-                        }
+                    b"D:collection" | b"d:collection" | b"collection" if in_response => {
+                        is_collection = true;
+                    }
                     _ => {}
                 },
                 Ok(Event::End(e)) => {
@@ -866,9 +859,10 @@ impl LibraryScanner {
 
         // Parse base URL to get scheme and host
         if let Ok(base) = url::Url::parse(base_request_url)
-            && let Ok(joined) = base.join(href) {
-                return joined.to_string();
-            }
+            && let Ok(joined) = base.join(href)
+        {
+            return joined.to_string();
+        }
 
         // Fallback simple join
         href.to_string()
@@ -885,13 +879,15 @@ impl LibraryScanner {
                 let mut i = 0;
 
                 while i < input_bytes.len() {
-                    if input_bytes[i] == b'%' && i + 2 < input_bytes.len()
+                    if input_bytes[i] == b'%'
+                        && i + 2 < input_bytes.len()
                         && let Ok(slice) = std::str::from_utf8(&input_bytes[i + 1..i + 3])
-                            && let Ok(b) = u8::from_str_radix(slice, 16) {
-                                bytes.push(b);
-                                i += 3;
-                                continue;
-                            }
+                        && let Ok(b) = u8::from_str_radix(slice, 16)
+                    {
+                        bytes.push(b);
+                        i += 3;
+                        continue;
+                    }
                     bytes.push(input_bytes[i]);
                     i += 1;
                 }

@@ -3,22 +3,33 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use crate::core::error::{Result, TingError};
-use crate::plugin::manager::{PluginManager, ScraperMethod};
+use crate::plugin::manager::PluginManager;
 use crate::plugin::scraper::{BookDetail, BookItem, SearchResult};
+use ting_plugin_contract::capability::MetadataOperation;
+use ting_plugin_contract::scraper::{
+    ChapterCandidate, ScraperResult, SearchContext, SearchMode, SearchPage, SearchRequest,
+};
 
 const AGGREGATE_CANDIDATE_PAGE_SIZE: u32 = 20;
+const MAX_SEARCH_CACHE_ENTRIES: usize = 100;
 
-/// Cache entry for scraper results
-#[derive(Clone)]
-struct CacheEntry<T> {
-    data: T,
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct SearchCacheKey {
+    source_id: String,
+    params: BTreeMap<String, String>,
+    page: u32,
+    page_size: u32,
+}
+
+struct SearchCacheEntry {
+    result: SearchResult,
     expires_at: Instant,
 }
 
 /// Scraper service for coordinating scraper plugin operations
 pub struct ScraperService {
     plugin_manager: Arc<PluginManager>,
-    search_cache: Arc<RwLock<HashMap<String, CacheEntry<SearchResult>>>>,
+    search_cache: RwLock<HashMap<SearchCacheKey, SearchCacheEntry>>,
     cache_ttl: Duration,
 }
 
@@ -30,7 +41,7 @@ impl ScraperService {
     pub fn with_cache_ttl(plugin_manager: Arc<PluginManager>, cache_ttl: Duration) -> Self {
         Self {
             plugin_manager,
-            search_cache: Arc::new(RwLock::new(HashMap::new())),
+            search_cache: RwLock::new(HashMap::new()),
             cache_ttl,
         }
     }
@@ -43,12 +54,8 @@ impl ScraperService {
             .into_iter()
             .filter_map(|info| {
                 let aggregate_auto_scrape = info.capabilities.iter().any(|capability| {
-                    capability.kind == "metadata_provider"
-                        && capability
-                            .extra
-                            .get("aggregate_auto_scrape")
-                            .and_then(serde_json::Value::as_bool)
-                            .unwrap_or(false)
+                    matches!(capability, crate::plugin::types::PluginCapability::MetadataProvider(cap)
+                        if cap.aggregate_auto_scrape)
                 });
                 info.scraper
                     .clone()
@@ -115,6 +122,130 @@ impl ScraperService {
         Ok(active_sources[0].id.clone())
     }
 
+    fn search_request(
+        title: Option<&str>,
+        author: Option<&str>,
+        narrator: Option<&str>,
+        page: u32,
+        page_size: u32,
+        filters: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<serde_json::Value> {
+        Self::search_request_with_context(
+            title,
+            author,
+            narrator,
+            (page, page_size),
+            filters,
+            Vec::new(),
+            None,
+        )
+    }
+
+    fn search_request_with_context(
+        title: Option<&str>,
+        author: Option<&str>,
+        narrator: Option<&str>,
+        pagination: (u32, u32),
+        filters: serde_json::Map<String, serde_json::Value>,
+        chapter_candidates: Vec<ChapterCandidate>,
+        context: Option<SearchContext>,
+    ) -> Result<serde_json::Value> {
+        let request = SearchRequest {
+            title: title.map(str::to_owned),
+            author: author.map(str::to_owned),
+            narrator: narrator.map(str::to_owned),
+            page: pagination.0,
+            page_size: pagination.1,
+            filters,
+            chapter_candidates,
+            context,
+        };
+        request
+            .validate()
+            .map_err(|error| TingError::ValidationError(error.into()))?;
+        serde_json::to_value(request)
+            .map_err(|error| TingError::SerializationError(error.to_string()))
+    }
+
+    fn parse_search_page(value: serde_json::Value) -> Result<SearchResult> {
+        let page: SearchPage = serde_json::from_value(value).map_err(|error| {
+            TingError::DeserializationError(format!("Invalid scraper search page: {error}"))
+        })?;
+        page.validate()
+            .map_err(|error| TingError::DeserializationError(error.into()))?;
+        Ok(SearchResult {
+            items: page
+                .items
+                .into_iter()
+                .map(Self::book_item_from_result)
+                .collect(),
+            total: page.total,
+            has_more: page.has_more,
+            page: page.page,
+            page_size: page.page_size,
+        })
+    }
+
+    fn book_item_from_result(result: ScraperResult) -> BookItem {
+        BookItem {
+            id: result.id,
+            source_url: result.source_url,
+            title: result.title,
+            author: result.author.unwrap_or_default(),
+            narrator: result.narrator,
+            cover_url: result.cover_url,
+            intro: result.intro,
+            subtitle: result.subtitle,
+            publisher: result.publisher,
+            language: result.language,
+            genre: result.genre,
+            published_year: result.published_year.map(|year| year.to_string()),
+            published_date: result.published_date,
+            isbn: result.isbn,
+            asin: result.asin,
+            explicit: result.explicit,
+            abridged: result.abridged,
+            tags: result.tags,
+            duration: result.duration,
+            score: result.score,
+            chapter_title_template: result.chapter_title_template,
+            chapter_titles: result.chapter_titles,
+        }
+    }
+
+    fn take_chapter_candidates(
+        scanner_context: &mut Option<serde_json::Value>,
+    ) -> Vec<ChapterCandidate> {
+        let chapters = scanner_context
+            .as_mut()
+            .and_then(serde_json::Value::as_object_mut)
+            .and_then(|object| {
+                object.remove("directory");
+                object.remove("chapters")
+            });
+        let Some(serde_json::Value::Array(chapters)) = chapters else {
+            return Vec::new();
+        };
+        chapters
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, chapter)| {
+                let title = chapter
+                    .get("title")
+                    .and_then(serde_json::Value::as_str)
+                    .or_else(|| chapter.get("filename").and_then(serde_json::Value::as_str))?
+                    .trim();
+                if title.is_empty() {
+                    return None;
+                }
+                Some(ChapterCandidate {
+                    id: index.to_string(),
+                    title: title.to_string(),
+                })
+            })
+            .collect()
+    }
+
     pub async fn search(
         &self,
         query: &str,
@@ -124,8 +255,6 @@ impl ScraperService {
         page: u32,
         page_size: u32,
     ) -> Result<SearchResult> {
-        use serde_json::json;
-
         if query.trim().is_empty() {
             return Err(TingError::ValidationError(
                 "Search query cannot be empty".to_string(),
@@ -147,50 +276,51 @@ impl ScraperService {
         };
 
         let source_id = self.select_scraper(source).await?;
-        let cache_key = format!(
-            "{}:{}:{}:{}:{}:{}",
-            source_id,
-            clean_query,
-            author.unwrap_or(""),
-            narrator.unwrap_or(""),
+        let author = author.map(str::trim).filter(|value| !value.is_empty());
+        let narrator = narrator.map(str::trim).filter(|value| !value.is_empty());
+        let mut normalized_params = BTreeMap::from([("title".into(), clean_query.to_owned())]);
+        if let Some(author) = author {
+            normalized_params.insert("author".into(), author.to_owned());
+        }
+        if let Some(narrator) = narrator {
+            normalized_params.insert("narrator".into(), narrator.to_owned());
+        }
+        let cache_key = SearchCacheKey {
+            source_id: source_id.clone(),
+            params: normalized_params,
             page,
-            page_size
-        );
-
-        if let Some(cached) = self.get_cached_search(&cache_key) {
-            tracing::debug!("Search query cache hit: {}", clean_query);
-            return Ok(cached);
+            page_size,
+        };
+        if let Some(result) = self.get_cached_search(&cache_key) {
+            tracing::debug!(source_id, "Scraper search cache hit");
+            return Ok(result);
         }
 
         if self.is_aggregate_source(&source_id).await {
-            let mut aggregate_params = BTreeMap::new();
-            aggregate_params.insert("query".to_string(), clean_query.to_string());
-            aggregate_params.insert("title".to_string(), clean_query.to_string());
-            if let Some(author) = author.filter(|value| !value.trim().is_empty()) {
-                aggregate_params.insert("author".to_string(), author.trim().to_string());
-            }
-            if let Some(narrator) = narrator.filter(|value| !value.trim().is_empty()) {
-                aggregate_params.insert("narrator".to_string(), narrator.trim().to_string());
-            }
-
             let result = self
-                .search_aggregate_source(&source_id, &aggregate_params, page, page_size)
+                .search_aggregate_source(&source_id, &cache_key.params, page, page_size)
                 .await?;
-            self.cache_search_result(&cache_key, result.clone());
+            self.cache_search_result(cache_key, result.clone());
             return Ok(result);
         }
 
         tracing::debug!(
-            "Search query cache miss: {}, calling plugin {}",
+            "Searching for {}, calling plugin {}",
             clean_query,
             source_id
         );
-        let params =
-            json!({ "query": clean_query, "author": author, "narrator": narrator, "page": page });
+        let params = Self::search_request(
+            Some(clean_query),
+            author,
+            narrator,
+            page,
+            page_size,
+            Default::default(),
+        )?;
 
         let result = match self
             .plugin_manager
-            .call_scraper(&source_id, ScraperMethod::Search, params.clone())
+            .invoke_metadata(&source_id, MetadataOperation::Search, params.clone())
             .await
         {
             Ok(result) => result,
@@ -202,21 +332,21 @@ impl ScraperService {
                 }
                 tracing::debug!("Trying another scraper as fallback");
                 let fallback_source = self.try_fallback_scraper(&source_id).await?;
-                self.plugin_manager
-                    .call_scraper(&fallback_source, ScraperMethod::Search, params)
+                let value = self
+                    .plugin_manager
+                    .invoke_metadata(&fallback_source, MetadataOperation::Search, params)
                     .await
                     .map_err(|e| {
                         e.with_plugin_execution_context("All scrapers failed. Last error")
-                    })?
+                    })?;
+                // A fallback response must not be cached as the primary source.
+                return Self::parse_search_page(value);
             }
         };
 
-        let search_result: SearchResult = serde_json::from_value(result).map_err(|e| {
-            TingError::DeserializationError(format!("Failed to parse search result: {}", e))
-        })?;
-
-        self.cache_search_result(&cache_key, search_result.clone());
-        Ok(search_result)
+        let result = Self::parse_search_page(result)?;
+        self.cache_search_result(cache_key, result.clone());
+        Ok(result)
     }
 
     pub async fn search_with_params(
@@ -226,8 +356,6 @@ impl ScraperService {
         page: u32,
         page_size: u32,
     ) -> Result<SearchResult> {
-        use serde_json::json;
-
         let mut normalized_params = BTreeMap::new();
         for (key, value) in search_params {
             if !value.trim().is_empty() {
@@ -241,10 +369,7 @@ impl ScraperService {
             ));
         }
 
-        let query = normalized_params
-            .get("title")
-            .or_else(|| normalized_params.get("query"))
-            .cloned();
+        let query = normalized_params.get("title").cloned();
         let clean_query = query.map(|query| {
             let clean_query = query.split('|').next().unwrap_or(&query).trim().to_string();
             if clean_query.is_empty() {
@@ -254,7 +379,6 @@ impl ScraperService {
             }
         });
         if let Some(clean_query) = &clean_query {
-            normalized_params.insert("query".to_string(), clean_query.clone());
             normalized_params.insert("title".to_string(), clean_query.clone());
         }
         let author = normalized_params
@@ -267,40 +391,42 @@ impl ScraperService {
             .cloned();
 
         let source_id = self.select_scraper(source).await?;
-        let params_key = serde_json::to_string(&normalized_params).unwrap_or_default();
-        let cache_key = format!("{}:{}:{}:{}", source_id, params_key, page, page_size);
-
-        if let Some(cached) = self.get_cached_search(&cache_key) {
-            return Ok(cached);
+        let cache_key = SearchCacheKey {
+            source_id: source_id.clone(),
+            params: normalized_params.clone(),
+            page,
+            page_size,
+        };
+        if let Some(result) = self.get_cached_search(&cache_key) {
+            tracing::debug!(source_id, "Scraper search cache hit");
+            return Ok(result);
         }
 
         if self.is_aggregate_source(&source_id).await {
             let search_result = self
                 .search_aggregate_source(&source_id, &normalized_params, page, page_size)
                 .await?;
-            self.cache_search_result(&cache_key, search_result.clone());
+            self.cache_search_result(cache_key, search_result.clone());
             return Ok(search_result);
         }
 
-        let mut params = json!(normalized_params);
-        if let Some(obj) = params.as_object_mut() {
-            if let Some(clean_query) = clean_query {
-                obj.insert("query".to_string(), json!(clean_query));
-                obj.insert("title".to_string(), json!(clean_query));
-            }
-            if let Some(author) = author {
-                obj.insert("author".to_string(), json!(author));
-            }
-            if let Some(narrator) = narrator {
-                obj.insert("narrator".to_string(), json!(narrator));
-            }
-            obj.insert("page".to_string(), json!(page));
-            obj.insert("page_size".to_string(), json!(page_size));
-        }
+        let filters = normalized_params
+            .iter()
+            .filter(|(key, _)| !matches!(key.as_str(), "title" | "author" | "narrator"))
+            .map(|(key, value)| (key.clone(), serde_json::Value::String(value.clone())))
+            .collect();
+        let params = Self::search_request(
+            clean_query.as_deref(),
+            author.as_deref(),
+            narrator.as_deref(),
+            page,
+            page_size,
+            filters,
+        )?;
 
         let result = match self
             .plugin_manager
-            .call_scraper(&source_id, ScraperMethod::Search, params.clone())
+            .invoke_metadata(&source_id, MetadataOperation::Search, params.clone())
             .await
         {
             Ok(result) => result,
@@ -311,21 +437,20 @@ impl ScraperService {
                     );
                 }
                 let fallback_source = self.try_fallback_scraper(&source_id).await?;
-                self.plugin_manager
-                    .call_scraper(&fallback_source, ScraperMethod::Search, params)
+                let value = self
+                    .plugin_manager
+                    .invoke_metadata(&fallback_source, MetadataOperation::Search, params)
                     .await
                     .map_err(|e| {
                         e.with_plugin_execution_context("All scrapers failed. Last error")
-                    })?
+                    })?;
+                return Self::parse_search_page(value);
             }
         };
 
-        let search_result: SearchResult = serde_json::from_value(result).map_err(|e| {
-            TingError::DeserializationError(format!("Failed to parse search result: {}", e))
-        })?;
-
-        self.cache_search_result(&cache_key, search_result.clone());
-        Ok(search_result)
+        let result = Self::parse_search_page(result)?;
+        self.cache_search_result(cache_key, result.clone());
+        Ok(result)
     }
 
     async fn try_fallback_scraper(&self, failed_source: &str) -> Result<String> {
@@ -360,19 +485,27 @@ impl ScraperService {
         }
 
         for aggregate_source in aggregate_sources {
-            let cleanup_context = serde_json::json!({
-                "query": trimmed_query,
-                "title": trimmed_query,
-                "page": 1,
-                "page_size": 1,
-                "aggregate_auto_scrape": true,
-                "title_cleanup": true,
-                "scanner_context": context.cloned().unwrap_or_else(|| serde_json::json!({})),
-            });
+            let Ok(cleanup_context) = Self::search_request_with_context(
+                Some(trimmed_query),
+                None,
+                None,
+                (1, 1),
+                Default::default(),
+                Vec::new(),
+                Some(SearchContext {
+                    mode: SearchMode::TitleCleanup,
+                    candidates: Vec::new(),
+                    merged_metadata: None,
+                    scanner_context: context.cloned(),
+                    scraper_query: None,
+                }),
+            ) else {
+                break;
+            };
 
             match self
                 .plugin_manager
-                .call_scraper(aggregate_source, ScraperMethod::Search, cleanup_context)
+                .invoke_metadata(aggregate_source, MetadataOperation::Search, cleanup_context)
                 .await
             {
                 Ok(value) => {
@@ -435,13 +568,10 @@ impl ScraperService {
 
         let query = search_params
             .get("title")
-            .or_else(|| search_params.get("query"))
             .map(|value| value.trim())
             .filter(|value| !value.is_empty())
             .ok_or_else(|| {
-                TingError::ValidationError(
-                    "Aggregate scraper search requires a title or query".to_string(),
-                )
+                TingError::ValidationError("Aggregate scraper search requires a title".to_string())
             })?;
         let author = search_params
             .get("author")
@@ -538,6 +668,7 @@ impl ScraperService {
                     Self::candidate_value_title(left).cmp(&Self::candidate_value_title(right))
                 })
         });
+        candidate_items.truncate(20);
 
         let merge_config = crate::db::models::ScraperConfig {
             default_sources: candidate_source_ids,
@@ -545,28 +676,35 @@ impl ScraperService {
         };
         let merged_metadata = self.merge_source_results(query, &merge_config, &source_results);
 
-        let aggregate_context = json!({
-            "query": query,
-            "title": query,
-            "page": page,
-            "page_size": page_size,
-            "aggregate_auto_scrape": true,
-            "manual_search": true,
-            "search_params": search_params,
-            "candidates": candidate_items,
-            "merged_metadata": merged_metadata,
-            "scanner_context": {
+        let aggregate_context = Self::search_request_with_context(
+            Some(query),
+            author,
+            narrator,
+            (page, page_size),
+            Default::default(),
+            Vec::new(),
+            Some(SearchContext {
+                mode: SearchMode::Aggregate,
+                candidates: candidate_items,
+                merged_metadata: Some(json!(merged_metadata)),
+                scanner_context: Some(json!({
                 "current_metadata": {
                     "title": query,
                     "author": author,
                     "narrator": narrator,
                 }
-            },
-        });
+                })),
+                scraper_query: None,
+            }),
+        )?;
 
         let value = self
             .plugin_manager
-            .call_scraper(aggregate_source, ScraperMethod::Search, aggregate_context)
+            .invoke_metadata(
+                aggregate_source,
+                MetadataOperation::Search,
+                aggregate_context,
+            )
             .await
             .map_err(|e| {
                 e.with_plugin_execution_context(format!(
@@ -575,7 +713,7 @@ impl ScraperService {
                 ))
             })?;
 
-        Self::search_result_from_plugin_value(value, query, page, page_size)
+        Self::parse_search_page(value)
     }
 
     async fn search_source_direct(
@@ -587,18 +725,18 @@ impl ScraperService {
         page: u32,
         page_size: u32,
     ) -> Result<SearchResult> {
-        let params = serde_json::json!({
-            "query": query,
-            "title": query,
-            "author": author,
-            "narrator": narrator,
-            "page": page,
-            "page_size": page_size,
-        });
+        let params = Self::search_request(
+            Some(query),
+            author,
+            narrator,
+            page,
+            page_size,
+            Default::default(),
+        )?;
 
         let value = self
             .plugin_manager
-            .call_scraper(source_id, ScraperMethod::Search, params)
+            .invoke_metadata(source_id, MetadataOperation::Search, params)
             .await
             .map_err(|e| {
                 e.with_plugin_execution_context(format!(
@@ -607,35 +745,36 @@ impl ScraperService {
                 ))
             })?;
 
-        serde_json::from_value::<SearchResult>(value).map_err(|e| {
-            TingError::DeserializationError(format!("Failed to parse search result: {}", e))
-        })
+        Self::parse_search_page(value)
     }
 
-    // ── Cache helpers ──
+    fn get_cached_search(&self, key: &SearchCacheKey) -> Option<SearchResult> {
+        let mut cache = self.search_cache.write().ok()?;
+        let now = Instant::now();
+        cache.retain(|_, entry| entry.expires_at > now);
+        cache.get(key).map(|entry| entry.result.clone())
+    }
 
-    fn get_cached_search(&self, key: &str) -> Option<SearchResult> {
-        let cache = self.search_cache.read().ok()?;
-        let entry = cache.get(key)?;
-        if Instant::now() < entry.expires_at {
-            Some(entry.data.clone())
-        } else {
-            None
+    fn cache_search_result(&self, key: SearchCacheKey, result: SearchResult) {
+        if self.cache_ttl.is_zero() {
+            return;
         }
-    }
-
-    fn cache_search_result(&self, key: &str, result: SearchResult) {
+        let Some(expires_at) = Instant::now().checked_add(self.cache_ttl) else {
+            return;
+        };
         if let Ok(mut cache) = self.search_cache.write() {
-            cache.insert(
-                key.to_string(),
-                CacheEntry {
-                    data: result,
-                    expires_at: Instant::now() + self.cache_ttl,
-                },
-            );
-            if cache.len() > 100 {
-                cache.retain(|_, entry| Instant::now() < entry.expires_at);
+            let now = Instant::now();
+            cache.retain(|_, entry| entry.expires_at > now);
+            if cache.len() >= MAX_SEARCH_CACHE_ENTRIES
+                && !cache.contains_key(&key)
+                && let Some(oldest) = cache
+                    .iter()
+                    .min_by_key(|(_, entry)| entry.expires_at)
+                    .map(|(key, _)| key.clone())
+            {
+                cache.remove(&oldest);
             }
+            cache.insert(key, SearchCacheEntry { result, expires_at });
         }
     }
 
@@ -647,7 +786,12 @@ impl ScraperService {
     }
 
     pub fn get_cache_stats(&self) -> usize {
-        self.search_cache.read().map(|c| c.len()).unwrap_or(0)
+        let Ok(mut cache) = self.search_cache.write() else {
+            return 0;
+        };
+        let now = Instant::now();
+        cache.retain(|_, entry| entry.expires_at > now);
+        cache.len()
     }
 
     /// Scrape book metadata using the provided configuration strategy
@@ -807,43 +951,71 @@ impl ScraperService {
         let final_detail = self.merge_source_results(query, config, &source_results);
 
         if !aggregate_sources_to_run.is_empty() {
-            let aggregate_context = serde_json::json!({
-                "query": query,
-                "title": query,
-                "scraper_query": scraper_query,
-                "page": 1,
-                "page_size": candidate_items.len(),
-                "aggregate_auto_scrape": true,
-                "candidates": candidate_items,
-                "merged_metadata": final_detail.clone(),
-                "scanner_context": context.unwrap_or_else(|| serde_json::json!({})),
-            });
+            let mut scanner_context = context;
+            let chapter_candidates = Self::take_chapter_candidates(&mut scanner_context);
+            let batches: Vec<&[ChapterCandidate]> = if chapter_candidates.is_empty() {
+                vec![&[]]
+            } else {
+                chapter_candidates.chunks(500).collect()
+            };
 
             for aggregate_source in aggregate_sources_to_run {
-                match self
-                    .plugin_manager
-                    .call_scraper(
-                        &aggregate_source,
-                        ScraperMethod::Search,
-                        aggregate_context.clone(),
-                    )
-                    .await
-                {
-                    Ok(value) => {
-                        if let Some(detail) = Self::detail_from_plugin_value(value, query) {
-                            return Ok(detail);
+                let mut selected = None;
+                let mut cleaned_titles = Vec::new();
+                for batch in &batches {
+                    let aggregate_request = Self::search_request_with_context(
+                        Some(query),
+                        None,
+                        None,
+                        (1, 1),
+                        Default::default(),
+                        batch.to_vec(),
+                        Some(SearchContext {
+                            mode: SearchMode::Aggregate,
+                            candidates: candidate_items.clone(),
+                            merged_metadata: Some(serde_json::json!(final_detail)),
+                            scanner_context: scanner_context.clone(),
+                            scraper_query: Some(scraper_query.clone()),
+                        }),
+                    )?;
+                    match self
+                        .plugin_manager
+                        .invoke_metadata(
+                            &aggregate_source,
+                            MetadataOperation::Search,
+                            aggregate_request,
+                        )
+                        .await
+                    {
+                        Ok(value) => {
+                            if let Some(mut detail) = Self::detail_from_plugin_value(value, query) {
+                                if !batch.is_empty() {
+                                    if detail.chapter_titles.len() != batch.len() {
+                                        detail.chapter_titles =
+                                            batch.iter().map(|c| c.title.clone()).collect();
+                                    }
+                                    cleaned_titles.extend(detail.chapter_titles.iter().cloned());
+                                }
+                                if selected.is_none() {
+                                    selected = Some(detail);
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                source_id = %aggregate_source,
+                                %error,
+                                "Aggregate scraper failed for a chapter batch"
+                            );
+                            cleaned_titles.extend(batch.iter().map(|c| c.title.clone()));
                         }
                     }
-                    Err(e) => tracing::warn!(
-                        source_id = %aggregate_source,
-                        error = %e,
-                        message_key = "scraper.aggregate.failed",
-                        message_params = %serde_json::json!({
-                            "source_id": aggregate_source,
-                            "error": e.to_string(),
-                        }),
-                        "Aggregate scraper failed"
-                    ),
+                }
+                if let Some(mut detail) = selected {
+                    if !chapter_candidates.is_empty() {
+                        detail.chapter_titles = cleaned_titles;
+                    }
+                    return Ok(detail);
                 }
             }
         }
@@ -959,12 +1131,9 @@ impl ScraperService {
             .await
             .into_iter()
             .filter(|registration| {
-                registration
-                    .capability
-                    .extra
-                    .get("aggregate_auto_scrape")
-                    .and_then(serde_json::Value::as_bool)
-                    .unwrap_or(false)
+                matches!(&registration.capability,
+                    crate::plugin::types::PluginCapability::MetadataProvider(cap)
+                    if cap.aggregate_auto_scrape)
             })
             .map(|registration| registration.plugin_id)
             .collect()
@@ -996,88 +1165,13 @@ impl ScraperService {
         }
     }
 
-    fn item_from_detail(detail: BookDetail, query: &str) -> BookItem {
-        let title = if detail.title.trim().is_empty() {
-            query.to_string()
-        } else {
-            detail.title
-        };
-
-        BookItem {
-            id: detail.id,
-            title,
-            author: detail.author,
-            cover_url: detail.cover_url,
-            intro: Some(detail.intro),
-            narrator: detail.narrator,
-            subtitle: detail.subtitle,
-            published_year: detail.published_year,
-            published_date: detail.published_date,
-            publisher: detail.publisher,
-            isbn: detail.isbn,
-            asin: detail.asin,
-            language: detail.language,
-            genre: detail.genre,
-            explicit: Some(detail.explicit),
-            abridged: Some(detail.abridged),
-            tags: detail.tags,
-            duration: detail.duration,
-            chapter_title_template: detail.chapter_title_template,
-            chapter_titles: detail.chapter_titles,
-            extra: HashMap::new(),
-        }
-    }
-
-    fn search_result_from_plugin_value(
-        value: serde_json::Value,
-        query: &str,
-        page: u32,
-        page_size: u32,
-    ) -> Result<SearchResult> {
-        if let Ok(result) = serde_json::from_value::<SearchResult>(value.clone()) {
-            return Ok(result);
-        }
-
-        if let Ok(item) = serde_json::from_value::<BookItem>(value.clone()) {
-            return Ok(SearchResult {
-                items: vec![item],
-                total: 1,
-                page,
-                page_size,
-            });
-        }
-
-        if let Ok(detail) = serde_json::from_value::<BookDetail>(value) {
-            return Ok(SearchResult {
-                items: vec![Self::item_from_detail(detail, query)],
-                total: 1,
-                page,
-                page_size,
-            });
-        }
-
-        Err(TingError::DeserializationError(
-            "Failed to parse aggregate scraper search result".to_string(),
-        ))
-    }
-
     fn detail_from_plugin_value(value: serde_json::Value, query: &str) -> Option<BookDetail> {
-        if let Ok(result) = serde_json::from_value::<SearchResult>(value.clone()) {
-            return result.items.first().map(Self::detail_from_item);
-        }
-
-        if let Ok(item) = serde_json::from_value::<BookItem>(value.clone()) {
-            return Some(Self::detail_from_item(&item));
-        }
-
-        serde_json::from_value::<BookDetail>(value)
-            .ok()
-            .map(|mut detail| {
-                if detail.title.trim().is_empty() {
-                    detail.title = query.to_string();
-                }
-                detail
-            })
+        let _ = query;
+        Self::parse_search_page(value)
+            .ok()?
+            .items
+            .first()
+            .map(Self::detail_from_item)
     }
 
     fn merge_source_results(
@@ -1087,7 +1181,7 @@ impl ScraperService {
         source_results: &HashMap<String, BookDetail>,
     ) -> BookDetail {
         let mut final_detail = BookDetail {
-            id: String::new(),
+            id: None,
             title: query.to_string(),
             author: String::new(),
             narrator: None,
@@ -1128,10 +1222,11 @@ impl ScraperService {
         // Title from default sources
         for source in &config.default_sources {
             if let Some(detail) = source_results.get(source)
-                && !detail.title.is_empty() {
-                    final_detail.title = detail.title.clone();
-                    break;
-                }
+                && !detail.title.is_empty()
+            {
+                final_detail.title = detail.title.clone();
+                break;
+            }
         }
         if final_detail.title == query {
             for detail in source_results.values() {
@@ -1145,38 +1240,43 @@ impl ScraperService {
         // Per-field merge from specific + default sources
         for source in get_effective_sources!(config.author_sources.as_ref()) {
             if let Some(detail) = source_results.get(source)
-                && !detail.author.is_empty() {
-                    final_detail.author = detail.author.clone();
-                    break;
-                }
+                && !detail.author.is_empty()
+            {
+                final_detail.author = detail.author.clone();
+                break;
+            }
         }
         for source in get_effective_sources!(config.narrator_sources.as_ref()) {
             if let Some(detail) = source_results.get(source)
-                && detail.narrator.is_some() {
-                    final_detail.narrator = detail.narrator.clone();
-                    break;
-                }
+                && detail.narrator.is_some()
+            {
+                final_detail.narrator = detail.narrator.clone();
+                break;
+            }
         }
         for source in get_effective_sources!(config.cover_sources.as_ref()) {
             if let Some(detail) = source_results.get(source)
-                && detail.cover_url.is_some() {
-                    final_detail.cover_url = detail.cover_url.clone();
-                    break;
-                }
+                && detail.cover_url.is_some()
+            {
+                final_detail.cover_url = detail.cover_url.clone();
+                break;
+            }
         }
         for source in get_effective_sources!(config.intro_sources.as_ref()) {
             if let Some(detail) = source_results.get(source)
-                && !detail.intro.is_empty() {
-                    final_detail.intro = detail.intro.clone();
-                    break;
-                }
+                && !detail.intro.is_empty()
+            {
+                final_detail.intro = detail.intro.clone();
+                break;
+            }
         }
         for source in get_effective_sources!(config.tags_sources.as_ref()) {
             if let Some(detail) = source_results.get(source)
-                && !detail.tags.is_empty() {
-                    final_detail.tags = detail.tags.clone();
-                    break;
-                }
+                && !detail.tags.is_empty()
+            {
+                final_detail.tags = detail.tags.clone();
+                break;
+            }
         }
 
         // Remaining fields from default sources
@@ -1224,13 +1324,281 @@ impl ScraperService {
 
 #[cfg(test)]
 mod tests {
-    use super::ScraperService;
+    use super::*;
+    use crate::plugin::manager::{PluginConfig, PluginEntry};
     use crate::plugin::scraper::BookItem;
-    use std::collections::HashMap;
+    use crate::plugin::types::{
+        Plugin, PluginContext, PluginInvocationContext, PluginMetadata, PluginState,
+    };
+    use serde_json::{Value, json};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    struct CountingScraper {
+        metadata: PluginMetadata,
+        calls: AtomicUsize,
+        fail: AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl Plugin for CountingScraper {
+        fn metadata(&self) -> &PluginMetadata {
+            &self.metadata
+        }
+
+        async fn initialize(&self, _: &PluginContext) -> Result<()> {
+            Ok(())
+        }
+
+        async fn shutdown(&self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn invoke(
+            &self,
+            _: &str,
+            input: Value,
+            _: &PluginInvocationContext,
+        ) -> Result<Value> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if self.fail.load(Ordering::SeqCst) {
+                return Err(TingError::PluginExecutionError(
+                    "test search failure".into(),
+                ));
+            }
+            let mut result = item(&self.metadata.id);
+            result.author = "Author".into();
+            Ok(json!({
+                "ok": true,
+                "data": {
+                    "items": [result],
+                    "page": input["page"],
+                    "page_size": input["page_size"],
+                    "total": 1,
+                    "has_more": false,
+                }
+            }))
+        }
+    }
+
+    fn cache_test_manager(directory: &std::path::Path) -> Arc<PluginManager> {
+        Arc::new(
+            PluginManager::new(PluginConfig {
+                plugin_dir: directory.join("plugins"),
+                enable_hot_reload: false,
+                max_memory_per_plugin: 128 * 1024 * 1024,
+                max_execution_time: Duration::from_secs(30),
+            })
+            .unwrap(),
+        )
+    }
+
+    async fn add_scraper(
+        manager: &PluginManager,
+        id: &str,
+        aggregate: bool,
+    ) -> Arc<CountingScraper> {
+        let metadata = crate::plugin::types::metadata::parse_plugin_metadata_value(json!({
+            "id": id, "name": id, "version": "2.0.0", "min_core_version": "2.0.0",
+            "author": "Test", "description": {"en": "Search cache fixture"},
+            "runtime": "wasm", "entry_point": "test.wasm",
+            "capabilities": [{
+                "id": "metadata.search", "kind": "metadata_provider", "operations": ["search"],
+                "auto_scrape": true, "aggregate_auto_scrape": aggregate,
+                "search_fields": [
+                    {"key": "title", "label": {"en": "Title"}, "required": true, "type": "text"},
+                    {"key": "author", "label": {"en": "Author"}, "required": false, "type": "text"},
+                    {"key": "narrator", "label": {"en": "Narrator"}, "required": false, "type": "text"},
+                    {"key": "category", "label": {"en": "Category"}, "required": false, "type": "text"}
+                ],
+                "result_fields": [{"key": "title", "label": {"en": "Title"}}],
+                "filters_schema": {
+                    "type": "object", "properties": {"category": {"type": "string"}},
+                    "additionalProperties": false
+                }
+            }]
+        }), "cache fixture").unwrap();
+        let plugin = Arc::new(CountingScraper {
+            metadata,
+            calls: AtomicUsize::new(0),
+            fail: AtomicBool::new(false),
+        });
+        let mut entry = PluginEntry::new(plugin.metadata.clone(), plugin.clone());
+        entry.state = PluginState::Active;
+        manager
+            .registry
+            .write()
+            .await
+            .insert(plugin.metadata.instance_id(), entry);
+        plugin
+    }
+
+    #[tokio::test]
+    async fn search_entry_points_share_cache_and_expired_results_are_refetched() {
+        let directory = tempfile::tempdir().unwrap();
+        let manager = cache_test_manager(directory.path());
+        let plugin = add_scraper(&manager, "cache-source", false).await;
+        let service = ScraperService::new(manager);
+        let source = plugin.metadata.instance_id();
+        service
+            .search(" Book ", Some(" Author "), None, Some(&source), 1, 20)
+            .await
+            .unwrap();
+        let params = HashMap::from([
+            ("author".into(), "Author".into()),
+            ("title".into(), " Book ".into()),
+        ]);
+        service
+            .search_with_params(&params, Some(&source), 1, 20)
+            .await
+            .unwrap();
+        assert_eq!(plugin.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(service.get_cache_stats(), 1);
+        {
+            let mut cache = service.search_cache.write().unwrap();
+            for entry in cache.values_mut() {
+                entry.expires_at = Instant::now();
+            }
+        }
+        service
+            .search_with_params(&params, Some(&source), 1, 20)
+            .await
+            .unwrap();
+        assert_eq!(plugin.calls.load(Ordering::SeqCst), 2);
+        service.clear_cache();
+        assert_eq!(service.get_cache_stats(), 0);
+        service
+            .search_with_params(&params, Some(&source), 1, 20)
+            .await
+            .unwrap();
+        assert_eq!(plugin.calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn source_fields_filters_and_pagination_do_not_share_results() {
+        let directory = tempfile::tempdir().unwrap();
+        let manager = cache_test_manager(directory.path());
+        let first = add_scraper(&manager, "first-source", false).await;
+        let second = add_scraper(&manager, "second-source", false).await;
+        let service = ScraperService::new(manager.clone());
+        let first_id = first.metadata.instance_id();
+        for (author, narrator, page, page_size) in [
+            (None, None, 1, 20),
+            (Some("Author"), None, 1, 20),
+            (None, Some("Narrator"), 1, 20),
+            (None, None, 2, 20),
+            (None, None, 1, 10),
+        ] {
+            service
+                .search("Book", author, narrator, Some(&first_id), page, page_size)
+                .await
+                .unwrap();
+        }
+        let second_id = second.metadata.instance_id();
+        let response = service
+            .search("Book", None, None, Some(&second_id), 1, 20)
+            .await
+            .unwrap();
+        assert_eq!(response.items[0].title, "second-source");
+        for category in ["audio", "ebook"] {
+            let params = HashMap::from([
+                ("title".into(), "Book".into()),
+                ("category".into(), category.into()),
+            ]);
+            service
+                .search_with_params(&params, Some(&first_id), 1, 20)
+                .await
+                .unwrap();
+            service
+                .search_with_params(&params, Some(&first_id), 1, 20)
+                .await
+                .unwrap();
+        }
+        assert_eq!(first.calls.load(Ordering::SeqCst), 7);
+        assert_eq!(second.calls.load(Ordering::SeqCst), 1);
+        manager
+            .registry
+            .write()
+            .await
+            .get_mut(&first_id)
+            .unwrap()
+            .state = PluginState::Unloaded;
+        assert!(
+            service
+                .search("Book", None, None, Some(&first_id), 1, 20)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_search_is_not_cached_and_aggregate_search_is_cached() {
+        let directory = tempfile::tempdir().unwrap();
+        let manager = cache_test_manager(directory.path());
+        let plugin = add_scraper(&manager, "retry-source", false).await;
+        let aggregate = add_scraper(&manager, "aggregate-source", true).await;
+        let service = ScraperService::new(manager);
+        let source = plugin.metadata.instance_id();
+        let params = HashMap::from([("title".into(), "Book".into())]);
+        plugin.fail.store(true, Ordering::SeqCst);
+        assert!(
+            service
+                .search_with_params(&params, Some(&source), 1, 20)
+                .await
+                .is_err()
+        );
+        assert_eq!(service.get_cache_stats(), 0);
+        plugin.fail.store(false, Ordering::SeqCst);
+        service
+            .search_with_params(&params, Some(&source), 1, 20)
+            .await
+            .unwrap();
+        service
+            .search_with_params(&params, Some(&source), 1, 20)
+            .await
+            .unwrap();
+        assert_eq!(plugin.calls.load(Ordering::SeqCst), 2);
+        let aggregate_id = aggregate.metadata.instance_id();
+        service
+            .search_with_params(&params, Some(&aggregate_id), 1, 20)
+            .await
+            .unwrap();
+        service
+            .search("Book", None, None, Some(&aggregate_id), 1, 20)
+            .await
+            .unwrap();
+        assert_eq!(aggregate.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn search_cache_has_a_hard_entry_limit_and_zero_ttl_disables_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let manager = cache_test_manager(directory.path());
+        let plugin = add_scraper(&manager, "bounded-source", false).await;
+        let source = plugin.metadata.instance_id();
+        let service = ScraperService::new(manager.clone());
+        for index in 0..=MAX_SEARCH_CACHE_ENTRIES {
+            service
+                .search(&format!("Book {index}"), None, None, Some(&source), 1, 20)
+                .await
+                .unwrap();
+        }
+        assert_eq!(service.get_cache_stats(), MAX_SEARCH_CACHE_ENTRIES);
+        let service = ScraperService::with_cache_ttl(manager, Duration::ZERO);
+        let before = plugin.calls.load(Ordering::SeqCst);
+        for _ in 0..2 {
+            service
+                .search("Book", None, None, Some(&source), 1, 20)
+                .await
+                .unwrap();
+        }
+        assert_eq!(plugin.calls.load(Ordering::SeqCst), before + 2);
+        assert_eq!(service.get_cache_stats(), 0);
+    }
 
     fn item(title: &str) -> BookItem {
         BookItem {
-            id: title.to_string(),
+            id: Some(title.to_string()),
+            source_url: None,
             title: title.to_string(),
             author: String::new(),
             cover_url: None,
@@ -1250,7 +1618,7 @@ mod tests {
             duration: None,
             chapter_title_template: None,
             chapter_titles: Vec::new(),
-            extra: HashMap::new(),
+            score: None,
         }
     }
 

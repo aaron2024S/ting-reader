@@ -49,7 +49,7 @@ pub fn initial_time_zone_from_os() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_time_zone, DEFAULT_TIME_ZONE};
+    use super::{DEFAULT_TIME_ZONE, parse_time_zone};
 
     #[test]
     fn accepts_iana_time_zones() {

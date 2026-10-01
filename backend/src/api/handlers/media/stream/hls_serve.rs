@@ -31,7 +31,6 @@ pub async fn get_hls_playlist(
                 StatusCode::OK,
                 [
                     ("Content-Type", "application/vnd.apple.mpegurl"),
-                    ("Access-Control-Allow-Origin", "*"),
                     ("Cache-Control", "no-cache"),
                 ],
                 content,
@@ -60,7 +59,7 @@ pub async fn get_hls_segment(
             _ => {
                 return Err(TingError::InvalidRequest(
                     "Path traversal detected".to_string(),
-                ))
+                ));
             }
         }
     }
@@ -106,7 +105,6 @@ pub async fn get_hls_segment(
         [
             (header::CONTENT_TYPE, "video/mp2t"),
             (header::ACCEPT_RANGES, "bytes"),
-            (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
             (header::CACHE_CONTROL, "no-cache, no-store, must-revalidate"),
         ],
         content,

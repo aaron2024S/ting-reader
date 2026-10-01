@@ -1,478 +1,361 @@
+//! Scoped format playback: source bytes and plaintext chunks stay in Host
+//! resources, while plugins own format detection and decoding algorithms.
+
 use crate::api::handlers::AppState;
 use crate::core::error::{Result, TingError};
 use crate::db::models::{Chapter, Library};
-use crate::plugin::manager::{FormatMethod, PluginInfo};
-use crate::plugin::types::{DecryptionPlan, DecryptionSegment};
-use base64::Engine;
+use crate::plugin::manager::formats::SelectedFormat;
+use crate::plugin::resources::{ResourceError, ResourceResult, ResourceScope, ResourceSource};
+use crate::plugin::types::PluginInvocationContext;
 use futures::StreamExt;
-use tokio::io::{AsyncRead, AsyncReadExt};
-use tokio_util::io::ReaderStream;
+use std::sync::Arc;
+use ting_plugin_contract::format::FormatOperation;
+use ting_plugin_contract::format_calls::{
+    MAX_MEDIA_CHUNK_BYTES, MAX_SAFE_INTEGER, OpenDecryptResult, ReadChunkResult, SeekResult,
+    SessionId,
+};
+use ting_plugin_contract::protocol::PluginErrorCode;
+use ting_plugin_contract::resources::ResourceStat;
+use tokio::io::AsyncReadExt;
+use tokio_util::sync::CancellationToken;
 
-async fn get_remote_reader(
+async fn remote_reader(
     state: &AppState,
     library: &Library,
     path: &str,
-    range: Option<(u64, u64)>,
-) -> Result<(Box<dyn AsyncRead + Send + Unpin>, u64)> {
+    range: (u64, u64),
+) -> Result<(Box<dyn tokio::io::AsyncRead + Send + Unpin>, u64)> {
     if library.library_type == "webdav" {
-        return state
+        state
             .storage_service
-            .get_webdav_reader(library, path, range, state.encryption_key.as_ref())
-            .await;
-    }
-
-    if library.library_type == "rss" || path.starts_with("http://") || path.starts_with("https://")
+            .get_webdav_reader(library, path, Some(range), state.encryption_key.as_ref())
+            .await
+    } else if library.library_type == "rss"
+        || path.starts_with("http://")
+        || path.starts_with("https://")
     {
-        return state.storage_service.get_http_reader(path, range).await;
+        state
+            .storage_service
+            .get_http_reader(path, Some(range))
+            .await
+    } else {
+        Err(TingError::ValidationError(
+            "Unsupported remote format source".into(),
+        ))
     }
-
-    Err(TingError::ValidationError(format!(
-        "Unsupported remote library type '{}'",
-        library.library_type
-    )))
 }
 
-/// Create a decrypted stream for a file using the specified plugin
+fn remote_error(code: PluginErrorCode, message: &'static str) -> ResourceError {
+    ResourceError { code, message }
+}
+
+struct RemoteMediaSource {
+    state: AppState,
+    library: Library,
+    path: String,
+    length: u64,
+    runtime: tokio::runtime::Handle,
+}
+
+impl ResourceSource for RemoteMediaSource {
+    fn stat(&self) -> ResourceStat {
+        ResourceStat {
+            length: Some(self.length),
+            mime_type: None,
+            readable: true,
+            writable: false,
+            seekable: true,
+            revision: None,
+            finished: true,
+        }
+    }
+
+    fn read_at(
+        &self,
+        offset: u64,
+        max_bytes: usize,
+        cancel: &CancellationToken,
+    ) -> ResourceResult<Vec<u8>> {
+        let state = self.state.clone();
+        let library = self.library.clone();
+        let path = self.path.clone();
+        let token = cancel.clone();
+        let runtime = self.runtime.clone();
+        let result = std::thread::spawn(move || runtime.block_on(async move {
+            let (mut reader, _) = remote_reader(&state, &library, &path,
+                (offset, offset.saturating_add(max_bytes as u64))).await?;
+            let mut data = vec![0; max_bytes];
+            let mut count = 0;
+            while count < data.len() {
+                let read = tokio::select! {
+                    _ = token.cancelled() => return Err(TingError::Timeout("Remote resource cancelled".into())),
+                    read = reader.read(&mut data[count..]) => read.map_err(TingError::IoError)?,
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(15)) =>
+                        return Err(TingError::Timeout("Remote resource read timed out".into())),
+                };
+                if read == 0 { break; }
+                count += read;
+            }
+            data.truncate(count);
+            Ok::<_, TingError>(data)
+        })).join();
+        result
+            .map_err(|_| {
+                remote_error(
+                    PluginErrorCode::InternalError,
+                    "Remote resource worker failed",
+                )
+            })?
+            .map_err(|_| remote_error(PluginErrorCode::NetworkError, "Remote resource read failed"))
+    }
+}
+
+struct DecryptPlayback {
+    state: AppState,
+    plugin_id: String,
+    capability_id: String,
+    session_id: SessionId,
+    scope: Arc<ResourceScope>,
+    remaining: Option<u64>,
+    finished: bool,
+}
+
+impl Drop for DecryptPlayback {
+    fn drop(&mut self) {
+        self.scope.cancel();
+        let state = self.state.clone();
+        let plugin_id = self.plugin_id.clone();
+        let capability_id = self.capability_id.clone();
+        let session_id = self.session_id.clone();
+        let scope = Arc::clone(&self.scope);
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                let _ = state
+                    .plugin_manager
+                    .invoke_capability(
+                        &plugin_id,
+                        &capability_id,
+                        "close",
+                        serde_json::json!({ "session_id": session_id }),
+                        &PluginInvocationContext {
+                            user: None,
+                            resources: Some(scope),
+                        },
+                    )
+                    .await;
+            });
+        }
+    }
+}
+
 pub(crate) async fn create_decrypted_stream(
     state: &AppState,
     chapter: &Chapter,
     library: &Library,
-    plugin: &PluginInfo,
     range_header: Option<String>,
 ) -> Result<(
     futures::stream::BoxStream<'static, std::io::Result<bytes::Bytes>>,
     String,
     Option<String>,
+    Option<u64>,
     u64,
     u64,
-    u64,
-    u64,
+    Option<u64>,
 )> {
+    let format_path = std::path::Path::new(&chapter.path);
     let cache_path = state.cache_manager.get_cache_path(&chapter.id);
-
-    // 1. Read minimal header probe
-    let probe_size = 10;
-    let (mut probe_reader, _) = if cache_path.exists() {
-        let (reader, size) = state
-            .storage_service
-            .get_local_reader(&cache_path, Some((0, probe_size)))
-            .await
-            .map_err(|e| TingError::NotFound(format!("Cached file not found: {}", e)))?;
-        (
-            Box::new(reader.take(probe_size)) as Box<dyn AsyncRead + Send + Unpin>,
-            size,
-        )
-    } else if library.library_type == "local" {
-        let (reader, size) = state
-            .storage_service
-            .get_local_reader(std::path::Path::new(&chapter.path), Some((0, probe_size)))
-            .await
-            .map_err(|e| TingError::NotFound(format!("Local file not found: {}", e)))?;
-        (
-            Box::new(reader.take(probe_size)) as Box<dyn AsyncRead + Send + Unpin>,
-            size,
-        )
-    } else {
-        let (reader, size) =
-            get_remote_reader(state, library, &chapter.path, Some((0, probe_size)))
-                .await
-                .map_err(|e| TingError::NotFound(format!("Remote media not found: {}", e)))?;
-        (
-            Box::new(reader.take(probe_size)) as Box<dyn AsyncRead + Send + Unpin>,
-            size,
-        )
-    };
-
-    let mut probe_bytes = Vec::new();
-    probe_reader
-        .read_to_end(&mut probe_bytes)
-        .await
-        .map_err(TingError::IoError)?;
-
-    // 2. Ask plugin for required header size
-    let probe_base64 = base64::engine::general_purpose::STANDARD.encode(&probe_bytes);
-    let size_json = state
-        .plugin_manager
-        .call_format(
-            &plugin.id,
-            FormatMethod::GetMetadataReadSize,
-            serde_json::json!({"header_base64": probe_base64}),
-        )
-        .await
-        .map_err(|e| {
-            tracing::error!(
-                error = %e,
-                message_key = "media.metadata_read_size.failed",
-                message_params = %serde_json::json!({ "error": e.to_string() }),
-                "Failed to get metadata read size"
-            );
-            TingError::PluginExecutionError(format!("Failed to get metadata read size: {}", e))
-        })?;
-
-    let header_size = size_json["size"].as_u64().unwrap_or(8192);
-
-    // 3. Read full header
-    let (mut header_reader, total_file_size) = if cache_path.exists() {
-        let (reader, size) = state
-            .storage_service
-            .get_local_reader(&cache_path, Some((0, header_size)))
-            .await?;
-        (
-            Box::new(reader.take(header_size)) as Box<dyn AsyncRead + Send + Unpin>,
-            size,
-        )
-    } else if library.library_type == "local" {
-        let (reader, size) = state
-            .storage_service
-            .get_local_reader(std::path::Path::new(&chapter.path), Some((0, header_size)))
-            .await?;
-        (
-            Box::new(reader.take(header_size)) as Box<dyn AsyncRead + Send + Unpin>,
-            size,
-        )
-    } else {
-        let (reader, size) =
-            get_remote_reader(state, library, &chapter.path, Some((0, header_size))).await?;
-        (
-            Box::new(reader.take(header_size)) as Box<dyn AsyncRead + Send + Unpin>,
-            size,
-        )
-    };
-
-    let mut header_bytes = Vec::new();
-    header_reader
-        .read_to_end(&mut header_bytes)
-        .await
-        .map_err(TingError::IoError)?;
-
-    // 4. Get Decryption Plan
-    let header_base64 = base64::engine::general_purpose::STANDARD.encode(&header_bytes);
-    let plan_json = state
-        .plugin_manager
-        .call_format(
-            &plugin.id,
-            FormatMethod::GetDecryptionPlan,
-            serde_json::json!({"header_base64": header_base64}),
-        )
-        .await
-        .map_err(|e| {
-            tracing::error!(
-                error = %e,
-                message_key = "media.decryption_plan.failed",
-                message_params = %serde_json::json!({ "error": e.to_string() }),
-                "Failed to get decryption plan"
-            );
-            TingError::PluginExecutionError(format!("Failed to get decryption plan: {}", e))
-        })?;
-
-    let plan: DecryptionPlan = serde_json::from_value(plan_json)
-        .map_err(|e| TingError::SerializationError(format!("Invalid decryption plan: {}", e)))?;
-
-    let mime_type = plan
-        .mime_type
-        .clone()
-        .unwrap_or_else(|| "audio/mp4".to_string());
-    let output_extension = plan
-        .extension
-        .clone()
-        .or_else(|| extension_from_mime_type(&mime_type).map(str::to_string));
-
-    // 5. Calculate Logic Size and Resolve Encrypted Segments
-    let mut resolved_segments = Vec::new();
-    let mut logic_size = 0;
-
-    for segment in plan.segments {
-        match segment {
-            DecryptionSegment::Encrypted {
-                offset,
-                length,
-                params,
-            } => {
-                // Fetch and decrypt eagerly
-                let (mut reader, _) = if cache_path.exists() {
-                    let (reader, _) = state
-                        .storage_service
-                        .get_local_reader(&cache_path, Some((offset, offset + length as u64)))
-                        .await
-                        .map_err(|e| {
-                            TingError::NotFound(format!("Cached file not found: {}", e))
-                        })?;
-                    (
-                        Box::new(reader.take(length as u64)) as Box<dyn AsyncRead + Send + Unpin>,
-                        0,
-                    )
-                } else if library.library_type == "local" {
-                    let (reader, _) = state
-                        .storage_service
-                        .get_local_reader(
-                            std::path::Path::new(&chapter.path),
-                            Some((offset, offset + length as u64)),
-                        )
-                        .await
-                        .map_err(|e| TingError::NotFound(format!("Local file not found: {}", e)))?;
-                    (
-                        Box::new(reader.take(length as u64)) as Box<dyn AsyncRead + Send + Unpin>,
-                        0,
-                    )
-                } else {
-                    let (reader, _) = get_remote_reader(
-                        state,
-                        library,
-                        &chapter.path,
-                        Some((offset, offset + length as u64)),
-                    )
-                    .await
-                    .map_err(|e| TingError::NotFound(format!("Remote media not found: {}", e)))?;
-                    (
-                        Box::new(reader.take(length as u64)) as Box<dyn AsyncRead + Send + Unpin>,
-                        0,
-                    )
-                };
-
-                let mut encrypted_data = Vec::with_capacity(length as usize);
-                reader
-                    .read_to_end(&mut encrypted_data)
-                    .await
-                    .map_err(TingError::IoError)?;
-
-                let chunk_base64 =
-                    base64::engine::general_purpose::STANDARD.encode(&encrypted_data);
-
-                let result_json = state
-                    .plugin_manager
-                    .call_format(
-                        &plugin.id,
-                        FormatMethod::DecryptChunk,
-                        serde_json::json!({
-                            "data_base64": chunk_base64,
-                            "params": params
-                        }),
-                    )
-                    .await
-                    .map_err(|e| TingError::PluginExecutionError(e.to_string()))?;
-
-                let decrypted_base64 = result_json["data_base64"].as_str().ok_or_else(|| {
-                    TingError::PluginExecutionError("Missing data_base64".to_string())
-                })?;
-
-                let decrypted = base64::engine::general_purpose::STANDARD
-                    .decode(decrypted_base64)
-                    .map_err(|e| TingError::PluginExecutionError(e.to_string()))?;
-
-                let dec_len = decrypted.len() as u64;
-                resolved_segments.push((bytes::Bytes::from(decrypted), None, dec_len));
-                logic_size += dec_len;
-            }
-            DecryptionSegment::Plain { length, offset } => {
-                let p_len = if length <= 0 {
-                    total_file_size.saturating_sub(offset)
-                } else {
-                    length as u64
-                };
-                resolved_segments.push((bytes::Bytes::new(), Some(offset), p_len));
-                logic_size += p_len;
-            }
-        }
-    }
-
-    if let Some(s) = plan.total_size {
-        logic_size = s;
-    }
-
-    // Parse Range
-    let (start, end) = if let Some(r_str) = range_header {
-        if let Ok(range) = state.audio_streamer.parse_range_header(&r_str, logic_size) {
-            (range.start, range.end)
+    let selected: Option<SelectedFormat>;
+    let length: u64;
+    if cache_path.exists() || library.library_type == "local" {
+        let source_path = if cache_path.exists() {
+            cache_path.as_path()
         } else {
-            (0, logic_size)
-        }
+            format_path
+        };
+        selected = state
+            .plugin_manager
+            .select_local_format_with_operation(
+                format_path,
+                source_path,
+                None,
+                FormatOperation::OpenDecrypt,
+            )
+            .await?;
+        length = selected
+            .as_ref()
+            .map(|format| {
+                format
+                    .scope
+                    .stat(&format.input)
+                    .map(|stat| stat.length.unwrap_or(0))
+            })
+            .transpose()
+            .map_err(|error| TingError::PluginExecutionError(error.to_string()))?
+            .unwrap_or(0);
     } else {
-        (0, logic_size)
-    };
-
-    let content_length = end.saturating_sub(start);
-
-    // 6. Construct Lazy Stream Chain
-    let mut stream_chain: Vec<
-        futures::stream::BoxStream<'static, std::result::Result<bytes::Bytes, std::io::Error>>,
-    > = Vec::new();
-    let mut current_pos = 0;
-
-    for (data, plain_offset, seg_len) in resolved_segments {
-        let seg_start = current_pos;
-        let seg_end = current_pos + seg_len;
-
-        if seg_end > start && seg_start < end {
-            let req_seg_start = std::cmp::max(start, seg_start);
-            let req_seg_end = std::cmp::min(end, seg_end);
-
-            let relative_start = req_seg_start - seg_start;
-            let relative_end = req_seg_end - seg_start;
-
-            if let Some(offset) = plain_offset {
-                let read_start = offset + relative_start;
-                let read_end = offset + relative_end;
-
-                let state = state.clone();
-                let cache_path = cache_path.clone();
-                let library = library.clone();
-                let chapter_path = chapter.path.clone();
-                let encryption_key = state.encryption_key.clone();
-
-                let future = async move {
-                    let (reader, _) = if cache_path.exists() {
-                        let (reader, _) = state
-                            .storage_service
-                            .get_local_reader(&cache_path, Some((read_start, read_end)))
-                            .await
-                            .map_err(|e| std::io::Error::new(std::io::ErrorKind::NotFound, e))?;
-                        (
-                            Box::new(reader.take(read_end - read_start))
-                                as Box<dyn AsyncRead + Send + Unpin>,
-                            0,
-                        )
-                    } else if library.library_type == "local" {
-                        let (reader, _) = state
-                            .storage_service
-                            .get_local_reader(
-                                std::path::Path::new(&chapter_path),
-                                Some((read_start, read_end)),
-                            )
-                            .await
-                            .map_err(|e| std::io::Error::new(std::io::ErrorKind::NotFound, e))?;
-                        (
-                            Box::new(reader.take(read_end - read_start))
-                                as Box<dyn AsyncRead + Send + Unpin>,
-                            0,
-                        )
-                    } else if library.library_type == "webdav" {
-                        let (reader, _) = state
-                            .storage_service
-                            .get_webdav_reader(
-                                &library,
-                                &chapter_path,
-                                Some((read_start, read_end)),
-                                encryption_key.as_ref(),
-                            )
-                            .await
-                            .map_err(|e| std::io::Error::new(std::io::ErrorKind::NotFound, e))?;
-                        (
-                            Box::new(reader.take(read_end - read_start))
-                                as Box<dyn AsyncRead + Send + Unpin>,
-                            0,
-                        )
-                    } else {
-                        let (reader, _) = state
-                            .storage_service
-                            .get_http_reader(&chapter_path, Some((read_start, read_end)))
-                            .await
-                            .map_err(|e| std::io::Error::new(std::io::ErrorKind::NotFound, e))?;
-                        (
-                            Box::new(reader.take(read_end - read_start))
-                                as Box<dyn AsyncRead + Send + Unpin>,
-                            0,
-                        )
-                    };
-
-                    let stream = ReaderStream::new(reader).map(|res| {
-                        res.map_err(std::io::Error::other)
-                    });
-
-                    Ok(stream)
-                };
-
-                let stream = futures::stream::once(future)
-                    .map(|res| match res {
-                        Ok(s) => s.boxed(),
-                        Err(e) => futures::stream::iter(vec![Err(e)]).boxed(),
-                    })
-                    .flatten();
-
-                stream_chain.push(stream.boxed());
-            } else {
-                let slice_start = relative_start as usize;
-                let slice_end = std::cmp::min(data.len(), relative_end as usize);
-                let slice = data.slice(slice_start..slice_end);
-                let future = async move { Ok(slice) };
-                stream_chain.push(futures::stream::once(future).boxed());
-            }
+        let (_, total_size) = remote_reader(state, library, &chapter.path, (0, 1)).await?;
+        if total_size == 0 || total_size > MAX_SAFE_INTEGER {
+            return Err(TingError::PluginExecutionError(
+                "Remote format length unavailable".into(),
+            ));
         }
-
-        current_pos += seg_len;
+        let source = Arc::new(RemoteMediaSource {
+            state: state.clone(),
+            library: library.clone(),
+            path: chapter.path.clone(),
+            length: total_size,
+            runtime: tokio::runtime::Handle::current(),
+        });
+        selected = state
+            .plugin_manager
+            .select_source_format(
+                format_path,
+                source,
+                total_size,
+                None,
+                FormatOperation::OpenDecrypt,
+            )
+            .await?;
+        length = total_size;
     }
-
-    let stream = futures::stream::iter(stream_chain).flatten();
-
-    // Wrap with padding to ensure Content-Length is satisfied
-    // This is crucial for browsers (Chrome/Edge) to support seeking
-    // even if the decrypted size is slightly smaller than calculated logic_size
-    let padded_stream = PaddedStream {
-        inner: Box::pin(stream),
-        remaining_pad: content_length,
+    let selected = selected.ok_or_else(|| {
+        TingError::PluginExecutionError("No format plugin matched the media source".into())
+    })?;
+    let plugin_id = selected.plugin_id.clone();
+    let capability_id = selected.capability_id.clone();
+    let scope = Arc::clone(&selected.scope);
+    let input = selected.input.clone();
+    let scoped = PluginInvocationContext {
+        user: None,
+        resources: Some(Arc::clone(&scope)),
     };
-
+    scope
+        .extend_readable_end(&input, length)
+        .map_err(|error| TingError::PluginExecutionError(error.to_string()))?;
+    let output = state
+        .plugin_manager
+        .invoke_capability(
+            &plugin_id,
+            &capability_id,
+            "open_decrypt",
+            serde_json::json!({ "input": input }),
+            &scoped,
+        )
+        .await?;
+    let opened: OpenDecryptResult = serde_json::from_value(output).map_err(|error| {
+        TingError::PluginExecutionError(format!("Invalid format session: {error}"))
+    })?;
+    scope
+        .check_session(&opened.session_id)
+        .map_err(|error| TingError::PluginExecutionError(error.to_string()))?;
+    let mut playback = DecryptPlayback {
+        state: state.clone(),
+        plugin_id,
+        capability_id,
+        session_id: opened.session_id,
+        scope,
+        remaining: None,
+        finished: false,
+    };
+    let (start, end) = if let Some(header) = range_header {
+        let Some(total) = opened.output.length else {
+            return Err(TingError::InvalidRequest(
+                "Format stream does not support byte ranges".into(),
+            ));
+        };
+        let range = state.audio_streamer.parse_range_header(&header, total)?;
+        (range.start, range.end)
+    } else {
+        (0, opened.output.length.unwrap_or(0))
+    };
+    if let Some(total) = opened.output.length
+        && (start > end || end > total)
+    {
+        return Err(TingError::InvalidRequest(
+            "Invalid format playback range".into(),
+        ));
+    }
+    if start != 0 {
+        let position = state
+            .plugin_manager
+            .invoke_capability(
+                &playback.plugin_id,
+                &playback.capability_id,
+                "seek",
+                serde_json::json!({ "session_id": playback.session_id, "offset": start }),
+                &scoped,
+            )
+            .await?;
+        let position: SeekResult = serde_json::from_value(position).map_err(|error| {
+            TingError::PluginExecutionError(format!("Invalid format seek: {error}"))
+        })?;
+        if position.position != start {
+            return Err(TingError::PluginExecutionError(
+                "Format seek returned a different position".into(),
+            ));
+        }
+    }
+    playback.remaining = opened.output.length.map(|_| end.saturating_sub(start));
+    let stream = futures::stream::unfold(playback, |mut playback| async move {
+        if playback.finished || playback.remaining == Some(0) {
+            return None;
+        }
+        let requested = playback
+            .remaining
+            .unwrap_or(MAX_MEDIA_CHUNK_BYTES)
+            .min(MAX_MEDIA_CHUNK_BYTES);
+        let context = PluginInvocationContext {
+            user: None, resources: Some(Arc::clone(&playback.scope)),
+        };
+        let result: Result<bytes::Bytes> = async {
+            let output = playback.state.plugin_manager.invoke_capability(
+                &playback.plugin_id, &playback.capability_id, "read_chunk",
+                serde_json::json!({ "session_id": playback.session_id, "max_bytes": requested }), &context,
+            ).await?;
+            let chunk: ReadChunkResult = serde_json::from_value(output)
+                .map_err(|error| TingError::PluginExecutionError(format!("Invalid format chunk: {error}")))?;
+            chunk.validate(requested).map_err(|error| TingError::PluginExecutionError(error.to_string()))?;
+            if chunk.length == 0 {
+                if chunk.eof {
+                    playback.finished = true;
+                    return Ok(bytes::Bytes::new());
+                }
+                return Err(TingError::PluginExecutionError(
+                    "Format stream returned an empty non-EOF chunk".into(),
+                ));
+            }
+            let chunk_ref = chunk.chunk.ok_or_else(||
+                TingError::PluginExecutionError("Format chunk lease missing".into()))?;
+            let data = playback.scope.chunk(&chunk_ref).map_err(|error|
+                TingError::PluginExecutionError(error.to_string()))?;
+            playback.scope.release_chunk(&chunk_ref).map_err(|error|
+                TingError::PluginExecutionError(error.to_string()))?;
+            if data.len() as u64 != chunk.length
+                || playback
+                    .remaining
+                    .is_some_and(|remaining| chunk.length > remaining)
+            {
+                return Err(TingError::PluginExecutionError("Invalid format chunk length".into()));
+            }
+            if let Some(remaining) = &mut playback.remaining {
+                *remaining -= chunk.length;
+            }
+            playback.finished = chunk.eof;
+            Ok(bytes::Bytes::copy_from_slice(&data))
+        }.await;
+        let ended = result.is_err();
+        Some((result.map_err(std::io::Error::other), if ended {
+            playback.finished = true;
+            playback
+        } else { playback }))
+    }).boxed();
     Ok((
-        Box::pin(padded_stream),
-        mime_type,
-        output_extension,
-        content_length,
+        stream,
+        opened.output.mime_type,
+        Some(opened.output.format),
+        opened.output.length.map(|_| end - start),
         start,
         end,
-        logic_size,
+        opened.output.length,
     ))
-}
-
-fn extension_from_mime_type(mime_type: &str) -> Option<&'static str> {
-    match mime_type.split(';').next().unwrap_or("").trim() {
-        "audio/mpeg" | "audio/mp3" => Some("mp3"),
-        "audio/mp4" | "audio/x-m4a" | "audio/aac" => Some("m4a"),
-        "audio/flac" | "audio/x-flac" => Some("flac"),
-        "audio/ogg" | "application/ogg" => Some("ogg"),
-        "audio/opus" => Some("opus"),
-        "audio/wav" | "audio/x-wav" => Some("wav"),
-        _ => None,
-    }
-}
-
-struct PaddedStream {
-    inner: futures::stream::BoxStream<'static, std::io::Result<bytes::Bytes>>,
-    remaining_pad: u64,
-}
-
-impl futures::Stream for PaddedStream {
-    type Item = std::io::Result<bytes::Bytes>;
-
-    fn poll_next(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Self::Item>> {
-        match self.inner.as_mut().poll_next(cx) {
-            std::task::Poll::Ready(Some(Ok(bytes))) => {
-                let len = bytes.len() as u64;
-                if len > 0 {
-                    if self.remaining_pad >= len {
-                        self.remaining_pad -= len;
-                    } else {
-                        self.remaining_pad = 0;
-                    }
-                }
-                std::task::Poll::Ready(Some(Ok(bytes)))
-            }
-            std::task::Poll::Ready(Some(Err(e))) => std::task::Poll::Ready(Some(Err(e))),
-            std::task::Poll::Ready(None) => {
-                if self.remaining_pad > 0 {
-                    // Pad with zeros
-                    let chunk_size = std::cmp::min(self.remaining_pad, 8192);
-                    self.remaining_pad -= chunk_size;
-                    std::task::Poll::Ready(Some(Ok(bytes::Bytes::from(vec![
-                        0u8;
-                        chunk_size as usize
-                    ]))))
-                } else {
-                    std::task::Poll::Ready(None)
-                }
-            }
-            std::task::Poll::Pending => std::task::Poll::Pending,
-        }
-    }
 }

@@ -1,4 +1,4 @@
-use crate::plugin::types::{LocalizedText, PluginCapability, ScraperCapabilities};
+use crate::plugin::types::{LocalizedText, Permission, PluginCapability, ScraperCapabilities};
 use serde::{Deserialize, Serialize};
 
 // Plugin Management API models
@@ -22,7 +22,6 @@ pub struct PluginInfoResponse {
     /// Plugin version
     pub version: String,
     /// Plugin type (scraper, format, utility)
-    pub plugin_type: String,
     /// Plugin runtime (wasm, javascript, native)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
@@ -45,7 +44,7 @@ pub struct PluginInfoResponse {
     pub config_schema: Option<serde_json::Value>,
     /// Plugin permissions
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub permissions: Option<Vec<String>>,
+    pub permissions: Option<Vec<Permission>>,
     /// Plugin license
     #[serde(skip_serializing_if = "Option::is_none")]
     pub license: Option<String>,
@@ -92,7 +91,6 @@ pub struct PluginDetailResponse {
     /// Plugin version
     pub version: String,
     /// Plugin type (scraper, format, utility)
-    pub plugin_type: String,
     /// Plugin runtime (wasm, javascript, native)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
@@ -127,7 +125,7 @@ pub struct PluginDetailResponse {
     /// Plugin dependencies
     pub dependencies: Vec<PluginDependencyResponse>,
     /// Plugin permissions
-    pub permissions: Vec<String>,
+    pub permissions: Vec<Permission>,
     /// Supported file extensions (format plugins only)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub supported_extensions: Option<Vec<String>>,
@@ -369,5 +367,5 @@ pub struct ToolProviderRegistrationResponse {
     pub capability: PluginCapability,
     /// Matched tool declaration when a name filter is provided.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool: Option<serde_json::Value>,
+    pub tool: Option<ting_plugin_contract::capability::ToolDeclaration>,
 }

@@ -1,7 +1,7 @@
 //! Authentication API handlers
 
 use crate::api::handlers::AppState;
-use crate::api::utils::{request_info_from_headers, RequestInfo};
+use crate::api::utils::{RequestInfo, request_info_from_headers};
 use crate::auth::jwt::{generate_token, validate_token, validate_token_with_secrets};
 use crate::auth::models::{
     LoginRequest, LoginResponse, RegisterRequest, SessionRestoreRequest, SuccessResponse,
@@ -12,10 +12,10 @@ use crate::core::error::{Result, TingError};
 use crate::db::models::User;
 use crate::db::repository::Repository;
 use axum::{
-    extract::{ConnectInfo, State},
-    http::{header, HeaderMap, StatusCode},
-    response::IntoResponse,
     Json,
+    extract::{ConnectInfo, State},
+    http::{HeaderMap, StatusCode, header},
+    response::IntoResponse,
 };
 use std::{
     collections::HashMap,
@@ -452,15 +452,17 @@ pub async fn update_me(
 
     // Update username if provided
     if let Some(new_username) = req.username
-        && !new_username.is_empty() {
-            db_user.username = new_username;
-        }
+        && !new_username.is_empty()
+    {
+        db_user.username = new_username;
+    }
 
     // Update password if provided
     if let Some(new_password) = req.password
-        && !new_password.is_empty() {
-            db_user.password_hash = hash_password(&new_password)?;
-        }
+        && !new_password.is_empty()
+    {
+        db_user.password_hash = hash_password(&new_password)?;
+    }
 
     // Save updated user
     state.user_repo.update(&db_user).await?;

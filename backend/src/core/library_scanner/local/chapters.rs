@@ -1,8 +1,8 @@
+use super::super::LibraryScanner;
 use super::super::shared::{
     apply_chapter_title_template, chapter_title_template_preserves_raw,
     clean_or_preserve_chapter_title,
 };
-use super::super::LibraryScanner;
 use crate::core::error::{Result, TingError};
 use crate::db::models::Chapter;
 use crate::db::repository::Repository;
@@ -54,7 +54,12 @@ impl LibraryScanner {
                 true
             } else {
                 if !chapters.is_empty() {
-                    warn!("metadata.json chapter count ({}) does not match file count ({}) for book {}. Ignoring JSON chapters.", chapters.len(), total_files, book_id);
+                    warn!(
+                        "metadata.json chapter count ({}) does not match file count ({}) for book {}. Ignoring JSON chapters.",
+                        chapters.len(),
+                        total_files,
+                        book_id
+                    );
                 }
                 false
             }
@@ -193,163 +198,166 @@ impl LibraryScanner {
             let mut regex_title = None;
 
             if let Some(re) = &chapter_regex
-                && let Some(caps) = re.captures(&filename_str) {
-                    if let Some(m) = caps.get(1)
-                        && let Ok(idx) = m.as_str().parse::<i32>() {
-                            regex_idx = Some(idx);
-                        }
-                    if let Some(m) = caps.get(2) {
-                        regex_title = Some(m.as_str().to_string());
-                    }
+                && let Some(caps) = re.captures(&filename_str)
+            {
+                if let Some(m) = caps.get(1)
+                    && let Ok(idx) = m.as_str().parse::<i32>()
+                {
+                    regex_idx = Some(idx);
                 }
+                if let Some(m) = caps.get(2) {
+                    regex_title = Some(m.as_str().to_string());
+                }
+            }
 
             // Optimization: If chapter exists and file is not modified, skip processing!
             if let Some(ref ch) = existing_chapter
-                && !is_modified {
-                    // Update index if needed (e.g. reordering files), but skip hashing/metadata
-                    // Also respect manual_corrected if we were to update anything else
+                && !is_modified
+            {
+                // Update index if needed (e.g. reordering files), but skip hashing/metadata
+                // Also respect manual_corrected if we were to update anything else
 
-                    let title_override = if ch.manual_corrected == 0 {
-                        if let Some(ai_title) = ai_chapter_title {
-                            let (_, is_extra) = self
-                                .text_cleaner
-                                .clean_chapter_title(ai_title, book.title.as_deref());
-                            Some((ai_title.to_string(), is_extra))
-                        } else if let Some(rt) = regex_title.clone() {
-                            let (cleaned, is_extra) = clean_or_preserve_chapter_title(
-                                self.text_cleaner.as_ref(),
-                                &rt,
-                                book.title.as_deref(),
-                                preserve_raw_chapter_titles,
-                            );
-                            Some((cleaned, is_extra))
-                        } else if use_filename_as_title {
-                            let (cleaned, is_extra) = clean_or_preserve_chapter_title(
-                                self.text_cleaner.as_ref(),
-                                &filename_str,
-                                book.title.as_deref(),
-                                preserve_raw_chapter_titles,
-                            );
-                            Some((cleaned, is_extra))
-                        } else if use_json_chapters {
-                            json_chapters.as_ref().and_then(|chapters| {
-                                chapters.get(index).map(|chapter| {
-                                    let (_, is_extra) = self
-                                        .text_cleaner
-                                        .clean_chapter_title(&chapter.title, book.title.as_deref());
-                                    (chapter.title.clone(), is_extra)
-                                })
+                let title_override = if ch.manual_corrected == 0 {
+                    if let Some(ai_title) = ai_chapter_title {
+                        let (_, is_extra) = self
+                            .text_cleaner
+                            .clean_chapter_title(ai_title, book.title.as_deref());
+                        Some((ai_title.to_string(), is_extra))
+                    } else if let Some(rt) = regex_title.clone() {
+                        let (cleaned, is_extra) = clean_or_preserve_chapter_title(
+                            self.text_cleaner.as_ref(),
+                            &rt,
+                            book.title.as_deref(),
+                            preserve_raw_chapter_titles,
+                        );
+                        Some((cleaned, is_extra))
+                    } else if use_filename_as_title {
+                        let (cleaned, is_extra) = clean_or_preserve_chapter_title(
+                            self.text_cleaner.as_ref(),
+                            &filename_str,
+                            book.title.as_deref(),
+                            preserve_raw_chapter_titles,
+                        );
+                        Some((cleaned, is_extra))
+                    } else if use_json_chapters {
+                        json_chapters.as_ref().and_then(|chapters| {
+                            chapters.get(index).map(|chapter| {
+                                let (_, is_extra) = self
+                                    .text_cleaner
+                                    .clean_chapter_title(&chapter.title, book.title.as_deref());
+                                (chapter.title.clone(), is_extra)
                             })
-                        } else {
-                            None
-                        }
+                        })
                     } else {
                         None
-                    };
+                    }
+                } else {
+                    None
+                };
 
-                    let counter_is_extra = if ch.manual_corrected != 0 {
-                        ch.is_extra == 1
-                    } else {
-                        extract_extra_chapters
-                            && title_override
-                                .as_ref()
-                                .map(|(_, is_extra)| *is_extra)
-                                .unwrap_or(ch.is_extra == 1)
-                    };
-                    let idx_from_counter = if counter_is_extra {
-                        extra_counter += 1;
-                        extra_counter
-                    } else {
-                        main_counter += 1;
-                        main_counter
-                    };
-
-                    // Final Index (Regex overrides counter)
-                    let target_idx = regex_idx.unwrap_or(idx_from_counter);
-
-                    // Check if we need to update Title or Index
-                    // Cases to update even if not modified:
-                    // 1. Regex applied/changed and provides new title/index.
-                    // 2. use_filename_as_title is TRUE and current title != filename.
-                    // 3. Index changed due to reordering.
-
-                    let mut should_update = false;
-                    let mut new_title = ch.title.clone();
-                    let mut new_idx = ch.chapter_index;
-                    let json_duration = if json_chapters_matched_by_title {
-                        json_chapters
+                let counter_is_extra = if ch.manual_corrected != 0 {
+                    ch.is_extra == 1
+                } else {
+                    extract_extra_chapters
+                        && title_override
                             .as_ref()
-                            .and_then(|chapters| chapters.get(index))
-                            .map(|chapter| ((chapter.end - chapter.start).round() as i32).max(0))
-                    } else {
-                        None
-                    };
-                    let duration_changed = json_duration
-                        .map(|duration| ch.duration != Some(duration))
-                        .unwrap_or(false);
-                    let mut new_is_extra = if extract_extra_chapters {
-                        ch.is_extra
+                            .map(|(_, is_extra)| *is_extra)
+                            .unwrap_or(ch.is_extra == 1)
+                };
+                let idx_from_counter = if counter_is_extra {
+                    extra_counter += 1;
+                    extra_counter
+                } else {
+                    main_counter += 1;
+                    main_counter
+                };
+
+                // Final Index (Regex overrides counter)
+                let target_idx = regex_idx.unwrap_or(idx_from_counter);
+
+                // Check if we need to update Title or Index
+                // Cases to update even if not modified:
+                // 1. Regex applied/changed and provides new title/index.
+                // 2. use_filename_as_title is TRUE and current title != filename.
+                // 3. Index changed due to reordering.
+
+                let mut should_update = false;
+                let mut new_title = ch.title.clone();
+                let mut new_idx = ch.chapter_index;
+                let json_duration = if json_chapters_matched_by_title {
+                    json_chapters
+                        .as_ref()
+                        .and_then(|chapters| chapters.get(index))
+                        .map(|chapter| ((chapter.end - chapter.start).round() as i32).max(0))
+                } else {
+                    None
+                };
+                let duration_changed = json_duration
+                    .map(|duration| ch.duration != Some(duration))
+                    .unwrap_or(false);
+                let mut new_is_extra = if extract_extra_chapters {
+                    ch.is_extra
+                } else {
+                    0
+                };
+                if new_is_extra != ch.is_extra {
+                    should_update = true;
+                }
+
+                // Check Index
+                if new_idx != Some(target_idx) {
+                    new_idx = Some(target_idx);
+                    should_update = true;
+                }
+
+                // Check title overrides. metadata.json is a fallback, but chapter regex
+                // and forced filename titles must still apply to unchanged files.
+                // JSON titles are preserved verbatim, while still detecting extras.
+                if let Some((target_title, target_is_extra)) = title_override {
+                    let target_title = apply_chapter_title_template(
+                        chapter_title_template,
+                        book.title.as_deref(),
+                        target_idx,
+                        &target_title,
+                    );
+
+                    if ch.title.as_deref() != Some(&target_title) {
+                        new_title = Some(target_title);
+                        should_update = true;
+                    }
+
+                    let target_is_extra = if extract_extra_chapters && target_is_extra {
+                        1
                     } else {
                         0
                     };
-                    if new_is_extra != ch.is_extra {
+                    if new_is_extra != target_is_extra {
+                        new_is_extra = target_is_extra;
                         should_update = true;
                     }
-
-                    // Check Index
-                    if new_idx != Some(target_idx) {
-                        new_idx = Some(target_idx);
-                        should_update = true;
-                    }
-
-                    // Check title overrides. metadata.json is a fallback, but chapter regex
-                    // and forced filename titles must still apply to unchanged files.
-                    // JSON titles are preserved verbatim, while still detecting extras.
-                    if let Some((target_title, target_is_extra)) = title_override {
-                        let target_title = apply_chapter_title_template(
-                            chapter_title_template,
-                            book.title.as_deref(),
-                            target_idx,
-                            &target_title,
-                        );
-
-                        if ch.title.as_deref() != Some(&target_title) {
-                            new_title = Some(target_title);
-                            should_update = true;
-                        }
-
-                        let target_is_extra = if extract_extra_chapters && target_is_extra {
-                            1
-                        } else {
-                            0
-                        };
-                        if new_is_extra != target_is_extra {
-                            new_is_extra = target_is_extra;
-                            should_update = true;
-                        }
-                    }
-
-                    let scanned_path = file_path.to_string_lossy().to_string();
-                    if ch.path != scanned_path
-                        || duration_changed
-                        || (should_update && ch.manual_corrected == 0)
-                    {
-                        let mut updated_ch = ch.clone();
-                        updated_ch.path = scanned_path;
-                        if let Some(duration) = json_duration {
-                            updated_ch.duration = Some(duration);
-                        }
-                        if ch.manual_corrected == 0 {
-                            updated_ch.chapter_index = new_idx;
-                            updated_ch.title = new_title;
-                            updated_ch.is_extra = new_is_extra;
-                        }
-                        self.chapter_repo.update(&updated_ch).await?;
-                        has_changes = true;
-                    }
-                    processed_chapter_ids.insert(ch.id.clone());
-                    continue;
                 }
+
+                let scanned_path = file_path.to_string_lossy().to_string();
+                if ch.path != scanned_path
+                    || duration_changed
+                    || (should_update && ch.manual_corrected == 0)
+                {
+                    let mut updated_ch = ch.clone();
+                    updated_ch.path = scanned_path;
+                    if let Some(duration) = json_duration {
+                        updated_ch.duration = Some(duration);
+                    }
+                    if ch.manual_corrected == 0 {
+                        updated_ch.chapter_index = new_idx;
+                        updated_ch.title = new_title;
+                        updated_ch.is_extra = new_is_extra;
+                    }
+                    self.chapter_repo.update(&updated_ch).await?;
+                    has_changes = true;
+                }
+                processed_chapter_ids.insert(ch.id.clone());
+                continue;
+            }
 
             // If we are here, either it's a new file OR it's modified.
 
@@ -362,17 +370,18 @@ impl LibraryScanner {
             // If we didn't find by Path, we check Hash to see if it's a move/rename.
 
             if existing_chapter.is_none()
-                && let Ok(Some(ch)) = self.chapter_repo.find_by_hash(&file_hash).await {
-                    // Found by hash (Rename/Move case)
-                    // But we are processing a specific book_id here.
-                    // If the found chapter belongs to another book, we might be stealing it?
-                    // Or it's a duplicate file (e.g. same intro file in multiple books).
-                    // If it's the same book, we treat it as the "existing chapter".
-                    if ch.book_id == book_id {
-                        existing_chapter = Some(ch);
-                    }
-                    // If different book, we create a new chapter record (duplicate content allowed across books)
+                && let Ok(Some(ch)) = self.chapter_repo.find_by_hash(&file_hash).await
+            {
+                // Found by hash (Rename/Move case)
+                // But we are processing a specific book_id here.
+                // If the found chapter belongs to another book, we might be stealing it?
+                // Or it's a duplicate file (e.g. same intro file in multiple books).
+                // If it's the same book, we treat it as the "existing chapter".
+                if ch.book_id == book_id {
+                    existing_chapter = Some(ch);
                 }
+                // If different book, we create a new chapter record (duplicate content allowed across books)
+            }
 
             // Extract metadata
             // If using JSON chapters, calculate duration from JSON (end - start)

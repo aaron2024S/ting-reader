@@ -11,7 +11,7 @@
   {
     "id": "string",
     "name": "string",
-    "library_type": "local | webdav",
+    "library_type": "local | webdav | rss",
     "url": "string",
     "username": "string | null",
     "root_path": "string",
@@ -33,9 +33,10 @@
 ```json
 {
   "name": "string",
-  "library_type": "local | webdav",
+  "library_type": "local | webdav | rss",
   "path": "string (本地库路径，可选；可为授权根内绝对路径或旧版 storage 相对路径)",
   "webdav_url": "string (WebDAV 地址，可选)",
+  "rss_feed_url": "string (RSS/Atom 订阅地址，RSS 库必填)",
   "webdav_username": "string (可选)",
   "webdav_password": "string (可选)",
   "description": "string (可选)",
@@ -57,6 +58,7 @@
   "tags_sources": ["string"],
   "nfo_writing_enabled": false,
   "metadata_writing_enabled": false,
+  "webdav_metadata_writing_enabled": false,
   "prefer_audio_title": false,
   "metadata_priority": ["string"],
   "extract_audio_cover": false,
@@ -70,6 +72,9 @@
 说明：
 
 - 创建成功后会自动提交一次媒体库扫描任务。
+- WebDAV 的 `webdav_metadata_writing_enabled` 控制是否将后续元数据编辑同步到网盘，默认关闭。开启后同步 `metadata.json`、`book.nfo` 和文件封面；封面 URL 保持引用，不上传图片，也不删除已有网盘封面。
+- WebDAV 扫描始终优先使用远端 `metadata.json`、`book.nfo`，并将已有文件和封面下载到服务器 `temp/<书籍路径的 SHA-256>/`。编辑时维护本地副本；手动锁定的元数据不会被后续扫描覆盖。初次扫描不会写入网盘。
+- RSS 库上传的封面也保存在 `temp/<哈希>/`，编辑元数据不生成 `metadata.json` 或 NFO。
 - 本地媒体库路径会在后端解析为真实绝对路径并保存；未在授权本地根目录内的绝对路径会被拒绝。
 - 旧版相对路径仍按 `storage.local_storage_root` 下的子路径解析，兼容已有库和旧客户端。
 - 如果启用 NFO 或 metadata 写入，目标目录必须可写；只扫描/播放的只读目录仍可作为媒体库。

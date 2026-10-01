@@ -28,6 +28,7 @@ const DEFAULT_SCRAPER_CONFIG = JSON.stringify({
   use_filename_as_title: true,
   nfo_writing_enabled: false,
   metadata_writing_enabled: false,
+  webdav_metadata_writing_enabled: false,
   disable_watcher: false,
   cloud_mode: false,
   scheduled_sync_enabled: false,
@@ -331,10 +332,6 @@ const AdminLibraries: React.FC = () => {
       } else if (formData.scraper_config) {
         try {
           const scraperConfig = JSON.parse(formData.scraper_config) as Record<string, unknown>;
-          if (formData.type === 'webdav') {
-            scraperConfig.nfo_writing_enabled = false;
-            scraperConfig.metadata_writing_enabled = false;
-          }
           payload.scraper_config = scraperConfig;
         } catch {
           alert(t('adminLibraries.jsonInvalid'));

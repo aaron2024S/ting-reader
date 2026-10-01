@@ -234,10 +234,12 @@ mod tests {
             fields.get("op").and_then(|v| v.as_str()),
             Some("books.search")
         );
-        assert!(fields
-            .get("plugin_fields")
-            .and_then(|v| v.as_str())
-            .is_some_and(|value| value.contains("\"answer\":42")));
+        assert!(
+            fields
+                .get("plugin_fields")
+                .and_then(|v| v.as_str())
+                .is_some_and(|value| value.contains("\"answer\":42"))
+        );
         let event_id = fields.get("event_id").and_then(|v| v.as_str()).unwrap();
         assert!(uuid::Uuid::parse_str(event_id).is_ok());
     }

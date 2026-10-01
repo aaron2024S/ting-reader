@@ -1,5 +1,5 @@
 use crate::core::error::{Result, TingError};
-use crate::core::time::{parse_time_zone, DEFAULT_TIME_ZONE};
+use crate::core::time::{DEFAULT_TIME_ZONE, parse_time_zone};
 use crate::db::manager::DatabaseManager;
 use rusqlite::OptionalExtension;
 use std::sync::Arc;
@@ -91,9 +91,11 @@ mod tests {
         let db = Arc::new(DatabaseManager::new_in_memory().unwrap());
         let repository = SystemSettingsRepository::new(db);
 
-        assert!(repository
-            .set_application_time_zone("not/a-time-zone")
-            .await
-            .is_err());
+        assert!(
+            repository
+                .set_application_time_zone("not/a-time-zone")
+                .await
+                .is_err()
+        );
     }
 }

@@ -1,12 +1,14 @@
 import React from 'react';
 import type { Book } from '../../core/types';
-import { Play } from 'lucide-react';
+import { Check, Play } from 'lucide-react';
 import { Link } from 'react-router';
 
 import { getCoverUrl } from '../../core/utils/image';
 import { toSolidColor, isLight, isTooLight } from '../../core/utils/color';
 import ExpandableTitle from '../widgets/ExpandableTitle';
 import { useTranslation } from 'react-i18next';
+import { useUiPreferencesStore } from '../../core/stores/uiPreferencesStore';
+import { coverProgressPercent } from '../../core/utils/playbackPreferences';
 
 interface BookCardProps {
   book: Book;
@@ -17,6 +19,8 @@ interface BookCardProps {
 
 const BookCard: React.FC<BookCardProps> = ({ book, onClick, disableLink, coverShape = 'square' }) => {
   const { t } = useTranslation();
+  const showProgress = useUiPreferencesStore((state) => state.bookshelfProgressEnabled);
+  const progress = coverProgressPercent(book.progress_percent);
   const effectiveThemeColor = book.theme_color && !isTooLight(book.theme_color) ? book.theme_color : undefined;
 
   const content = (
@@ -32,6 +36,15 @@ const BookCard: React.FC<BookCardProps> = ({ book, onClick, disableLink, coverSh
             (e.target as HTMLImageElement).src = 'https://placehold.co/300x400?text=No+Cover';
           }}
         />
+        {showProgress && (
+          <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10 pt-8" style={{ background: 'linear-gradient(to top, rgba(15,23,42,0.64), rgba(15,23,42,0.18) 55%, transparent)' }}>
+            <span className="flex items-center gap-1 px-2.5 pb-2 text-[10px] font-medium leading-none tabular-nums tracking-wide text-white/95 [text-shadow:0_1px_3px_rgba(0,0,0,0.35)]">
+              {progress === 100 && <Check size={11} strokeWidth={2} />}
+              {progress === 100 ? t('bookshelf.read') : progress === 0 ? t('bookshelf.unread') : `${progress}%`}
+            </span>
+            {progress > 0 && <div className="h-0.5 bg-white/15"><div className={`h-full ${progress === 100 ? 'bg-emerald-400/85' : 'bg-primary-400/90'}`} style={{ width: `${progress}%` }} /></div>}
+          </div>
+        )}
         <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
           <div 
             className={`w-10 h-10 rounded-full text-white flex items-center justify-center shadow-lg transform translate-y-4 group-hover:translate-y-0 transition-transform ${!effectiveThemeColor ? 'bg-primary-600' : ''}`}

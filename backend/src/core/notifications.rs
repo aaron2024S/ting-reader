@@ -4,7 +4,7 @@ use crate::db::repository::NotificationWebhookRepository;
 use crate::plugin::manager::PluginManager;
 use lazy_static::lazy_static;
 use regex::{Captures, Regex};
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue, CONTENT_TYPE};
+use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -177,24 +177,24 @@ pub fn dispatch_plugin_event_handlers(
     tokio::spawn(async move {
         let handlers = plugin_manager.find_event_handlers(Some(&event)).await;
         for handler in handlers {
-            let invoke_method = handler
-                .registration
-                .capability
-                .invoke
-                .clone()
-                .unwrap_or_else(|| handler.registration.capability.id.clone());
             let params = serde_json::json!({
                 "event": payload.event,
                 "title": payload.title,
                 "message": payload.message,
                 "data": payload.data,
                 "occurred_at": payload.occurred_at,
-                "capability_id": handler.registration.capability.id,
+                "capability_id": handler.registration.capability.id(),
                 "plugin_id": handler.registration.plugin_id,
             });
 
             if let Err(error) = plugin_manager
-                .invoke_plugin(&handler.registration.plugin_id, &invoke_method, params)
+                .invoke_capability(
+                    &handler.registration.plugin_id,
+                    handler.registration.capability.id(),
+                    "handle",
+                    params,
+                    &crate::plugin::types::PluginInvocationContext::default(),
+                )
                 .await
             {
                 tracing::warn!(
@@ -203,12 +203,12 @@ pub fn dispatch_plugin_event_handlers(
                     message_params = %serde_json::json!({
                         "event": event.as_str(),
                         "plugin_id": handler.registration.plugin_id.as_str(),
-                        "capability_id": handler.registration.capability.id.as_str(),
+                        "capability_id": handler.registration.capability.id(),
                         "error": error.to_string(),
                     }),
                     event = %event,
                     plugin_id = %handler.registration.plugin_id,
-                    capability_id = %handler.registration.capability.id,
+                    capability_id = %handler.registration.capability.id(),
                     error = %error,
                     "Plugin event handler failed"
                 );
@@ -467,9 +467,11 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(error
-            .to_string()
-            .contains("Unknown webhook template variable"));
+        assert!(
+            error
+                .to_string()
+                .contains("Unknown webhook template variable")
+        );
     }
 
     #[test]

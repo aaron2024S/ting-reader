@@ -32,7 +32,7 @@
     }
   },
   "timestamp": "RFC3339",
-  "version": "1.4.2"
+  "version": "2.0.0"
 }
 ```
 
@@ -68,6 +68,7 @@
     "total_libraries": 0,
     "local_libraries": 0,
     "webdav_libraries": 0,
+    "rss_libraries": 0,
     "total_users": 0,
     "admin_users": 0,
     "active_users": 0,
@@ -78,7 +79,7 @@
     {
       "id": "string",
       "name": "string",
-      "library_type": "local | webdav",
+      "library_type": "local | webdav | rss",
       "total_books": 0,
       "total_chapters": 0,
       "total_duration": 0,
@@ -211,8 +212,8 @@
   "plugins": {
     "plugin_dir": "string",
     "enable_hot_reload": false,
-    "max_memory_per_plugin": 52428800,
-    "max_execution_time": 30000
+    "max_memory_per_plugin": 536870912,
+    "max_execution_time": 300
   },
   "task_queue": {
     "max_concurrent_tasks": 2,
@@ -248,6 +249,7 @@
 
 说明：
 
+- `plugins.max_memory_per_plugin` 单位为字节，`plugins.max_execution_time` 单位为秒；两项均须大于 0。
 - `local_storage_root` 是旧版默认本地库根目录，仍用于兼容相对路径库和 Docker 默认 `/app/storage`。
 - `local_library_roots` 可额外配置多个允许作为本地媒体库的根目录；配置后需要重启服务生效。
 

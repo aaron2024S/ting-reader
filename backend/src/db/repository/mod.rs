@@ -6,6 +6,7 @@ pub mod library;
 pub mod notification;
 pub mod playlist;
 pub mod progress;
+pub mod reading;
 pub mod scan_state;
 pub mod series;
 pub mod system_settings;

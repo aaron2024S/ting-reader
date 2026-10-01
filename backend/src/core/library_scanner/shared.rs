@@ -463,11 +463,7 @@ fn parse_chinese_series_number(value: &str) -> Option<i32> {
     }
 
     let result = total + section + number;
-    if result > 0 {
-        Some(result)
-    } else {
-        None
-    }
+    if result > 0 { Some(result) } else { None }
 }
 
 pub(crate) fn parse_chapter_range_dir_name(name: &str) -> Option<ChapterRangeDir> {
@@ -886,7 +882,7 @@ pub(crate) fn apply_chapter_title_template(
 
 #[cfg(test)]
 mod inferred_series_tests {
-    use super::{infer_series_directories, SeriesDirectoryCandidate};
+    use super::{SeriesDirectoryCandidate, infer_series_directories};
 
     #[test]
     fn infers_series_from_sibling_volume_directories() {
@@ -971,9 +967,9 @@ mod inferred_series_tests {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_chapter_title_template, chapter_title_template_preserves_raw,
+        ChapterRangeDir, apply_chapter_title_template, chapter_title_template_preserves_raw,
         parse_chapter_range_dir_name, select_mergeable_range_group, select_mergeable_range_groups,
-        strip_likely_file_extension, ChapterRangeDir,
+        strip_likely_file_extension,
     };
 
     #[test]

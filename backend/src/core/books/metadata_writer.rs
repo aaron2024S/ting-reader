@@ -2,7 +2,7 @@ use crate::core::error::{Result, TingError};
 use crate::db::models::Chapter;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct AudiobookshelfChapter {
@@ -36,6 +36,8 @@ pub struct AudiobookshelfMetadata {
     pub explicit: bool,
     #[serde(default)]
     pub abridged: bool,
+    #[serde(default, flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -53,6 +55,36 @@ pub struct ExtendedMetadata {
 }
 
 impl AudiobookshelfMetadata {
+    pub fn update_book_fields(&mut self, book: &crate::db::models::Book) {
+        self.title = book.title.clone();
+        self.authors = book
+            .author
+            .clone()
+            .map(|value| vec![value])
+            .unwrap_or_default();
+        self.narrators = book
+            .narrator
+            .clone()
+            .map(|value| vec![value])
+            .unwrap_or_default();
+        self.description = book.description.clone();
+        let split_values = |value: Option<&str>| -> Vec<String> {
+            value
+                .unwrap_or_default()
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+                .collect()
+        };
+        self.tags = split_values(book.tags.as_deref());
+        self.genres = split_values(book.genre.as_deref());
+        self.published_year = book
+            .year
+            .map(|year| year.to_string())
+            .or(self.published_year.take());
+    }
+
     pub fn new(
         book: &crate::db::models::Book,
         chapters: Vec<AudiobookshelfChapter>,
@@ -95,6 +127,7 @@ impl AudiobookshelfMetadata {
             language: extended.language,
             explicit: extended.explicit,
             abridged: extended.abridged,
+            extra: Default::default(),
         }
     }
 }
@@ -162,6 +195,13 @@ pub fn build_audiobookshelf_chapters(mut chapters: Vec<Chapter>) -> Vec<Audioboo
 
 fn chapter_match_key(value: &str) -> String {
     value.trim().to_lowercase()
+}
+
+pub fn remote_metadata_dir(book_path: &str) -> Result<PathBuf> {
+    use sha2::{Digest, Sha256};
+
+    let hash = format!("{:x}", Sha256::digest(book_path.as_bytes()));
+    Ok(std::env::current_dir()?.join("temp").join(hash))
 }
 
 pub fn write_metadata_json(dir: &Path, metadata: &AudiobookshelfMetadata) -> Result<()> {

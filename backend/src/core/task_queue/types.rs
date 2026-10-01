@@ -94,7 +94,8 @@ pub enum TaskPayload {
     },
     PluginInvoke {
         plugin_id: String,
-        method: String,
+        capability_id: String,
+        operation: String,
         params: serde_json::Value,
     },
     Custom {

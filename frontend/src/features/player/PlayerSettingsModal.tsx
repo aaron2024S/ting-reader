@@ -7,6 +7,8 @@ interface Props {
   editSkipOutro: number;
   onChangeSkipIntro: (value: number) => void;
   onChangeSkipOutro: (value: number) => void;
+  volume: number;
+  onChangeVolume: (value: number) => void;
   onClose: () => void;
   onSave: () => void;
 }
@@ -16,6 +18,8 @@ const PlayerSettingsModal: React.FC<Props> = ({
   editSkipOutro,
   onChangeSkipIntro,
   onChangeSkipOutro,
+  volume,
+  onChangeVolume,
   onClose,
   onSave,
 }) => {
@@ -60,6 +64,11 @@ const PlayerSettingsModal: React.FC<Props> = ({
                 className="w-full px-4 py-3 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-2xl outline-none focus:ring-2 focus:ring-primary-500 dark:text-white"
                 placeholder={t('player.secondsExample', { seconds: 15 })}
               />
+            </div>
+
+            <div className="space-y-2">
+              <div className="flex items-center justify-between text-xs font-bold text-slate-500"><label>{t('player.volume')}</label><span className="tabular-nums">{Math.round(volume * 100)}%</span></div>
+              <input type="range" min="0" max="1" step="0.01" value={volume} onChange={(event) => onChangeVolume(Number(event.target.value))} className="w-full accent-primary-600" aria-label={t('player.volume')} />
             </div>
           </div>
 

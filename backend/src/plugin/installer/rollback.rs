@@ -76,8 +76,9 @@ impl InstallationBackup {
 impl Drop for InstallationBackup {
     fn drop(&mut self) {
         if !self.committed
-            && let Err(e) = self.rollback() {
-                error!("Failed to rollback installation: {}", e);
-            }
+            && let Err(e) = self.rollback()
+        {
+            error!("Failed to rollback installation: {}", e);
+        }
     }
 }

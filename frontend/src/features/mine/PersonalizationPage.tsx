@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import apiClient from "../../core/api/client";
+import { notifyPlaybackPreferences } from "../../core/utils/playbackPreferences";
 import {
   normalizeTheme,
   useTheme,
@@ -86,6 +87,7 @@ const PersonalizationPage: React.FC = () => {
   const setPluginToolMenuEnabled = useUiPreferencesStore(
     (state) => state.setPluginToolMenuEnabled,
   );
+  const setBookshelfProgressEnabled = useUiPreferencesStore((state) => state.setBookshelfProgressEnabled);
   const { applyTheme } = useTheme();
   const { language, setLanguage } = useAppLanguage();
   const [settings, setSettings] = useState<SettingsState>(defaultSettings);
@@ -114,6 +116,10 @@ const PersonalizationPage: React.FC = () => {
             data.plugin_tool_menu_enabled
             ?? data.settings_json?.plugin_tool_menu_enabled
             ?? true,
+          bookshelf_progress_enabled:
+            data.bookshelf_progress_enabled
+            ?? data.settings_json?.bookshelf_progress_enabled
+            ?? true,
           widget_css: data.widget_css ?? "",
           theme: normalizeTheme(data.theme),
           language: normalizeLanguage(
@@ -125,6 +131,7 @@ const PersonalizationPage: React.FC = () => {
         };
         setSettings(fetchedSettings);
         setPluginToolMenuEnabled(fetchedSettings.plugin_tool_menu_enabled);
+        setBookshelfProgressEnabled(fetchedSettings.bookshelf_progress_enabled !== false);
         applyTheme(fetchedSettings.theme);
         void setLanguage(fetchedSettings.language, false);
       } catch (err) {
@@ -186,8 +193,14 @@ const PersonalizationPage: React.FC = () => {
     const nextSettings = { ...settings, ...patch };
 
     try {
-      await apiClient.post("/api/settings", sanitizeSettings(nextSettings));
+      const response = await apiClient.post("/api/settings", sanitizeSettings(nextSettings));
       setSettings(nextSettings);
+      if (patch.auto_preload !== undefined || patch.auto_cache !== undefined) {
+        notifyPlaybackPreferences({
+          auto_preload: !!response.data.auto_preload,
+          auto_cache: !!response.data.auto_cache,
+        });
+      }
 
       if (typeof patch.playback_speed === "number") {
         setPlaybackSpeed(patch.playback_speed);
@@ -200,6 +213,9 @@ const PersonalizationPage: React.FC = () => {
       }
       if (typeof patch.plugin_tool_menu_enabled === "boolean") {
         setPluginToolMenuEnabled(patch.plugin_tool_menu_enabled);
+      }
+      if (typeof patch.bookshelf_progress_enabled === "boolean") {
+        setBookshelfProgressEnabled(patch.bookshelf_progress_enabled);
       }
 
       setSaved(true);
@@ -479,6 +495,12 @@ const PersonalizationPage: React.FC = () => {
             {t("settings.playback")}
           </h2>
           <div className="space-y-6">
+            <ToggleRow
+              title={t("settings.bookshelfProgress", "书架显示阅读进度")}
+              description={t("settings.bookshelfProgressDescription", "在封面上显示已读、未读或阅读百分比")}
+              checked={settings.bookshelf_progress_enabled !== false}
+              onChange={() => handleSaveSettings({ bookshelf_progress_enabled: settings.bookshelf_progress_enabled === false })}
+            />
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
               <div>
                 <p className="font-bold dark:text-white">
@@ -488,22 +510,21 @@ const PersonalizationPage: React.FC = () => {
                   {t("settings.playbackSpeedDescription")}
                 </p>
               </div>
-              <div className="flex bg-slate-100 dark:bg-slate-800 p-1 rounded-xl self-start sm:self-auto w-full sm:w-auto">
-                {[1.0, 1.25, 1.5, 2.0].map((speed) => (
-                  <button
-                    key={speed}
-                    onClick={() =>
-                      handleSaveSettings({ playback_speed: speed })
-                    }
-                    className={`flex-1 sm:flex-none px-2 md:px-4 py-2 text-sm font-bold rounded-lg transition-all ${
-                      settings.playback_speed === speed
-                        ? "bg-white dark:bg-slate-700 shadow-sm text-primary-600"
-                        : "text-slate-500"
-                    }`}
-                  >
-                    {speed}x
-                  </button>
-                ))}
+              <div className="w-full sm:w-64 flex items-center gap-3">
+                <input
+                  aria-label={t("settings.playbackSpeed")}
+                  type="range" min="0.5" max="3" step="0.1"
+                  value={settings.playback_speed}
+                  onChange={(event) => {
+                    const speed = Number(event.target.value);
+                    setSettings((current) => ({ ...current, playback_speed: speed }));
+                    setPlaybackSpeed(speed);
+                  }}
+                  onPointerUp={(event) => void handleSaveSettings({ playback_speed: Number(event.currentTarget.value) })}
+                  onKeyUp={(event) => void handleSaveSettings({ playback_speed: Number(event.currentTarget.value) })}
+                  className="min-w-0 flex-1 accent-primary-600"
+                />
+                <span className="w-12 text-right text-sm font-semibold tabular-nums text-slate-700 dark:text-slate-200">{settings.playback_speed.toFixed(1)}x</span>
               </div>
             </div>
 

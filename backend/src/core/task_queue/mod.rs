@@ -3,6 +3,7 @@
 //! This module provides an asynchronous task queue system with priority scheduling,
 //! task persistence, and automatic retry mechanisms.
 
+use crate::core::StorageService;
 use crate::core::audio_streamer::AudioStreamer;
 use crate::core::config::TaskQueueConfig;
 use crate::core::error::{Result, TingError};
@@ -10,7 +11,6 @@ use crate::core::merge_service::MergeService;
 use crate::core::nfo_manager::NfoManager;
 use crate::core::services::ScraperService;
 use crate::core::text_cleaner::TextCleaner;
-use crate::core::StorageService;
 use crate::db::manager::DatabaseManager;
 use crate::db::models::TaskRecord;
 use crate::db::repository::{
@@ -23,7 +23,7 @@ use std::collections::BinaryHeap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, RwLock, Semaphore};
+use tokio::sync::{RwLock, Semaphore, mpsc};
 use tokio::time::timeout;
 use tracing::{debug, error, info, warn};
 
@@ -321,11 +321,12 @@ impl TaskQueue {
                 if let Some(payload_str) = &t.payload
                     && let Ok(TaskPayload::Custom { data, .. }) =
                         serde_json::from_str::<TaskPayload>(payload_str)
-                        && let Some(lid) = data.get("library_id").and_then(|v| v.as_str())
-                            && lid == library_id {
-                                info!(task_id = %t.id, library_id = %library_id, "Cancelling queued library task");
-                                let _ = self.cancel(&t.id).await;
-                            }
+                    && let Some(lid) = data.get("library_id").and_then(|v| v.as_str())
+                    && lid == library_id
+                {
+                    info!(task_id = %t.id, library_id = %library_id, "Cancelling queued library task");
+                    let _ = self.cancel(&t.id).await;
+                }
             }
         }
 
@@ -335,24 +336,25 @@ impl TaskQueue {
                 if let Some(payload_str) = &t.payload
                     && let Ok(TaskPayload::Custom { data, .. }) =
                         serde_json::from_str::<TaskPayload>(payload_str)
-                        && let Some(lid) = data.get("library_id").and_then(|v| v.as_str())
-                            && lid == library_id {
-                                info!(task_id = %t.id, library_id = %library_id, "Marking running library task as cancelled");
+                    && let Some(lid) = data.get("library_id").and_then(|v| v.as_str())
+                    && lid == library_id
+                {
+                    info!(task_id = %t.id, library_id = %library_id, "Marking running library task as cancelled");
 
-                                // Manually update status
-                                if let Err(e) = self
-                                    .task_repo
-                                    .update_status(
-                                        &t.id,
-                                        TaskStatus::Cancelled.as_str(),
-                                        Some("Cancelled due to library deletion"),
-                                        t.retries,
-                                    )
-                                    .await
-                                {
-                                    error!(task_id = %t.id, error = %e, "Failed to mark running task as cancelled");
-                                }
-                            }
+                    // Manually update status
+                    if let Err(e) = self
+                        .task_repo
+                        .update_status(
+                            &t.id,
+                            TaskStatus::Cancelled.as_str(),
+                            Some("Cancelled due to library deletion"),
+                            t.retries,
+                        )
+                        .await
+                    {
+                        error!(task_id = %t.id, error = %e, "Failed to mark running task as cancelled");
+                    }
+                }
             }
         }
 
@@ -395,60 +397,61 @@ impl TaskQueue {
             ref task_type,
             ref data,
         } = task.payload
-            && task_type == "library_scan" {
-                // Set a very long timeout for library scans (24 hours) to avoid timeouts on large libraries
-                task.timeout = Duration::from_secs(86400);
+            && task_type == "library_scan"
+        {
+            // Set a very long timeout for library scans (24 hours) to avoid timeouts on large libraries
+            task.timeout = Duration::from_secs(86400);
 
-                if let Some(library_id) = data.get("library_id").and_then(|v| v.as_str()) {
-                    let library_id = library_id.to_string();
-                    info!(library_id = %library_id, "Checking for existing library scan tasks");
+            if let Some(library_id) = data.get("library_id").and_then(|v| v.as_str()) {
+                let library_id = library_id.to_string();
+                info!(library_id = %library_id, "Checking for existing library scan tasks");
 
-                    // 1. Cancel queued tasks for this library
-                    if let Ok(queued_tasks) = self.task_repo.find_by_status("queued").await {
-                        for t in queued_tasks {
-                            if t.task_type == "library_scan"
-                                && let Some(payload_str) = &t.payload
-                                    && let Ok(TaskPayload::Custom { data: t_data, .. }) =
-                                        serde_json::from_str::<TaskPayload>(payload_str)
-                                        && let Some(lid) =
-                                            t_data.get("library_id").and_then(|v| v.as_str())
-                                            && lid == library_id {
-                                                info!(task_id = %t.id, library_id = %library_id, "Cancelling duplicate queued library scan");
-                                                let _ = self.cancel(&t.id).await;
-                                            }
+                // 1. Cancel queued tasks for this library
+                if let Ok(queued_tasks) = self.task_repo.find_by_status("queued").await {
+                    for t in queued_tasks {
+                        if t.task_type == "library_scan"
+                            && let Some(payload_str) = &t.payload
+                            && let Ok(TaskPayload::Custom { data: t_data, .. }) =
+                                serde_json::from_str::<TaskPayload>(payload_str)
+                            && let Some(lid) = t_data.get("library_id").and_then(|v| v.as_str())
+                            && lid == library_id
+                        {
+                            info!(task_id = %t.id, library_id = %library_id, "Cancelling duplicate queued library scan");
+                            let _ = self.cancel(&t.id).await;
                         }
                     }
+                }
 
-                    // 2. Mark running tasks as cancelled (best effort since we can't kill the thread easily)
-                    if let Ok(running_tasks) = self.task_repo.find_by_status("running").await {
-                        for t in running_tasks {
-                            if t.task_type == "library_scan"
-                                && let Some(payload_str) = &t.payload
-                                    && let Ok(TaskPayload::Custom { data: t_data, .. }) =
-                                        serde_json::from_str::<TaskPayload>(payload_str)
-                                        && let Some(lid) =
-                                            t_data.get("library_id").and_then(|v| v.as_str())
-                                            && lid == library_id {
-                                                info!(task_id = %t.id, library_id = %library_id, "Marking running library scan as cancelled");
+                // 2. Mark running tasks as cancelled (best effort since we can't kill the thread easily)
+                if let Ok(running_tasks) = self.task_repo.find_by_status("running").await {
+                    for t in running_tasks {
+                        if t.task_type == "library_scan"
+                            && let Some(payload_str) = &t.payload
+                            && let Ok(TaskPayload::Custom { data: t_data, .. }) =
+                                serde_json::from_str::<TaskPayload>(payload_str)
+                            && let Some(lid) = t_data.get("library_id").and_then(|v| v.as_str())
+                            && lid == library_id
+                        {
+                            info!(task_id = %t.id, library_id = %library_id, "Marking running library scan as cancelled");
 
-                                                // Manually update status since cancel() forbids running tasks
-                                                if let Err(e) = self
-                                                    .task_repo
-                                                    .update_status(
-                                                        &t.id,
-                                                        TaskStatus::Cancelled.as_str(),
-                                                        Some("Cancelled by new task"),
-                                                        t.retries,
-                                                    )
-                                                    .await
-                                                {
-                                                    error!(task_id = %t.id, error = %e, "Failed to mark running task as cancelled");
-                                                }
-                                            }
+                            // Manually update status since cancel() forbids running tasks
+                            if let Err(e) = self
+                                .task_repo
+                                .update_status(
+                                    &t.id,
+                                    TaskStatus::Cancelled.as_str(),
+                                    Some("Cancelled by new task"),
+                                    t.retries,
+                                )
+                                .await
+                            {
+                                error!(task_id = %t.id, error = %e, "Failed to mark running task as cancelled");
+                            }
                         }
                     }
                 }
             }
+        }
 
         // Set default retry policy if not set
         if task.retry_policy.max_retries == 0 {
@@ -563,6 +566,34 @@ impl TaskQueue {
             .find_by_id(task_id)
             .await?
             .ok_or_else(|| TingError::NotFound(format!("Task not found: {}", task_id)))
+    }
+
+    /// Update task progress from a Host call without exposing the repository.
+    pub async fn report_progress(
+        &self,
+        task_id: &str,
+        message: Option<&str>,
+        message_key: Option<&str>,
+        message_params: Option<serde_json::Value>,
+    ) -> Result<()> {
+        match (message, message_key) {
+            (Some(message), None) => self.task_repo.update_progress(task_id, message).await,
+            (None, Some(message_key)) => {
+                self.task_repo
+                    .update_progress_key(
+                        task_id,
+                        message_key,
+                        message_params.unwrap_or_else(|| serde_json::json!({})),
+                    )
+                    .await
+            }
+            (Some(_), Some(_)) => Err(TingError::InvalidRequest(
+                "Choose message or message_key, not both".into(),
+            )),
+            (None, None) => Err(TingError::InvalidRequest(
+                "Task progress requires message or message_key".into(),
+            )),
+        }
     }
 
     /// Delete a task

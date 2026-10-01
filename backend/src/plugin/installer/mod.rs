@@ -75,6 +75,7 @@ impl PluginInstaller {
 
         // Step 1: Validate plugin package (Requirement 26.2)
         let package = self.validate_package(package_path)?;
+        super::manager::PluginManager::validate_core_compatibility(&package.metadata)?;
         debug!(
             "Plugin package validated: {} v{}",
             package.metadata.name, package.metadata.version
@@ -152,12 +153,19 @@ impl PluginInstaller {
         let checksum = self.calculate_checksum(package_path)?;
         debug!("Calculated checksum: {}", checksum);
 
-        // TODO: Verify signature if present
+        // The installer can also be called by preinstall and store flows, so
+        // signature validation belongs here as well as in the HTTP confirmation
+        // step. An unknown but valid publisher may be authorized by the caller.
+        let signature = if package_path.is_dir() {
+            None
+        } else {
+            Some(tr_package::read_package_signature_identity(package_path)?.label())
+        };
 
         Ok(PluginPackage {
             metadata,
             checksum,
-            signature: None,
+            signature,
         })
     }
 

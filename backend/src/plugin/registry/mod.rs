@@ -56,7 +56,7 @@ impl PluginRegistry {
         instance: Arc<dyn Plugin>,
     ) -> Result<PluginId> {
         // Generate plugin ID from name and version
-        let plugin_id = format!("{}@{}", metadata.name, metadata.version);
+        let plugin_id = metadata.instance_id();
 
         // Check if plugin already exists
         if self.plugins.contains_key(&plugin_id) {
@@ -103,14 +103,15 @@ impl PluginRegistry {
 
         // Check if other plugins depend on this one
         if let Some(dependents) = self.dependents.get(id)
-            && !dependents.is_empty() {
-                return Err(TingError::DependencyError(format!(
-                    "Cannot unregister plugin {}: {} plugin(s) depend on it: {:?}",
-                    id,
-                    dependents.len(),
-                    dependents
-                )));
-            }
+            && !dependents.is_empty()
+        {
+            return Err(TingError::DependencyError(format!(
+                "Cannot unregister plugin {}: {} plugin(s) depend on it: {:?}",
+                id,
+                dependents.len(),
+                dependents
+            )));
+        }
 
         // Remove from registry
         self.plugins.remove(id);
@@ -151,17 +152,23 @@ impl PluginRegistry {
         self.plugins.values().collect()
     }
 
-    /// Find plugins by type
+    /// Find plugins by explicitly declared capability.
     ///
     /// # Arguments
-    /// * `plugin_type` - Type of plugins to find
+    /// * `kind` - Capability kind to find
     ///
     /// # Returns
-    /// Vector of plugin entries matching the type
-    pub fn find_by_type(&self, plugin_type: super::types::PluginType) -> Vec<&PluginEntry> {
+    /// Vector of plugin entries declaring the capability
+    pub fn find_by_capability_kind(&self, kind: &str) -> Vec<&PluginEntry> {
         self.plugins
             .values()
-            .filter(|entry| entry.metadata.plugin_type == plugin_type)
+            .filter(|entry| {
+                entry
+                    .metadata
+                    .capabilities
+                    .iter()
+                    .any(|cap| cap.kind() == kind)
+            })
             .collect()
     }
 

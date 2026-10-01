@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams, useNavigate } from 'react-router';
 import { useTranslation } from 'react-i18next';
 import apiClient from '../../core/api/client';
@@ -6,13 +6,14 @@ import type { Book, Series } from '../../core/types';
 import BookCard from '../../shared/cards/BookCard';
 import BookSelector from '../../shared/modals/BookSelector';
 import DisplaySettingsMenu from '../../shared/widgets/DisplaySettingsMenu';
-import { ArrowLeft, Trash2, Save, Settings, X, Plus } from 'lucide-react';
+import { ArrowLeft, Trash2, Save, Settings, X, Plus, Check, CheckSquare, Layers, ChevronDown, BookCheck, BookX } from 'lucide-react';
 import { getCoverUrl } from '../../core/utils/image';
 import { localeCompare } from '../../core/utils/locale';
 import { usePlayerStore } from '../../core/stores/playerStore';
 import { useAuthStore } from '../../core/stores/authStore';
 import { getCoverAspectClass, useBookshelfCoverShape } from '../../core/hooks/useBookshelfCoverShape';
 import DeleteSeriesModal from './bookDetail/DeleteSeriesModal';
+import DeleteBookModal from './bookDetail/DeleteBookModal';
 
 type SeriesSortBy = 'default' | 'title' | 'author';
 
@@ -31,6 +32,15 @@ const SeriesDetailPage: React.FC = () => {
   const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [isSelectionMode, setIsSelectionMode] = useState(false);
+  const [selectedBookIds, setSelectedBookIds] = useState<string[]>([]);
+  const [isOperationsOpen, setIsOperationsOpen] = useState(false);
+  const [batchBusy, setBatchBusy] = useState(false);
+  const [confirmation, setConfirmation] = useState<'unread' | 'delete' | null>(null);
+  const [deleteSourceFiles, setDeleteSourceFiles] = useState(false);
+  const operationsRef = useRef<HTMLDivElement>(null);
+  const requestVersion = useRef(0);
+  const pageVersion = useRef(0);
   const { setIsSeriesEditing } = usePlayerStore();
   
   // Filter & Sort state
@@ -45,11 +55,15 @@ const SeriesDetailPage: React.FC = () => {
   const [description, setDescription] = useState('');
   const [coverUrl, setCoverUrl] = useState('');
 
-  const fetchSeries = async () => {
+  const fetchSeries = useCallback(async () => {
+    const version = ++requestVersion.current;
     try {
       const res = await apiClient.get(`/api/v1/series/${id}`);
+      if (version !== requestVersion.current) return;
       setSeries(res.data);
       setBooks(res.data.books || []);
+      const availableIds = new Set<string>((res.data.books || []).map((book: Book) => book.id));
+      setSelectedBookIds((current) => current.filter((bookId) => availableIds.has(bookId)));
       setTitle(res.data.title);
       setAuthor(res.data.author || '');
       setNarrator(res.data.narrator || '');
@@ -58,9 +72,14 @@ const SeriesDetailPage: React.FC = () => {
     } catch (err) {
       console.error('Failed to fetch series', err);
     } finally {
-      setLoading(false);
+      if (version === requestVersion.current) setLoading(false);
     }
-  };
+  }, [id]);
+
+  const invalidatePage = useCallback(() => {
+    requestVersion.current++;
+    pageVersion.current++;
+  }, []);
 
   useEffect(() => {
     const loadSettings = async () => {
@@ -79,10 +98,42 @@ const SeriesDetailPage: React.FC = () => {
       }
     };
     loadSettings();
-    const timer = window.setTimeout(() => void fetchSeries(), 0);
-    return () => window.clearTimeout(timer);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id]);
+    const timer = window.setTimeout(() => {
+      setLoading(true);
+      setSeries(null);
+      setIsEditing(false);
+      setIsSelectionMode(false);
+      setSelectedBookIds([]);
+      setIsOperationsOpen(false);
+      setConfirmation(null);
+      setDeleteSourceFiles(false);
+      setBatchBusy(false);
+      void fetchSeries();
+    }, 0);
+    return () => {
+      window.clearTimeout(timer);
+      invalidatePage();
+    };
+  }, [fetchSeries, invalidatePage]);
+
+  useEffect(() => {
+    if (!isOperationsOpen && !confirmation) return;
+    const handleClick = (event: MouseEvent) => {
+      if (!operationsRef.current?.contains(event.target as Node)) setIsOperationsOpen(false);
+    };
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setIsOperationsOpen(false);
+        if (!batchBusy) setConfirmation(null);
+      }
+    };
+    document.addEventListener('click', handleClick);
+    document.addEventListener('keydown', handleKey);
+    return () => {
+      document.removeEventListener('click', handleClick);
+      document.removeEventListener('keydown', handleKey);
+    };
+  }, [isOperationsOpen, confirmation, batchBusy]);
 
   // Control player visibility based on editing state
   useEffect(() => {
@@ -170,26 +221,155 @@ const SeriesDetailPage: React.FC = () => {
     setBooks(updatedBooks);
   };
 
+  const exitSelectionMode = () => {
+    if (batchBusy) return;
+    setIsSelectionMode(false);
+    setSelectedBookIds([]);
+    setIsOperationsOpen(false);
+  };
+
+  const toggleBookSelection = (bookId: string) => {
+    if (batchBusy || confirmation) return;
+    setSelectedBookIds((current) => current.includes(bookId)
+      ? current.filter((item) => item !== bookId) : [...current, bookId]);
+  };
+
+  const handleBatchAction = async (action: 'read' | 'unread' | 'delete') => {
+    if (batchBusy || !selectedBookIds.length || (action === 'delete' && !isAdmin)) return;
+    const version = pageVersion.current;
+    const ids = [...selectedBookIds];
+    setBatchBusy(true);
+    setIsOperationsOpen(false);
+    try {
+      if (action === 'delete') {
+        const results = await Promise.allSettled(ids.map((bookId) =>
+          apiClient.delete(`/api/books/${bookId}?delete_files=${deleteSourceFiles}`)));
+        const failure = results.find((result) => result.status === 'rejected');
+        if (failure?.status === 'rejected') throw failure.reason;
+      } else {
+        for (let offset = 0; offset < ids.length; offset += 200) {
+          await apiClient.post('/api/books/read-status', {
+            book_ids: ids.slice(offset, offset + 200),
+            read: action === 'read',
+          });
+        }
+      }
+      if (version !== pageVersion.current) return;
+      setConfirmation(null);
+      setSelectedBookIds([]);
+      if (action === 'delete') setIsSelectionMode(false);
+      await fetchSeries();
+    } catch (error) {
+      console.error('Failed to update selected series books', error);
+      if (version === pageVersion.current) {
+        alert(t(action === 'delete' ? 'bookshelf.deleteBookFailed' : 'common.saveFailed'));
+        setConfirmation(null);
+        // Refresh any batches that completed before a later batch failed.
+        await fetchSeries();
+      }
+    } finally {
+      if (version === pageVersion.current) setBatchBusy(false);
+    }
+  };
+
+  const cancelEditing = () => {
+    setIsEditing(false);
+    void fetchSeries();
+  };
+
+  const selectedBooks = books.filter((book) => selectedBookIds.includes(book.id));
+  const bookForDeletion: Book | null = selectedBooks.length > 1 ? {
+    ...selectedBooks[0],
+    id: 'bulk',
+    title: selectedBooks.length.toString(),
+    library_type: selectedBooks.some((book) => book.library_type === 'local')
+      ? 'local' : selectedBooks[0].library_type,
+  } : selectedBooks[0] || null;
+
   if (loading) return <div className="p-8 text-center">{t('common.loading')}</div>;
   if (!series) return <div className="p-8 text-center">{t('bookshelf.seriesNotFound')}</div>;
 
   return (
     <div className="flex-1 p-4 sm:p-6 md:p-8 space-y-8">
       {/* Header */}
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-4">
+      <div className="flex flex-col min-[880px]:flex-row min-[880px]:items-center justify-between gap-4">
+        <div className="flex items-center gap-4 min-w-0">
           <button 
-            onClick={() => isEditing ? setIsEditing(false) : navigate(-1)} 
-            className="p-2 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-full"
+            onClick={() => isEditing ? cancelEditing() : navigate(-1)}
+            className="p-2 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-full shrink-0"
+            title={t('common.back')}
           >
             <ArrowLeft size={24} />
           </button>
-          <h1 className="text-2xl font-bold dark:text-white">
+          <h1 className="text-2xl font-bold dark:text-white truncate">
             {isEditing ? t('bookshelf.manageSeries') : series.title}
           </h1>
         </div>
         {!isEditing && (
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            {isSelectionMode ? (
+              <>
+                <span className="text-sm font-medium text-slate-600 dark:text-slate-400 whitespace-nowrap">
+                  {t('bookshelf.selectedCount', { count: selectedBookIds.length })}
+                </span>
+                <button
+                  onClick={() => setSelectedBookIds(selectedBookIds.length === books.length ? [] : books.map((book) => book.id))}
+                  disabled={batchBusy}
+                  title={t('bookshelf.selectAllCurrent')}
+                  className="flex items-center gap-2 px-3 py-2 bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 rounded-xl text-sm font-bold hover:bg-slate-200 dark:hover:bg-slate-700 disabled:opacity-50"
+                >
+                  <CheckSquare size={18} /> {t('bookshelf.selectAll')}
+                </button>
+                <div ref={operationsRef} className="relative">
+                  <button
+                    onClick={() => setIsOperationsOpen(!isOperationsOpen)}
+                    aria-haspopup="menu"
+                    aria-expanded={isOperationsOpen}
+                    disabled={batchBusy}
+                    className="flex items-center gap-2 px-3 sm:px-4 py-2 bg-primary-600 hover:bg-primary-700 text-white rounded-xl text-sm font-bold shadow-lg shadow-primary-500/30 disabled:opacity-50"
+                  >
+                    {t('bookshelf.batchOperations')} <ChevronDown size={14} />
+                  </button>
+                  {isOperationsOpen && (
+                    <div role="menu" className="absolute right-0 top-full mt-2 w-60 max-w-[calc(100vw-2rem)] bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-2xl z-50 p-1.5">
+                      {!selectedBookIds.length ? (
+                        <p className="px-4 py-3 text-xs text-center text-slate-400">{t('bookshelf.selectBooksFirst')}</p>
+                      ) : (
+                        <>
+                          <button role="menuitem" onClick={() => void handleBatchAction('read')} className="w-full flex items-center gap-2 px-4 py-2.5 text-left text-sm font-semibold rounded-xl text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800">
+                            <BookCheck size={16} /> {t('bookshelf.markRead')}
+                          </button>
+                          <button role="menuitem" onClick={() => { setIsOperationsOpen(false); setConfirmation('unread'); }} className="w-full flex items-center gap-2 px-4 py-2.5 text-left text-sm font-semibold rounded-xl text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800">
+                            <BookX size={16} /> {t('bookshelf.markUnread')}
+                          </button>
+                          {isAdmin && (
+                            <>
+                              <div className="mx-3 my-1 border-t border-slate-100 dark:border-slate-800" />
+                              <button role="menuitem" onClick={() => { setIsOperationsOpen(false); setDeleteSourceFiles(false); setConfirmation('delete'); }} className="w-full flex items-center gap-2 px-4 py-2.5 text-left text-sm font-semibold rounded-xl text-red-600 hover:bg-red-50 dark:hover:bg-red-950/20">
+                                <Trash2 size={16} /> {t('common.delete')}
+                              </button>
+                            </>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  )}
+                </div>
+                <button onClick={exitSelectionMode} disabled={batchBusy} title={t('common.cancel')} className="p-2.5 bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 rounded-xl disabled:opacity-50">
+                  <X size={20} />
+                </button>
+              </>
+            ) : (
+              <button
+                onClick={() => { setShowFilterMenu(false); setIsSelectionMode(true); }}
+                className="flex items-center gap-2 px-3 sm:px-4 py-2.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800 text-sm font-medium"
+              >
+                <Layers size={18} />
+                <span className="sm:hidden">{t('bookshelf.select')}</span>
+                <span className="hidden sm:inline">{t('bookshelf.selectionMode')}</span>
+              </button>
+            )}
+            {!isSelectionMode && <>
             <DisplaySettingsMenu
               open={showFilterMenu}
               onOpenChange={setShowFilterMenu}
@@ -221,11 +401,13 @@ const SeriesDetailPage: React.FC = () => {
             {isAdmin && (
               <button
                 onClick={() => setIsEditing(true)}
+                title={t('bookshelf.manageSeries')}
                 className="p-2.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors"
               >
                 <Settings size={20} />
               </button>
             )}
+            </>}
           </div>
         )}
       </div>
@@ -278,7 +460,7 @@ const SeriesDetailPage: React.FC = () => {
                 <button disabled={saving} onClick={handleUpdate} className="flex-1 bg-primary-600 text-white py-2 rounded flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed">
                   <Save size={18} /> {t('common.save')}
                 </button>
-                <button disabled={saving} onClick={() => setIsEditing(false)} className="flex-1 bg-slate-200 dark:bg-slate-700 py-2 rounded disabled:opacity-50">
+                <button disabled={saving} onClick={cancelEditing} className="flex-1 bg-slate-200 dark:bg-slate-700 py-2 rounded disabled:opacity-50">
                   {t('common.cancel')}
                 </button>
               </div>
@@ -360,7 +542,16 @@ const SeriesDetailPage: React.FC = () => {
                 {books.length > 0 ? (
                     <div className={`grid ${getGridCols()}`}>
                         {getSortedBooks().map((book) => (
-                            <BookCard key={book.id} book={book} coverShape={coverShape} />
+                            <div key={book.id} className="relative">
+                              {isSelectionMode && (
+                                <div className={`absolute top-2 right-2 z-30 w-6 h-6 rounded-full border-2 flex items-center justify-center pointer-events-none ${selectedBookIds.includes(book.id) ? 'bg-primary-600 border-primary-600 text-white' : 'bg-white/80 border-slate-300 dark:bg-slate-900/80 dark:border-slate-600'}`}>
+                                  {selectedBookIds.includes(book.id) && <Check size={14} strokeWidth={3} />}
+                                </div>
+                              )}
+                              <div className={isSelectionMode && !selectedBookIds.includes(book.id) ? 'opacity-60 grayscale-[0.5]' : ''}>
+                                <BookCard book={book} coverShape={coverShape} disableLink={isSelectionMode} onClick={isSelectionMode ? () => toggleBookSelection(book.id) : undefined} />
+                              </div>
+                            </div>
                         ))}
                     </div>
                 ) : (
@@ -372,6 +563,33 @@ const SeriesDetailPage: React.FC = () => {
         </div>
       )}
       
+      {confirmation === 'unread' && (
+        <div className="fixed inset-0 z-[400] flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm" onMouseDown={(event) => { if (event.target === event.currentTarget && !batchBusy) setConfirmation(null); }}>
+          <section role="dialog" aria-modal="true" aria-labelledby="series-batch-title" aria-describedby="series-batch-description" className="w-full max-w-md rounded-3xl border border-slate-100 bg-white p-6 shadow-xl dark:border-slate-800 dark:bg-slate-900">
+            <div className="mb-4 flex h-11 w-11 items-center justify-center rounded-2xl bg-primary-50 text-primary-600 dark:bg-primary-950/50 dark:text-primary-400">
+              <BookX size={22} />
+            </div>
+            <h2 id="series-batch-title" className="text-lg font-bold text-slate-900 dark:text-white">{t('bookshelf.confirmUnreadTitle')}</h2>
+            <p id="series-batch-description" className="mt-2 text-sm leading-relaxed text-slate-500 dark:text-slate-400">{t('bookshelf.confirmUnreadMessage', { count: selectedBookIds.length })}</p>
+            <div className="mt-6 flex justify-end gap-3">
+              <button autoFocus onClick={() => setConfirmation(null)} disabled={batchBusy} className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-medium text-slate-600 disabled:opacity-50 dark:border-slate-700 dark:text-slate-300">{t('common.cancel')}</button>
+              <button onClick={() => void handleBatchAction('unread')} disabled={batchBusy} className="rounded-xl bg-primary-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-primary-700 disabled:opacity-50">{batchBusy ? t('common.loading') : t('bookshelf.markUnread')}</button>
+            </div>
+          </section>
+        </div>
+      )}
+
+      {confirmation === 'delete' && bookForDeletion && (
+        <DeleteBookModal
+          book={bookForDeletion}
+          deleting={batchBusy}
+          deleteSourceFiles={deleteSourceFiles}
+          onToggleDeleteSourceFiles={() => { if (!batchBusy) setDeleteSourceFiles(!deleteSourceFiles); }}
+          onClose={() => { if (!batchBusy) setConfirmation(null); }}
+          onConfirm={() => void handleBatchAction('delete')}
+        />
+      )}
+
       {showBookSelector && (
         <BookSelector
           excludeIds={books.map(b => b.id)}

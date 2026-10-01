@@ -7,9 +7,9 @@
 //! - Detailed error messages with trace IDs
 
 use axum::{
+    Json,
     http::StatusCode,
     response::{IntoResponse, Response},
-    Json,
 };
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -381,18 +381,18 @@ impl IntoResponse for TingError {
                 if let TingError::DatabaseError(rusqlite::Error::SqliteFailure(err, _)) = self
                     && (err.code == rusqlite::ErrorCode::DatabaseBusy
                         || err.code == rusqlite::ErrorCode::DatabaseLocked)
-                    {
-                        tracing::warn!(
-                            error_type = self.error_type(),
-                            error = %error_message,
-                            trace_id = %error_response.trace_id,
-                            status_code = %status_code,
-                            message_key = "http.error.database_busy",
-                            message_params = %log_params,
-                            "Database busy"
-                        );
-                        return (status_code, Json(error_response)).into_response();
-                    }
+                {
+                    tracing::warn!(
+                        error_type = self.error_type(),
+                        error = %error_message,
+                        trace_id = %error_response.trace_id,
+                        status_code = %status_code,
+                        message_key = "http.error.database_busy",
+                        message_params = %log_params,
+                        "Database busy"
+                    );
+                    return (status_code, Json(error_response)).into_response();
+                }
 
                 tracing::error!(
                     error_type = self.error_type(),

@@ -38,10 +38,10 @@ impl Sandbox {
         // Extract allowed paths and domains from permissions
         for permission in &permissions {
             match permission {
-                Permission::FileRead(path) | Permission::FileWrite(path) => {
-                    allowed_paths.push(path.clone());
+                Permission::FileRead { path } | Permission::FileWrite { path } => {
+                    allowed_paths.push(PathBuf::from(path));
                 }
-                Permission::NetworkAccess(domain) => {
+                Permission::NetworkAccess { domain } => {
                     allowed_domains.push(domain.clone());
                 }
                 _ => {}
@@ -77,14 +77,14 @@ impl Sandbox {
         // Check if the specific access type is permitted
         let has_permission = match access {
             FileAccess::Read => self.permissions.iter().any(|p| {
-                matches!(p, Permission::FileRead(allowed) if {
-                    let normalized_allowed = Self::normalize_path(allowed);
+                matches!(p, Permission::FileRead { path: allowed } if {
+                    let normalized_allowed = Self::normalize_path(std::path::Path::new(allowed));
                     normalized_path.starts_with(&normalized_allowed)
                 })
             }),
             FileAccess::Write => self.permissions.iter().any(|p| {
-                matches!(p, Permission::FileWrite(allowed) if {
-                    let normalized_allowed = Self::normalize_path(allowed);
+                matches!(p, Permission::FileWrite { path: allowed } if {
+                    let normalized_allowed = Self::normalize_path(std::path::Path::new(allowed));
                     normalized_path.starts_with(&normalized_allowed)
                 })
             }),
@@ -140,9 +140,10 @@ impl Sandbox {
                 Component::ParentDir => {
                     // Handle ".." by popping the last component if it's not a root
                     if let Some(last) = components.last()
-                        && !matches!(last, Component::RootDir | Component::Prefix(_)) {
-                            components.pop();
-                        }
+                        && !matches!(last, Component::RootDir | Component::Prefix(_))
+                    {
+                        components.pop();
+                    }
                 }
                 Component::Normal(_) => {
                     components.push(component);
@@ -236,133 +237,7 @@ impl Sandbox {
 /// Permission types for plugin access control
 ///
 /// Defines what resources a plugin is allowed to access.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "type", content = "value")]
-pub enum Permission {
-    /// Read access to a file or directory
-    #[serde(rename = "file_read")]
-    FileRead(PathBuf),
-
-    /// Write access to a file or directory
-    #[serde(rename = "file_write")]
-    FileWrite(PathBuf),
-
-    /// Network access to a domain or URL pattern
-    ///
-    /// Supports wildcards: "*.example.com" matches all subdomains
-    #[serde(rename = "network_access")]
-    NetworkAccess(String),
-
-    /// Read access to the database
-    #[serde(rename = "database_read")]
-    DatabaseRead,
-
-    /// Write access to the database
-    #[serde(rename = "database_write")]
-    DatabaseWrite,
-
-    /// Read book metadata through HostGateway
-    #[serde(rename = "books_read")]
-    BooksRead,
-
-    /// Read chapter metadata through HostGateway
-    #[serde(rename = "chapters_read")]
-    ChaptersRead,
-
-    /// Read playback progress through HostGateway
-    #[serde(rename = "progress_read")]
-    ProgressRead,
-
-    /// Read media bytes through HostGateway
-    #[serde(rename = "media_read")]
-    MediaRead,
-
-    /// Get controlled media URLs through HostGateway
-    #[serde(rename = "media_read_url")]
-    MediaReadUrl,
-
-    /// Sign this plugin's public HTTP routes through HostGateway
-    #[serde(rename = "plugin_route_sign")]
-    PluginRouteSign,
-
-    /// Write metadata through HostGateway
-    #[serde(rename = "metadata_write")]
-    MetadataWrite,
-
-    /// Create background tasks through HostGateway
-    #[serde(rename = "task_create")]
-    TaskCreate,
-
-    /// Read plugin cache through HostGateway
-    #[serde(rename = "cache_read")]
-    CacheRead,
-
-    /// Write plugin cache through HostGateway
-    #[serde(rename = "cache_write")]
-    CacheWrite,
-
-    /// Permission to publish events
-    #[serde(rename = "event_publish")]
-    EventPublish,
-
-    /// Permission to subscribe to specific event types
-    #[serde(rename = "event_subscribe")]
-    EventSubscribe(String),
-
-    /// Read the current user's playlists through HostGateway
-    #[serde(rename = "playlists_read")]
-    PlaylistsRead,
-
-    /// Write the current user's playlists through HostGateway
-    #[serde(rename = "playlists_write")]
-    PlaylistsWrite,
-
-    /// Read the current user's favorites through HostGateway
-    #[serde(rename = "favorites_read")]
-    FavoritesRead,
-
-    /// Write the current user's favorites through HostGateway
-    #[serde(rename = "favorites_write")]
-    FavoritesWrite,
-
-    /// Read the current user's application settings through HostGateway
-    #[serde(rename = "user_settings_read")]
-    UserSettingsRead,
-
-    /// Write the current user's application settings through HostGateway
-    #[serde(rename = "user_settings_write")]
-    UserSettingsWrite,
-}
-
-impl std::fmt::Display for Permission {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Permission::FileRead(path) => write!(f, "FileRead({:?})", path),
-            Permission::FileWrite(path) => write!(f, "FileWrite({:?})", path),
-            Permission::NetworkAccess(domain) => write!(f, "NetworkAccess({})", domain),
-            Permission::DatabaseRead => write!(f, "DatabaseRead"),
-            Permission::DatabaseWrite => write!(f, "DatabaseWrite"),
-            Permission::BooksRead => write!(f, "BooksRead"),
-            Permission::ChaptersRead => write!(f, "ChaptersRead"),
-            Permission::ProgressRead => write!(f, "ProgressRead"),
-            Permission::MediaRead => write!(f, "MediaRead"),
-            Permission::MediaReadUrl => write!(f, "MediaReadUrl"),
-            Permission::PluginRouteSign => write!(f, "PluginRouteSign"),
-            Permission::MetadataWrite => write!(f, "MetadataWrite"),
-            Permission::TaskCreate => write!(f, "TaskCreate"),
-            Permission::CacheRead => write!(f, "CacheRead"),
-            Permission::CacheWrite => write!(f, "CacheWrite"),
-            Permission::EventPublish => write!(f, "EventPublish"),
-            Permission::EventSubscribe(event_type) => write!(f, "EventSubscribe({})", event_type),
-            Permission::PlaylistsRead => write!(f, "PlaylistsRead"),
-            Permission::PlaylistsWrite => write!(f, "PlaylistsWrite"),
-            Permission::FavoritesRead => write!(f, "FavoritesRead"),
-            Permission::FavoritesWrite => write!(f, "FavoritesWrite"),
-            Permission::UserSettingsRead => write!(f, "UserSettingsRead"),
-            Permission::UserSettingsWrite => write!(f, "UserSettingsWrite"),
-        }
-    }
-}
+pub use ting_plugin_contract::manifest::Permission;
 
 /// Resource limits for plugin execution
 ///

@@ -8,10 +8,10 @@ use crate::api::require_admin;
 use crate::core::error::{Result, TingError};
 use crate::db::repository::Repository;
 use axum::{
+    Json,
     extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
-    Json,
 };
 use uuid::Uuid;
 
@@ -24,10 +24,11 @@ fn mask_restricted_settings(response: &mut UserSettingsResponse, is_admin: bool)
     response.widget_css = None;
 
     if let Some(settings_json) = response.settings_json.as_mut()
-        && let Some(obj) = settings_json.as_object_mut() {
-            obj.remove("auto_cache");
-            obj.remove("widget_css");
-        }
+        && let Some(obj) = settings_json.as_object_mut()
+    {
+        obj.remove("auto_cache");
+        obj.remove("widget_css");
+    }
 }
 
 /// Handler for GET /api/users - Get all users (admin only)
@@ -133,12 +134,13 @@ pub async fn update_user(
 
     if let Some(username) = req.username {
         if let Some(existing) = state.user_repo.find_by_username(&username).await?
-            && existing.id != user_id {
-                return Err(TingError::ValidationError(format!(
-                    "Username '{}' already exists",
-                    username
-                )));
-            }
+            && existing.id != user_id
+        {
+            return Err(TingError::ValidationError(format!(
+                "Username '{}' already exists",
+                username
+            )));
+        }
         user.username = username;
     }
 
@@ -217,21 +219,25 @@ pub async fn get_user_settings(
 
             if let Some(ref json_val) = response.settings_json {
                 if let Some(val) = json_val.get("sleep_timer_default")
-                    && let Some(i) = val.as_i64() {
-                        response.sleep_timer_default = i as i32;
-                    }
+                    && let Some(i) = val.as_i64()
+                {
+                    response.sleep_timer_default = i as i32;
+                }
                 if let Some(val) = json_val.get("auto_preload")
-                    && let Some(b) = val.as_bool() {
-                        response.auto_preload = b;
-                    }
+                    && let Some(b) = val.as_bool()
+                {
+                    response.auto_preload = b;
+                }
                 if let Some(val) = json_val.get("auto_cache")
-                    && let Some(b) = val.as_bool() {
-                        response.auto_cache = b;
-                    }
+                    && let Some(b) = val.as_bool()
+                {
+                    response.auto_cache = b;
+                }
                 if let Some(val) = json_val.get("widget_css")
-                    && let Some(s) = val.as_str() {
-                        response.widget_css = Some(s.to_string());
-                    }
+                    && let Some(s) = val.as_str()
+                {
+                    response.widget_css = Some(s.to_string());
+                }
             }
 
             mask_restricted_settings(&mut response, user.role == "admin");
@@ -263,6 +269,13 @@ pub async fn update_user_settings(
     user: crate::auth::middleware::AuthUser,
     Json(req): Json<UpdateUserSettingsRequest>,
 ) -> Result<impl IntoResponse> {
+    if let Some(speed) = req.playback_speed
+        && (!speed.is_finite() || !(0.5..=3.0).contains(&speed))
+    {
+        return Err(TingError::InvalidRequest(
+            "Playback speed must be between 0.5 and 3.0".into(),
+        ));
+    }
     let existing = state.settings_repo.get_by_user(&user.id).await?;
 
     let mut settings_obj = if let Some(ref s) = existing {
@@ -274,6 +287,9 @@ pub async fn update_user_settings(
     } else {
         serde_json::json!({})
     };
+    let previous_preload = settings_obj["auto_preload"].as_bool().unwrap_or(false);
+    let previous_cache =
+        user.role == "admin" && settings_obj["auto_cache"].as_bool().unwrap_or(false);
 
     if let Some(sleep_timer) = req.sleep_timer_default {
         settings_obj["sleep_timer_default"] = serde_json::json!(sleep_timer);
@@ -344,24 +360,39 @@ pub async fn update_user_settings(
 
     state.settings_repo.upsert(&settings).await?;
 
+    let preload_enabled = settings_obj["auto_preload"].as_bool().unwrap_or(false);
+    let cache_enabled =
+        user.role == "admin" && settings_obj["auto_cache"].as_bool().unwrap_or(false);
+    if ((!preload_enabled && !cache_enabled)
+        || preload_enabled != previous_preload
+        || cache_enabled != previous_cache)
+        && let Some((_, task)) = state.active_preload_tasks.lock().await.remove(&user.id)
+    {
+        task.abort();
+    }
+
     let mut response = UserSettingsResponse::from(settings);
     if let Some(ref json_val) = response.settings_json {
         if let Some(val) = json_val.get("sleep_timer_default")
-            && let Some(i) = val.as_i64() {
-                response.sleep_timer_default = i as i32;
-            }
+            && let Some(i) = val.as_i64()
+        {
+            response.sleep_timer_default = i as i32;
+        }
         if let Some(val) = json_val.get("auto_preload")
-            && let Some(b) = val.as_bool() {
-                response.auto_preload = b;
-            }
+            && let Some(b) = val.as_bool()
+        {
+            response.auto_preload = b;
+        }
         if let Some(val) = json_val.get("auto_cache")
-            && let Some(b) = val.as_bool() {
-                response.auto_cache = b;
-            }
+            && let Some(b) = val.as_bool()
+        {
+            response.auto_cache = b;
+        }
         if let Some(val) = json_val.get("widget_css")
-            && let Some(s) = val.as_str() {
-                response.widget_css = Some(s.to_string());
-            }
+            && let Some(s) = val.as_str()
+        {
+            response.widget_css = Some(s.to_string());
+        }
     }
 
     mask_restricted_settings(&mut response, user.role == "admin");
@@ -377,11 +408,16 @@ pub async fn get_favorites(
     let favorites_list = state.favorite_repo.get_by_user(&user.id).await?;
 
     let mut books = Vec::new();
+    let percentages =
+        crate::db::repository::reading::ReadingRepository::new(state.book_repo.db().clone())
+            .percentages(&user.id)
+            .await?;
 
     for fav in favorites_list {
         if let Some(book) = state.book_repo.find_by_id(&fav.book_id).await? {
             let mut book_resp = crate::api::models::BookResponse::from(book);
             book_resp.is_favorite = true;
+            book_resp.progress_percent = percentages.get(&book_resp.id).copied().unwrap_or(0.0);
             books.push(book_resp);
         }
     }
@@ -480,10 +516,22 @@ pub async fn delete_progress_history(
     user: crate::auth::middleware::AuthUser,
     Json(req): Json<DeleteProgressHistoryRequest>,
 ) -> Result<impl IntoResponse> {
-    let deleted = state
-        .progress_repo
-        .hide_history(&user.id, &req.progress_ids, &req.chapter_ids)
-        .await?;
+    if req.book_ids.len() + req.progress_ids.len() + req.chapter_ids.len() > 500 {
+        return Err(TingError::InvalidRequest(
+            "Too many history selections".into(),
+        ));
+    }
+    let deleted =
+        crate::db::repository::reading::ReadingRepository::new(state.book_repo.db().clone())
+            .clear_history(
+                &user.id,
+                req.all,
+                req.book_ids,
+                req.progress_ids,
+                req.chapter_ids,
+                req.clear_progress,
+            )
+            .await?;
     Ok(Json(DeleteProgressHistoryResponse { deleted }))
 }
 
@@ -523,6 +571,23 @@ pub async fn update_progress(
         .await?
         .ok_or_else(|| TingError::NotFound(format!("Book {} not found", req.book_id)))?;
 
+    if !state
+        .book_repo
+        .check_access(&book.id, &user.id, user.role == "admin")
+        .await?
+    {
+        return Err(TingError::PermissionDenied("Book access denied".into()));
+    }
+    if !req.position.is_finite()
+        || req.position < 0.0
+        || req
+            .duration
+            .is_some_and(|value| !value.is_finite() || value < 0.0)
+    {
+        return Err(TingError::InvalidRequest(
+            "Invalid playback progress".into(),
+        ));
+    }
     if let Some(ref chapter_id) = req.chapter_id {
         let chapter = state
             .chapter_repo

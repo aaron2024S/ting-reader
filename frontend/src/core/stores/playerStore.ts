@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import type { Book, Chapter } from '../types';
 import { sortChaptersForPlayback } from '../utils/chapter';
 import { isTooLight } from '../utils/color';
+import { loadPlayerVolume, savePlayerVolume } from '../utils/playbackPreferences';
 
 interface PlayerState {
   currentBook: Book | null;
@@ -48,7 +49,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
       duration: 0,
       currentTime: 0,
       playbackSpeed: 1.0,
-      volume: 1.0,
+      volume: loadPlayerVolume(),
       themeColor: '#F2EDE4', // Default background color
       isExpanded: false,
       isCollapsed: false,
@@ -104,9 +105,18 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
 
       setDuration: (duration) => set({ duration }),
 
-      setPlaybackSpeed: (speed) => set({ playbackSpeed: speed }),
+      setPlaybackSpeed: (speed) => {
+        if (Number.isFinite(speed)) {
+          set({ playbackSpeed: Math.round(Math.max(0.5, Math.min(3, speed)) * 10) / 10 });
+        }
+      },
 
-      setVolume: (volume) => set({ volume }),
+      setVolume: (volume) => {
+        if (!Number.isFinite(volume)) return;
+        const normalized = Math.max(0, Math.min(1, volume));
+        savePlayerVolume(normalized);
+        set({ volume: normalized });
+      },
 
       setThemeColor: (color) => set({ themeColor: color }),
 

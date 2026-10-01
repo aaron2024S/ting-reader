@@ -7,7 +7,6 @@ use axum::{
 };
 use std::process::Stdio;
 use tokio::io::AsyncReadExt;
-use tokio::process::Command;
 
 /// 处理 HLS 转码请求
 pub async fn handle_hls_request(
@@ -156,21 +155,10 @@ async fn start_hls_transcoding(
     is_strm: bool,
     seek: Option<&str>,
 ) -> Result<()> {
-    let ffmpeg_path = state
-        .plugin_manager
-        .get_ffmpeg_path()
-        .await
-        .ok_or_else(|| {
-            TingError::IoError(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "FFmpeg not found",
-            ))
-        })?;
-
     let playlist_path = temp_dir.join("playlist.m3u8");
     let segment_pattern = temp_dir.join("segment_%03d.ts");
 
-    let mut cmd = Command::new(&ffmpeg_path);
+    let mut cmd = crate::core::audio::AudioService::ffmpeg_command()?;
     cmd.arg("-y")
         .arg("-loglevel")
         .arg("warning")
@@ -263,14 +251,16 @@ async fn wait_for_first_segment(temp_dir: &std::path::Path, is_strm: bool) {
     for _ in 0..(max_wait * 20) {
         // 增加检查频率到每 50ms
         // 检查播放列表是否存在（FFmpeg 会先创建播放列表）
-        if playlist.exists() && first_segment.exists()
-            && let Ok(metadata) = tokio::fs::metadata(&first_segment).await {
-                // 降低文件大小要求到 512 字节（约 0.03 秒的音频）
-                if metadata.len() > 512 {
-                    tracing::info!("First segment generated: {} bytes", metadata.len());
-                    return;
-                }
+        if playlist.exists()
+            && first_segment.exists()
+            && let Ok(metadata) = tokio::fs::metadata(&first_segment).await
+        {
+            // 降低文件大小要求到 512 字节（约 0.03 秒的音频）
+            if metadata.len() > 512 {
+                tracing::info!("First segment generated: {} bytes", metadata.len());
+                return;
             }
+        }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
 

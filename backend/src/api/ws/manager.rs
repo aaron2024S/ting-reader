@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{RwLock, broadcast};
 
 /// Maximum number of queued messages per user's broadcast channel
 const BROADCAST_CAPACITY: usize = 64;

@@ -65,6 +65,7 @@ const Layout: React.FC = () => {
   const sidebarCollapsed = useUiPreferencesStore(state => state.sidebarCollapsed);
   const toggleSidebarCollapsed = useUiPreferencesStore(state => state.toggleSidebarCollapsed);
   const setPluginToolMenuEnabled = useUiPreferencesStore(state => state.setPluginToolMenuEnabled);
+  const setBookshelfProgressEnabled = useUiPreferencesStore(state => state.setBookshelfProgressEnabled);
   const { registry: pluginExtensionRegistry } = useClientExtensions();
 
   // Validate Token on Mount
@@ -107,6 +108,7 @@ const Layout: React.FC = () => {
   React.useEffect(() => {
     if (user && !isConnecting && !connectionError) {
       setPluginToolMenuEnabled(true);
+      setBookshelfProgressEnabled(true);
       apiClient.get('/api/settings').then(res => {
         const settings = res.data;
         const speed = settings.playback_speed;
@@ -122,9 +124,10 @@ const Layout: React.FC = () => {
             ?? settings.settings_json?.plugin_tool_menu_enabled
             ?? true,
         );
+        setBookshelfProgressEnabled(settings.bookshelf_progress_enabled ?? settings.settings_json?.bookshelf_progress_enabled ?? true);
       }).catch(err => console.error('Failed to sync user settings', err));
     }
-  }, [user, setPlaybackSpeed, isConnecting, connectionError, setLanguage, setPluginToolMenuEnabled]);
+  }, [user, setPlaybackSpeed, isConnecting, connectionError, setLanguage, setPluginToolMenuEnabled, setBookshelfProgressEnabled]);
 
   React.useEffect(() => {
     if (!user || isConnecting || connectionError) return;
@@ -146,7 +149,7 @@ const Layout: React.FC = () => {
     { icon: <Home size={20} />, label: t('nav.home'), path: '/' },
     { icon: <Library size={20} />, label: t('nav.bookshelf'), path: '/bookshelf', matches: ['/bookshelf', '/book/', '/series/', '/search'] },
     { icon: <ListMusic size={20} />, label: t('nav.playlists'), path: '/playlists', matches: ['/playlists'] },
-    { icon: <User size={20} />, label: t('nav.mine'), path: '/mine', matches: ['/mine', '/history', '/favorites', '/personalization', '/notifications', '/statistics', '/admin/statistics', '/cache'] },
+    { icon: <User size={20} />, label: t('nav.mine'), path: '/mine', matches: ['/mine', '/history', '/bookmarks', '/favorites', '/personalization', '/notifications', '/statistics', '/admin/statistics', '/cache'] },
   ] satisfies NavItem[];
 
   const adminItems = [

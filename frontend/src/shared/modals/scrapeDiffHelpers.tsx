@@ -346,13 +346,13 @@ export const getItemFieldValue = (item: ScraperSearchItem, fieldKey: string): Fi
     case 'cover_url':
       return item.cover_url;
     case 'description':
-      return item.description || item.intro;
+      return item.intro;
     case 'tags':
       return Array.isArray(item.tags) ? item.tags : undefined;
     case 'genre':
       return item.genre;
     case 'year':
-      return item.published_year;
+      return item.published_year == null ? null : String(item.published_year);
     case 'subtitle':
       return item.subtitle;
     case 'published_date':

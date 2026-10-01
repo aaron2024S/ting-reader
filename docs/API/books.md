@@ -20,7 +20,8 @@
   "genre": "string | null",
   "year": 0,
   "created_at": "RFC3339",
-  "library_type": "local | webdav | null",
+  "library_type": "local | webdav | rss | null",
+  "can_write_metadata_files": false,
   "is_favorite": false,
   "manual_corrected": false,
   "match_pattern": "string | null",
@@ -115,6 +116,25 @@
 
 ---
 
+### POST /api/v1/books/:id/cover
+
+上传封面，可同时保存编辑的书籍元数据。仅管理员可用，也支持 `/api/books/:id/cover`。
+
+**请求：** `multipart/form-data`
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| file | 文件 | 必填，JPEG、PNG 或 WebP，最大 10 MiB，最多 1600 万像素 |
+| metadata | JSON 字符串 | 可选，使用更新书籍接口的字段；不允许修改 `library_id`、`path`、`hash` |
+
+图片按实际内容校验并保存为 `cover.jpg`。本地库保存到书籍目录；WebDAV、RSS 保存到服务器 `temp/<书籍路径的 SHA-256>/`。WebDAV 与 `metadata.json`、`book.nfo` 共用目录；启用库配置 `webdav_metadata_writing_enabled` 后，编辑同步更新网盘中的元数据文件和文件封面。封面 URL 只保持引用。RSS 只保存封面，不生成元数据文件。
+
+**响应：** `200 OK` — 返回更新后的 `BookResponse`，包含封面路径和重新计算的主题色。未指定 `manual_corrected` 时，保存会锁定元数据。
+
+**错误：** `400` 图片或元数据无效，`403` 权限不足，`404` 书籍不存在，`413` 请求超过大小上限。
+
+---
+
 ### DELETE /api/v1/books/:id
 
 删除书籍。
@@ -183,6 +203,8 @@
 ### POST /api/books/:id/write-metadata
 
 将书籍元数据写入音频文件（管理员，异步任务）。
+
+本地库可以使用此操作；WebDAV 库需开启“元数据写入网盘”。书籍详情的 `can_write_metadata_files` 表示当前库是否允许该操作。WebDAV 音频逐章下载至临时文件，使用与本地库相同的格式处理器写入标签后上传回原路径，处理完清理临时文件。STRM 章节跳过；URL 封面保持引用，不下载为图片。
 
 **路径参数：**
 

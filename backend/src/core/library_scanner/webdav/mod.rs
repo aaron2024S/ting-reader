@@ -5,8 +5,8 @@ mod processing;
 use super::{LibraryScanner, ScanMode, ScanResult, ScanStatus};
 use crate::core::error::{Result, TingError};
 use crate::core::library_scanner::shared::{
-    infer_series_directories, parse_chapter_range_dir_name, select_mergeable_range_groups,
-    ChapterRangeDir, CoalescedRangeDirs, SeriesDirectoryCandidate,
+    ChapterRangeDir, CoalescedRangeDirs, SeriesDirectoryCandidate, infer_series_directories,
+    parse_chapter_range_dir_name, select_mergeable_range_groups,
 };
 use crate::db::repository::Repository;
 use sha2::{Digest, Sha256};
@@ -188,14 +188,15 @@ impl LibraryScanner {
                 existing_info = book_hash_map.get(&dir_hash).cloned();
             }
             if existing_info.is_none()
-                && let Some(child_dirs) = coalesced_range_dirs.get(&dir_url) {
-                    for child_dir in &child_dirs.child_dirs {
-                        if let Some(info) = book_path_map.get(child_dir).cloned() {
-                            existing_info = Some(info);
-                            break;
-                        }
+                && let Some(child_dirs) = coalesced_range_dirs.get(&dir_url)
+            {
+                for child_dir in &child_dirs.child_dirs {
+                    if let Some(info) = book_path_map.get(child_dir).cloned() {
+                        existing_info = Some(info);
+                        break;
                     }
                 }
+            }
 
             let existing_lock_state = existing_info
                 .as_ref()
@@ -204,18 +205,40 @@ impl LibraryScanner {
             let state_config_fingerprint =
                 format!("{}:lock={}", scan_config_fingerprint, existing_lock_state);
             let directory_fingerprint = webdav_directory_fingerprint(&file_entries);
+            let cache_dir = crate::core::metadata_writer::remote_metadata_dir(&dir_url)?;
+            let cache_complete = cache_dir.join("metadata.json").is_file()
+                && cache_dir.join("book.nfo").is_file()
+                && metadata_files
+                    .iter()
+                    .find(|url| {
+                        [
+                            "cover.jpg",
+                            "cover.jpeg",
+                            "cover.png",
+                            "cover.webp",
+                            "folder.jpg",
+                        ]
+                        .iter()
+                        .any(|filename| url.to_lowercase().ends_with(filename))
+                    })
+                    .is_none_or(|url| {
+                        let ext = url.rsplit('.').next().unwrap_or("jpg");
+                        cache_dir.join(format!("cover.{ext}")).is_file()
+                    });
             if let (Some((book_id, _, _)), Some(directory_fingerprint)) =
                 (existing_info.as_ref(), directory_fingerprint.as_ref())
+                && cache_complete
                 && cached_book_states.get(&dir_url).is_some_and(|state| {
                     state.fingerprint == *directory_fingerprint
                         && state.config_fingerprint.as_deref()
                             == Some(state_config_fingerprint.as_str())
-                }) {
-                    scan_result.total_books += 1;
-                    scan_result.books_skipped += 1;
-                    found_book_ids.insert(book_id.clone());
-                    continue;
-                }
+                })
+            {
+                scan_result.total_books += 1;
+                scan_result.books_skipped += 1;
+                found_book_ids.insert(book_id.clone());
+                continue;
+            }
 
             // Natural ordering is needed only when this book will enter title
             // checks or chapter reconciliation. Cache hits above stay linear.
@@ -223,7 +246,12 @@ impl LibraryScanner {
             metadata_files.sort_by(|a, b| natord::compare(a, b));
 
             // Incremental Check: Skip if book exists and no files modified since last scan
-            if let (Some((id, _, _)), Some(last_scan_time)) = (&existing_info, last_scanned) {
+            if let (Some((id, _, _)), Some(last_scan_time)) = (&existing_info, last_scanned)
+                && cache_complete
+                && cached_book_states.get(&dir_url).is_some_and(|state| {
+                    state.config_fingerprint.as_deref() == Some(state_config_fingerprint.as_str())
+                })
+            {
                 // Check if file count changed (new files added or removed)
                 let current_file_count = file_urls.len();
                 let existing_chapter_count = chapter_counts
@@ -359,28 +387,31 @@ impl LibraryScanner {
                     }
                     if status != ScanStatus::Skipped
                         && let Some(series_info) = inferred_series.get(&dir_url)
-                            && let Err(e) = self
-                                .link_book_to_inferred_series(&library.id, &book_id, series_info)
-                                .await
-                            {
-                                warn!(
-                                    url = %dir_url,
-                                    book_id = %book_id,
-                                    error = %e,
-                                    "Failed to link WebDAV book to inferred series"
-                                );
-                            }
+                        && let Err(e) = self
+                            .link_book_to_inferred_series(&library.id, &book_id, series_info)
+                            .await
+                    {
+                        warn!(
+                            url = %dir_url,
+                            book_id = %book_id,
+                            error = %e,
+                            "Failed to link WebDAV book to inferred series"
+                        );
+                    }
                     if status != ScanStatus::Skipped
-                        && let Some(child_dirs) = coalesced_range_dirs.get(&dir_url) {
-                            for child_dir in &child_dirs.child_dirs {
-                                if let Some((child_book_id, manual_corrected, _)) =
-                                    book_path_map.get(child_dir)
-                                    && child_book_id != &book_id && *manual_corrected == 0 {
-                                        absorbed_range_book_ids
-                                            .insert(child_book_id.clone(), book_id.clone());
-                                    }
+                        && let Some(child_dirs) = coalesced_range_dirs.get(&dir_url)
+                    {
+                        for child_dir in &child_dirs.child_dirs {
+                            if let Some((child_book_id, manual_corrected, _)) =
+                                book_path_map.get(child_dir)
+                                && child_book_id != &book_id
+                                && *manual_corrected == 0
+                            {
+                                absorbed_range_book_ids
+                                    .insert(child_book_id.clone(), book_id.clone());
                             }
                         }
+                    }
                     debug!(book_id = %book_id, url = %dir_url, status = ?status, "Processed WebDAV book directory");
                 }
                 Err(e) => {
@@ -506,15 +537,17 @@ impl LibraryScanner {
             let mut regex_idx = None;
             let mut regex_title = None;
             if let Some(re) = &chapter_regex
-                && let Some(caps) = re.captures(&filename) {
-                    if let Some(m) = caps.get(1)
-                        && let Ok(idx) = m.as_str().parse::<i32>() {
-                            regex_idx = Some(idx);
-                        }
-                    if let Some(m) = caps.get(2) {
-                        regex_title = Some(m.as_str().to_string());
-                    }
+                && let Some(caps) = re.captures(&filename)
+            {
+                if let Some(m) = caps.get(1)
+                    && let Ok(idx) = m.as_str().parse::<i32>()
+                {
+                    regex_idx = Some(idx);
                 }
+                if let Some(m) = caps.get(2) {
+                    regex_title = Some(m.as_str().to_string());
+                }
+            }
 
             let title_override = if let Some(rt) = regex_title {
                 let (cleaned, is_extra) = self

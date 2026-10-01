@@ -345,10 +345,12 @@ mod tests {
             updated_at: "2026-08-12T00:00:00Z".to_string(),
         };
 
-        assert!(user_repo
-            .create_with_settings(&user, &settings)
-            .await
-            .is_err());
+        assert!(
+            user_repo
+                .create_with_settings(&user, &settings)
+                .await
+                .is_err()
+        );
         assert_eq!(user_repo.count().await.unwrap(), 0);
     }
 }

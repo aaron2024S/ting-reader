@@ -1,9 +1,13 @@
-use crate::core::error::{Result, TingError};
 use crate::core::Config;
-use crate::plugin::logger::{emit_plugin_event, PluginLogLevel};
+use crate::core::error::{Result, TingError};
+use crate::plugin::logger::{PluginLogLevel, emit_plugin_event};
+mod capabilities;
 mod data;
+mod events;
 mod files;
+mod html;
 mod personal;
+mod storage;
 mod tasks_cache;
 
 use crate::core::task_queue::{Priority, TaskQueue};
@@ -11,9 +15,9 @@ use crate::db::repository::{
     BookRepository, ChapterRepository, FavoriteRepository, LibraryRepository, PlaylistRepository,
     ProgressRepository, UserSettingsRepository,
 };
+use crate::plugin::PluginCache;
 use crate::plugin::manager::PluginManager;
 use crate::plugin::wasm::sandbox::Permission;
-use crate::plugin::PluginCache;
 use serde_json::Value;
 use std::sync::{Arc, RwLock, Weak};
 
@@ -29,8 +33,12 @@ pub struct PluginHostGateway {
     task_queue: Arc<TaskQueue>,
     plugin_manager: Arc<PluginManager>,
     plugin_cache: Arc<PluginCache>,
+    plugin_storage: Arc<PluginCache>,
+    config_manager: Arc<crate::plugin::PluginConfigManager>,
+    plugin_route_revocations: Arc<crate::core::signing::PluginRouteRevocations>,
     encryption_key: Arc<[u8; 32]>,
     config: Config,
+    html_documents: Arc<RwLock<std::collections::HashMap<String, String>>>,
 }
 
 pub struct PluginHostGatewayDependencies {
@@ -44,6 +52,9 @@ pub struct PluginHostGatewayDependencies {
     pub task_queue: Arc<TaskQueue>,
     pub plugin_manager: Arc<PluginManager>,
     pub plugin_cache: Arc<PluginCache>,
+    pub plugin_storage: Arc<PluginCache>,
+    pub config_manager: Arc<crate::plugin::PluginConfigManager>,
+    pub plugin_route_revocations: Arc<crate::core::signing::PluginRouteRevocations>,
     pub encryption_key: Arc<[u8; 32]>,
     pub config: Config,
 }
@@ -81,36 +92,21 @@ impl PluginHostUser {
     }
 }
 
-pub fn plugin_host_user_from_invocation_args(args: &Value) -> Option<PluginHostUser> {
-    let route_context = args
-        .get("_context")
-        .and_then(|context| context.get("route"))
-        .or_else(|| args.get("context"))?;
-
-    if route_context.get("authenticated").and_then(Value::as_bool) != Some(true) {
-        return None;
-    }
-
-    let user = route_context.get("user")?;
-    Some(PluginHostUser {
-        id: user.get("id")?.as_str()?.to_string(),
-        username: user.get("username")?.as_str()?.to_string(),
-        role: user.get("role")?.as_str()?.to_string(),
-    })
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PluginHostPermission {
+    NetworkAccess,
     BooksRead,
+    BooksWrite,
+    LibrariesRead,
     ChaptersRead,
+    ChaptersWrite,
+    LibrariesWrite,
     ProgressRead,
     MediaReadUrl,
     PluginRouteSign,
     MetadataWrite,
     LibraryFileRead,
     LibraryFileWrite,
-    DatabaseRead,
-    DatabaseWrite,
     TaskCreate,
     CacheRead,
     CacheWrite,
@@ -120,9 +116,27 @@ pub enum PluginHostPermission {
     FavoritesWrite,
     UserSettingsRead,
     UserSettingsWrite,
+    ConfigRead,
+    PrivateFileRead,
+    PrivateFileWrite,
+    StorageRead,
+    StorageWrite,
+    CapabilityInvoke,
+    PluginRouteRevoke,
+    TaskRead,
+    TaskManage,
+    TaskProgress,
+    EventPublish,
+    HtmlParse,
 }
 
 impl PluginHostGateway {
+    pub(crate) fn plugin_permissions(&self, plugin_id: &str) -> Result<Vec<Permission>> {
+        self.plugin_manager
+            .get_plugin(&plugin_id.to_string())
+            .map(|metadata| metadata.permissions)
+    }
+
     pub fn new(dependencies: PluginHostGatewayDependencies) -> Self {
         let PluginHostGatewayDependencies {
             book_repo,
@@ -135,6 +149,9 @@ impl PluginHostGateway {
             task_queue,
             plugin_manager,
             plugin_cache,
+            plugin_storage,
+            config_manager,
+            plugin_route_revocations,
             encryption_key,
             config,
         } = dependencies;
@@ -149,8 +166,12 @@ impl PluginHostGateway {
             task_queue,
             plugin_manager,
             plugin_cache,
+            plugin_storage,
+            config_manager,
+            plugin_route_revocations,
             encryption_key,
             config,
+            html_documents: Arc::new(RwLock::new(std::collections::HashMap::new())),
         }
     }
 
@@ -171,9 +192,10 @@ impl PluginHostGateway {
     pub async fn invoke_plugin(
         &self,
         plugin_id: &str,
-        user: &PluginHostUser,
+        user: Option<&PluginHostUser>,
         method: &str,
         params: Value,
+        resources: Option<&Arc<crate::plugin::resources::ResourceScope>>,
     ) -> Result<Value> {
         let plugin_id_owned = plugin_id.to_string();
         let metadata = self
@@ -182,7 +204,14 @@ impl PluginHostGateway {
             .map_err(|_| TingError::PluginNotFound(plugin_id_owned))?;
 
         let result = self
-            .invoke_with_permissions(plugin_id, &metadata.permissions, user, method, params)
+            .invoke_with_permissions(
+                plugin_id,
+                &metadata.permissions,
+                user,
+                method,
+                params,
+                resources,
+            )
             .await;
         let denied = result.as_ref().err().is_some_and(|error| {
             matches!(
@@ -231,12 +260,13 @@ impl PluginHostGateway {
         &self,
         plugin_id: &str,
         permissions: &[Permission],
-        user: &PluginHostUser,
+        user: Option<&PluginHostUser>,
         method: &str,
         params: Value,
+        resources: Option<&Arc<crate::plugin::resources::ResourceScope>>,
     ) -> Result<Value> {
         Self::authorize(plugin_id, permissions, method)?;
-        self.invoke_authorized(plugin_id, user, method, params)
+        self.invoke_authorized(plugin_id, user, permissions, method, params, resources)
             .await
     }
 
@@ -257,23 +287,39 @@ impl PluginHostGateway {
 
     pub fn required_permission(method: &str) -> Option<PluginHostPermission> {
         match method {
-            "books.list" | "books.get" | "libraries.list" | "libraries.get" => {
-                Some(PluginHostPermission::BooksRead)
-            }
+            "http.request" => Some(PluginHostPermission::NetworkAccess),
+            "books.list" | "books.get" => Some(PluginHostPermission::BooksRead),
+            "libraries.list" | "libraries.get" => Some(PluginHostPermission::LibrariesRead),
+            "books.update" => Some(PluginHostPermission::BooksWrite),
             "chapters.list" | "chapters.get" => Some(PluginHostPermission::ChaptersRead),
+            "chapters.update" => Some(PluginHostPermission::ChaptersWrite),
+            "libraries.update" => Some(PluginHostPermission::LibrariesWrite),
             "progress.recent" => Some(PluginHostPermission::ProgressRead),
             "media.get_url" | "media.get_signed_url" => Some(PluginHostPermission::MediaReadUrl),
             "plugin_routes.sign" => Some(PluginHostPermission::PluginRouteSign),
+            "plugin_routes.revoke" => Some(PluginHostPermission::PluginRouteRevoke),
             "metadata.write" => Some(PluginHostPermission::MetadataWrite),
-            "library.file.list" | "library.file.stat" | "library.file.read" => {
+            "library.file.list" | "library.file.stat" | "library.file.open" => {
                 Some(PluginHostPermission::LibraryFileRead)
             }
-            "library.file.write" => Some(PluginHostPermission::LibraryFileWrite),
-            "database.get" | "database.list" => Some(PluginHostPermission::DatabaseRead),
-            "database.update" => Some(PluginHostPermission::DatabaseWrite),
+            "files.open" | "files.stat" | "files.list" => {
+                Some(PluginHostPermission::PrivateFileRead)
+            }
+            "files.remove" => Some(PluginHostPermission::PrivateFileWrite),
+            "assets.commit" => Some(PluginHostPermission::LibraryFileWrite),
             "tasks.create" => Some(PluginHostPermission::TaskCreate),
+            "tasks.get" => Some(PluginHostPermission::TaskRead),
+            "tasks.cancel" => Some(PluginHostPermission::TaskManage),
+            "tasks.report_progress" => Some(PluginHostPermission::TaskProgress),
             "cache.get" | "cache.has" => Some(PluginHostPermission::CacheRead),
             "cache.set" | "cache.delete" => Some(PluginHostPermission::CacheWrite),
+            "storage.get" | "storage.list" => Some(PluginHostPermission::StorageRead),
+            "storage.set" | "storage.delete" => Some(PluginHostPermission::StorageWrite),
+            "config.get" => Some(PluginHostPermission::ConfigRead),
+            "capabilities.invoke" => Some(PluginHostPermission::CapabilityInvoke),
+            "events.publish" => Some(PluginHostPermission::EventPublish),
+            "html.parse" | "html.select" | "html.text" | "html.attr" | "html.extract"
+            | "html.close" => Some(PluginHostPermission::HtmlParse),
             "playlists.list" | "playlists.get" => Some(PluginHostPermission::PlaylistsRead),
             "playlists.create"
             | "playlists.update"
@@ -295,14 +341,31 @@ impl PluginHostGateway {
         permissions.iter().any(|permission| {
             matches!(
                 (required_permission, permission),
-                (PluginHostPermission::BooksRead, Permission::BooksRead)
-                    | (PluginHostPermission::BooksRead, Permission::DatabaseRead)
+                (
+                    PluginHostPermission::NetworkAccess,
+                    Permission::NetworkAccess { .. }
+                ) | (PluginHostPermission::BooksRead, Permission::BooksRead)
+                    | (PluginHostPermission::BooksRead, Permission::BooksWrite)
+                    | (
+                        PluginHostPermission::LibrariesRead,
+                        Permission::LibrariesRead
+                    )
+                    | (PluginHostPermission::BooksWrite, Permission::BooksWrite)
                     | (PluginHostPermission::ChaptersRead, Permission::ChaptersRead)
-                    | (PluginHostPermission::ChaptersRead, Permission::DatabaseRead)
+                    | (
+                        PluginHostPermission::ChaptersRead,
+                        Permission::ChaptersWrite
+                    )
+                    | (
+                        PluginHostPermission::ChaptersWrite,
+                        Permission::ChaptersWrite
+                    )
+                    | (
+                        PluginHostPermission::LibrariesWrite,
+                        Permission::LibrariesWrite
+                    )
                     | (PluginHostPermission::ProgressRead, Permission::ProgressRead)
-                    | (PluginHostPermission::ProgressRead, Permission::DatabaseRead)
                     | (PluginHostPermission::MediaReadUrl, Permission::MediaReadUrl)
-                    | (PluginHostPermission::MediaReadUrl, Permission::MediaRead)
                     | (
                         PluginHostPermission::PluginRouteSign,
                         Permission::PluginRouteSign
@@ -313,16 +376,11 @@ impl PluginHostGateway {
                     )
                     | (
                         PluginHostPermission::LibraryFileRead,
-                        Permission::FileRead(_)
+                        Permission::FileRead { .. }
                     )
                     | (
                         PluginHostPermission::LibraryFileWrite,
-                        Permission::FileWrite(_)
-                    )
-                    | (PluginHostPermission::DatabaseRead, Permission::DatabaseRead)
-                    | (
-                        PluginHostPermission::DatabaseWrite,
-                        Permission::DatabaseWrite
+                        Permission::FileWrite { .. }
                     )
                     | (PluginHostPermission::TaskCreate, Permission::TaskCreate)
                     | (PluginHostPermission::CacheRead, Permission::CacheRead)
@@ -364,6 +422,31 @@ impl PluginHostGateway {
                         PluginHostPermission::UserSettingsWrite,
                         Permission::UserSettingsWrite
                     )
+                    | (PluginHostPermission::ConfigRead, Permission::ConfigRead)
+                    | (
+                        PluginHostPermission::PrivateFileRead,
+                        Permission::FileRead { .. }
+                    )
+                    | (
+                        PluginHostPermission::PrivateFileWrite,
+                        Permission::FileWrite { .. }
+                    )
+                    | (PluginHostPermission::StorageRead, Permission::StorageRead)
+                    | (PluginHostPermission::StorageRead, Permission::StorageWrite)
+                    | (PluginHostPermission::StorageWrite, Permission::StorageWrite)
+                    | (
+                        PluginHostPermission::CapabilityInvoke,
+                        Permission::CapabilityInvoke { .. }
+                    )
+                    | (
+                        PluginHostPermission::PluginRouteRevoke,
+                        Permission::PluginRouteRevoke
+                    )
+                    | (PluginHostPermission::TaskRead, Permission::TaskRead)
+                    | (PluginHostPermission::TaskManage, Permission::TaskManage)
+                    | (PluginHostPermission::TaskProgress, Permission::TaskProgress)
+                    | (PluginHostPermission::EventPublish, Permission::EventPublish)
+                    | (PluginHostPermission::HtmlParse, Permission::HtmlParse)
             )
         })
     }
@@ -371,34 +454,83 @@ impl PluginHostGateway {
     async fn invoke_authorized(
         &self,
         plugin_id: &str,
-        user: &PluginHostUser,
+        user: Option<&PluginHostUser>,
+        permissions: &[Permission],
         method: &str,
         params: Value,
+        resources: Option<&Arc<crate::plugin::resources::ResourceScope>>,
+    ) -> Result<Value> {
+        match method {
+            "http.request" => {
+                crate::plugin::host_api::http_request(permissions, &params, resources).await
+            }
+            _ => {
+                let user = user.ok_or_else(|| {
+                    TingError::PermissionDenied("This Host method requires a user principal".into())
+                })?;
+                self.invoke_authorized_user(plugin_id, user, permissions, method, params, resources)
+                    .await
+            }
+        }
+    }
+
+    async fn invoke_authorized_user(
+        &self,
+        plugin_id: &str,
+        user: &PluginHostUser,
+        permissions: &[Permission],
+        method: &str,
+        params: Value,
+        resources: Option<&Arc<crate::plugin::resources::ResourceScope>>,
     ) -> Result<Value> {
         match method {
             "books.list" => self.books_list(user, &params).await,
             "books.get" => self.books_get(user, &params).await,
+            "books.update" => self.books_update(user, &params).await,
             "libraries.list" => self.libraries_list(user, &params).await,
             "libraries.get" => self.libraries_get(user, &params).await,
+            "libraries.update" => self.libraries_update(user, &params).await,
             "chapters.list" => self.chapters_list(user, &params).await,
             "chapters.get" => self.chapters_get(user, &params).await,
+            "chapters.update" => self.chapters_update(user, &params).await,
             "progress.recent" => self.progress_recent(user, &params).await,
             "media.get_url" => self.media_get_url(user, &params).await,
             "media.get_signed_url" => self.media_get_signed_url(user, &params).await,
             "plugin_routes.sign" => self.plugin_routes_sign(plugin_id, user, &params).await,
+            "plugin_routes.revoke" => self.plugin_routes_revoke(plugin_id, user, &params).await,
             "metadata.write" => self.metadata_write(user, &params).await,
+            "config.get" => self.config_get(plugin_id).await,
+            "files.open" => self.private_file_open(plugin_id, &params, resources).await,
+            "files.stat" => self.private_file_stat(plugin_id, &params).await,
+            "files.list" => self.private_file_list(plugin_id, &params).await,
+            "files.remove" => self.private_file_remove(plugin_id, &params).await,
             "library.file.list" => self.library_file_list(user, &params).await,
             "library.file.stat" => self.library_file_stat(user, &params).await,
-            "library.file.read" => self.library_file_read(user, &params).await,
-            "library.file.write" => self.library_file_write(user, &params).await,
-            "database.get" => self.database_get(user, &params).await,
-            "database.list" => self.database_list(user, &params).await,
-            "database.update" => self.database_update(user, &params).await,
-            "tasks.create" => self.tasks_create(&params).await,
+            "library.file.open" => self.library_file_open(user, &params, resources).await,
+            "assets.commit" => self.assets_commit(user, &params, resources).await,
+            "tasks.create" => self.tasks_create(plugin_id, user, &params).await,
+            "tasks.get" => self.tasks_get(plugin_id, user, &params).await,
+            "tasks.cancel" => self.tasks_cancel(plugin_id, user, &params).await,
+            "tasks.report_progress" => self.tasks_report_progress(plugin_id, user, &params).await,
             "cache.get" => self.cache_get(plugin_id, &params).await,
             "cache.set" => self.cache_set(plugin_id, &params).await,
             "cache.has" => self.cache_has(plugin_id, &params).await,
             "cache.delete" => self.cache_delete(plugin_id, &params).await,
+            "storage.get" => self.storage_get(plugin_id, user, &params).await,
+            "storage.set" => self.storage_set(plugin_id, user, &params).await,
+            "storage.delete" => self.storage_delete(plugin_id, user, &params).await,
+            "storage.list" => self.storage_list(plugin_id, user, &params).await,
+            "capabilities.invoke" => {
+                self.capabilities_invoke(plugin_id, user, permissions, &params, resources)
+                    .await
+            }
+            "events.publish" => self.events_publish(plugin_id, user, &params).await,
+            "html.parse" => self.html_parse(plugin_id, &params).await,
+            "html.select" => self.html_select(plugin_id, &params).await,
+            "html.text" => self.html_text(plugin_id, &params).await,
+            "html.attr" => self.html_attr(plugin_id, &params).await,
+            "html.extract" => self.html_extract(plugin_id, &params).await,
+            "html.close" => self.html_close(plugin_id, &params).await,
             "playlists.list" => self.playlists_list(user, &params).await,
             "playlists.get" => self.playlists_get(user, &params).await,
             "playlists.create" => self.playlists_create(user, &params).await,
@@ -519,7 +651,7 @@ mod tests {
         );
         assert_eq!(
             PluginHostGateway::required_permission("libraries.list"),
-            Some(PluginHostPermission::BooksRead)
+            Some(PluginHostPermission::LibrariesRead)
         );
         assert_eq!(
             PluginHostGateway::required_permission("progress.recent"),
@@ -562,12 +694,20 @@ mod tests {
             &[Permission::BooksRead],
             PluginHostPermission::BooksRead
         ));
+        assert!(PluginHostGateway::has_permission(
+            &[Permission::LibrariesRead],
+            PluginHostPermission::LibrariesRead
+        ));
+        assert!(!PluginHostGateway::has_permission(
+            &[Permission::BooksRead],
+            PluginHostPermission::LibrariesRead
+        ));
         assert!(!PluginHostGateway::has_permission(
             &[Permission::BooksRead],
             PluginHostPermission::ChaptersRead
         ));
         assert!(PluginHostGateway::has_permission(
-            &[Permission::DatabaseRead],
+            &[Permission::ChaptersRead],
             PluginHostPermission::ChaptersRead
         ));
         assert!(PluginHostGateway::has_permission(
@@ -583,10 +723,6 @@ mod tests {
             PluginHostPermission::MediaReadUrl
         ));
         assert!(PluginHostGateway::has_permission(
-            &[Permission::MediaRead],
-            PluginHostPermission::MediaReadUrl
-        ));
-        assert!(PluginHostGateway::has_permission(
             &[Permission::PluginRouteSign],
             PluginHostPermission::PluginRouteSign
         ));
@@ -599,7 +735,7 @@ mod tests {
             PluginHostPermission::MetadataWrite
         ));
         assert!(!PluginHostGateway::has_permission(
-            &[Permission::DatabaseWrite],
+            &[Permission::BooksWrite],
             PluginHostPermission::MetadataWrite
         ));
         assert!(PluginHostGateway::has_permission(
@@ -607,7 +743,7 @@ mod tests {
             PluginHostPermission::TaskCreate
         ));
         assert!(!PluginHostGateway::has_permission(
-            &[Permission::DatabaseWrite],
+            &[Permission::BooksWrite],
             PluginHostPermission::TaskCreate
         ));
         assert!(PluginHostGateway::has_permission(
@@ -626,43 +762,6 @@ mod tests {
             &[Permission::CacheRead],
             PluginHostPermission::CacheWrite
         ));
-    }
-
-    #[test]
-    fn plugin_host_user_from_invocation_args_reads_capability_context() {
-        let args = json!({
-            "_context": {
-                "route": {
-                    "authenticated": true,
-                    "user": {
-                        "id": "user-1",
-                        "username": "alice",
-                        "role": "admin"
-                    }
-                }
-            }
-        });
-
-        let user = super::plugin_host_user_from_invocation_args(&args).unwrap();
-        assert_eq!(user.id, "user-1");
-        assert_eq!(user.username, "alice");
-        assert_eq!(user.role, "admin");
-    }
-
-    #[test]
-    fn plugin_host_user_from_invocation_args_rejects_public_context() {
-        let args = json!({
-            "context": {
-                "authenticated": false,
-                "user": {
-                    "id": "user-1",
-                    "username": "alice",
-                    "role": "user"
-                }
-            }
-        });
-
-        assert!(super::plugin_host_user_from_invocation_args(&args).is_none());
     }
 
     #[test]
@@ -671,9 +770,16 @@ mod tests {
             PluginHostGateway::authorize("demo", &[Permission::BooksRead], "books.list").is_ok()
         );
         assert!(
-            PluginHostGateway::authorize("demo", &[Permission::DatabaseRead], "chapters.get")
+            PluginHostGateway::authorize("demo", &[Permission::ChaptersRead], "chapters.get")
                 .is_ok()
         );
+        assert!(
+            PluginHostGateway::authorize("demo", &[Permission::BooksWrite], "books.update").is_ok()
+        );
+        assert!(
+            PluginHostGateway::authorize("demo", &[Permission::BooksRead], "books.update").is_err()
+        );
+        assert!(PluginHostGateway::required_permission("database.update").is_none());
 
         let unknown =
             PluginHostGateway::authorize("demo", &[Permission::BooksRead], "unknown.method")

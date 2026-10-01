@@ -138,10 +138,11 @@ impl HlsSessionManager {
     pub async fn kill_session(&self, session_id: &str) {
         let mut sessions = self.sessions.write().await;
         if let Some(session) = sessions.get_mut(session_id)
-            && let Some(mut child) = session.ffmpeg_process.take() {
-                let _ = child.kill().await;
-                tracing::info!("Terminated FFmpeg process for HLS session {}", session_id);
-            }
+            && let Some(mut child) = session.ffmpeg_process.take()
+        {
+            let _ = child.kill().await;
+            tracing::info!("Terminated FFmpeg process for HLS session {}", session_id);
+        }
     }
 
     /// 增加会话的序列号（用于 Seek）

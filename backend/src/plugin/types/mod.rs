@@ -18,35 +18,32 @@ pub use stats::{
 /// Unique identifier for a plugin instance
 pub type PluginId = String;
 
+/// Host-owned identity for one call. Never deserialized from plugin input.
+#[derive(Debug, Clone, Default)]
+pub struct PluginInvocationContext {
+    pub user: Option<crate::plugin::PluginHostUser>,
+    pub resources: Option<Arc<crate::plugin::resources::ResourceScope>>,
+}
+
 /// Base plugin trait that all plugins must implement
 #[async_trait::async_trait]
 pub trait Plugin: Send + Sync {
     fn metadata(&self) -> &PluginMetadata;
     async fn initialize(&self, context: &PluginContext) -> Result<()>;
     async fn shutdown(&self) -> Result<()>;
+    /// Runtime adapter entry point. Capability validation happens in Manager.
+    async fn invoke(
+        &self,
+        operation: &str,
+        _input: serde_json::Value,
+        _context: &PluginInvocationContext,
+    ) -> Result<serde_json::Value> {
+        Err(crate::core::error::TingError::PluginExecutionError(
+            format!("Plugin instance is unavailable for operation {operation}"),
+        ))
+    }
     async fn garbage_collect(&self) -> Result<()> {
         Ok(())
-    }
-    fn plugin_type(&self) -> PluginType;
-    fn as_any(&self) -> &dyn std::any::Any;
-}
-
-/// Plugin type enumeration
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum PluginType {
-    Scraper,
-    Format,
-    Utility,
-}
-
-impl std::fmt::Display for PluginType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            PluginType::Scraper => write!(f, "scraper"),
-            PluginType::Format => write!(f, "format"),
-            PluginType::Utility => write!(f, "utility"),
-        }
     }
 }
 
@@ -58,7 +55,6 @@ pub struct PluginMetadata {
     #[serde(default)]
     pub name: String,
     pub version: String,
-    pub plugin_type: PluginType,
     pub author: String,
     pub description: String,
     #[serde(default)]
@@ -74,9 +70,7 @@ pub struct PluginMetadata {
     #[serde(default)]
     pub dependencies: Vec<PluginDependency>,
     #[serde(default)]
-    pub npm_dependencies: Vec<super::js::npm::NpmDependency>,
-    #[serde(default)]
-    pub permissions: Vec<super::wasm::sandbox::Permission>,
+    pub permissions: Vec<Permission>,
     #[serde(default)]
     pub config_schema: Option<serde_json::Value>,
     #[serde(default)]
@@ -96,16 +90,8 @@ pub struct PluginMetadata {
 
 pub type LocalizedText = BTreeMap<String, String>;
 
-/// Generic capability declaration from plugin manifest.
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
-pub struct PluginCapability {
-    pub id: String,
-    pub kind: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub invoke: Option<String>,
-    #[serde(flatten)]
-    pub extra: BTreeMap<String, serde_json::Value>,
-}
+pub use ting_plugin_contract::capability::Capability as PluginCapability;
+pub use ting_plugin_contract::manifest::Permission;
 
 /// Scraper-specific capability declaration from plugin.yml.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -169,7 +155,6 @@ impl PluginMetadata {
         id: String,
         name: String,
         version: String,
-        plugin_type: PluginType,
         author: String,
         description: String,
         entry_point: String,
@@ -178,7 +163,6 @@ impl PluginMetadata {
             id,
             name,
             version,
-            plugin_type,
             author,
             description,
             description_i18n: BTreeMap::new(),
@@ -187,7 +171,6 @@ impl PluginMetadata {
             entry_point,
             runtime: None,
             dependencies: Vec::new(),
-            npm_dependencies: Vec::new(),
             permissions: Vec::new(),
             config_schema: None,
             min_core_version: None,
@@ -209,12 +192,7 @@ impl PluginMetadata {
         self
     }
 
-    pub fn with_npm_dependency(mut self, dependency: super::js::npm::NpmDependency) -> Self {
-        self.npm_dependencies.push(dependency);
-        self
-    }
-
-    pub fn with_permission(mut self, permission: super::wasm::sandbox::Permission) -> Self {
+    pub fn with_permission(mut self, permission: Permission) -> Self {
         self.permissions.push(permission);
         self
     }
@@ -248,7 +226,6 @@ mod tests {
             "assistant".to_string(),
             "Assistant".to_string(),
             "1.0.0".to_string(),
-            PluginType::Utility,
             "Ting Reader".to_string(),
             "Assistant".to_string(),
             "plugin.js".to_string(),
@@ -257,56 +234,31 @@ mod tests {
         assert!(metadata.effective_capabilities().is_empty());
 
         let mut metadata = metadata;
-        metadata.capabilities.push(PluginCapability {
-            id: "assistant.ui".to_string(),
-            kind: "ui_extension".to_string(),
-            invoke: Some("open".to_string()),
-            extra: BTreeMap::new(),
-        });
+        metadata.capabilities.push(
+            serde_json::from_value(serde_json::json!({
+                "id":"assistant.ui", "kind":"ui_extension", "slots":["global.panel"],
+                "contexts":["global"], "title":{"en":"Assistant"},
+                "render":{"mode":"action","bridge":{"capabilities":[],"host_methods":[]}}
+            }))
+            .unwrap(),
+        );
 
         let capabilities = metadata.effective_capabilities();
 
         assert_eq!(capabilities.len(), 1);
-        assert_eq!(capabilities[0].id, "assistant.ui");
-        assert_eq!(capabilities[0].kind, "ui_extension");
-        assert_eq!(capabilities[0].invoke.as_deref(), Some("open"));
+        assert_eq!(capabilities[0].id(), "assistant.ui");
+        assert_eq!(capabilities[0].kind(), "ui_extension");
+        assert!(capabilities[0].supports("open"));
     }
 }
 
 /// Plugin dependency specification
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(from = "PluginDependencyDef")]
+#[serde(deny_unknown_fields)]
 pub struct PluginDependency {
+    #[serde(rename = "plugin_id")]
     pub plugin_name: String,
     pub version_requirement: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(untagged)]
-enum PluginDependencyDef {
-    Simple(String),
-    Detailed {
-        plugin_name: String,
-        version_requirement: String,
-    },
-}
-
-impl From<PluginDependencyDef> for PluginDependency {
-    fn from(def: PluginDependencyDef) -> Self {
-        match def {
-            PluginDependencyDef::Simple(name) => PluginDependency {
-                plugin_name: name,
-                version_requirement: "*".to_string(),
-            },
-            PluginDependencyDef::Detailed {
-                plugin_name,
-                version_requirement,
-            } => PluginDependency {
-                plugin_name,
-                version_requirement,
-            },
-        }
-    }
 }
 
 impl PluginDependency {
@@ -323,6 +275,7 @@ impl PluginDependency {
 pub struct PluginContext {
     pub config: serde_json::Value,
     pub data_dir: PathBuf,
+    pub resources: Option<Arc<crate::plugin::resources::ResourceScope>>,
     pub logger: Arc<dyn PluginLogger>,
     pub event_bus: Arc<dyn PluginEventBus>,
 }
@@ -337,6 +290,7 @@ impl PluginContext {
         Self {
             config,
             data_dir,
+            resources: None,
             logger,
             event_bus,
         }

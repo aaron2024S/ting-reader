@@ -2,9 +2,9 @@ use super::AppState;
 use crate::core::error::{Result, TingError};
 use crate::core::logging::LogEntry;
 use axum::{
+    Json,
     extract::{Query, State},
     response::IntoResponse,
-    Json,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

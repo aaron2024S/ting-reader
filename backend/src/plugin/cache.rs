@@ -108,6 +108,34 @@ impl PluginCache {
         Ok(self.cache_path(plugin_id, key)?.exists())
     }
 
+    pub async fn list(&self, plugin_id: &str, prefix: Option<&str>) -> Result<Vec<String>> {
+        let directory = self.plugin_cache_dir(plugin_id);
+        if !directory.exists() {
+            return Ok(Vec::new());
+        }
+        let mut entries = tokio::fs::read_dir(directory)
+            .await
+            .map_err(TingError::IoError)?;
+        let mut keys = Vec::new();
+        while let Some(entry) = entries.next_entry().await.map_err(TingError::IoError)? {
+            let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("json") {
+                continue;
+            }
+            let bytes = tokio::fs::read(path).await.map_err(TingError::IoError)?;
+            let record: PluginCacheRecord = serde_json::from_slice(&bytes)
+                .map_err(|error| TingError::DeserializationError(error.to_string()))?;
+            if prefix.is_none_or(|prefix| record.key.starts_with(prefix)) {
+                keys.push(record.key);
+            }
+            if keys.len() >= 1000 {
+                break;
+            }
+        }
+        keys.sort();
+        Ok(keys)
+    }
+
     pub async fn delete_plugin(&self, plugin_id: &str) -> Result<bool> {
         let path = self.plugin_cache_dir(plugin_id);
         if !path.exists() {
@@ -241,15 +269,19 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(cache
-            .migrate_plugin("plugin-a@1.0.0", "plugin-a@1.1.0")
-            .await
-            .unwrap());
-        assert!(cache
-            .get("plugin-a@1.0.0", "conversation-index")
-            .await
-            .unwrap()
-            .is_none());
+        assert!(
+            cache
+                .migrate_plugin("plugin-a@1.0.0", "plugin-a@1.1.0")
+                .await
+                .unwrap()
+        );
+        assert!(
+            cache
+                .get("plugin-a@1.0.0", "conversation-index")
+                .await
+                .unwrap()
+                .is_none()
+        );
         assert_eq!(
             cache
                 .get("plugin-a@1.1.0", "conversation-index")
@@ -261,10 +293,12 @@ mod tests {
         );
 
         assert!(cache.delete_plugin("plugin-a@1.1.0").await.unwrap());
-        assert!(cache
-            .get("plugin-a@1.1.0", "conversation-index")
-            .await
-            .unwrap()
-            .is_none());
+        assert!(
+            cache
+                .get("plugin-a@1.1.0", "conversation-index")
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 }

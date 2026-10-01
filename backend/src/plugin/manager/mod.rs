@@ -3,12 +3,12 @@
 pub mod capabilities;
 pub mod discovery;
 pub mod dispatch;
-pub mod enums;
+pub mod formats;
 pub mod lifecycle;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{RwLock, Semaphore};
 use tracing::info;
@@ -16,14 +16,11 @@ use tracing::info;
 use crate::core::error::{Result, TingError};
 use crate::plugin::config::PluginConfigManager;
 use crate::plugin::host_gateway::{PluginHostGateway, PluginHostGatewayHandle};
-use crate::plugin::js::npm::NpmManager;
 use crate::plugin::types::{
-    LocalizedText, Plugin, PluginCapability, PluginContext, PluginDependency, PluginId,
-    PluginMetadata, PluginState, PluginStats, PluginType, ScraperCapabilities,
+    LocalizedText, Permission, Plugin, PluginCapability, PluginContext, PluginDependency, PluginId,
+    PluginMetadata, PluginState, PluginStats, ScraperCapabilities,
 };
 use crate::plugin::wasm::WasmRuntime;
-
-pub use enums::{FormatMethod, ScraperMethod};
 
 /// Configuration for the plugin manager
 #[derive(Debug, Clone)]
@@ -38,6 +35,9 @@ pub struct PluginConfig {
 pub(crate) struct PluginEntry {
     pub(crate) metadata: PluginMetadata,
     pub(crate) instance: Arc<dyn Plugin>,
+    pub(crate) generation: uuid::Uuid,
+    resource_scopes:
+        std::sync::Mutex<Vec<std::sync::Weak<crate::plugin::resources::ResourceScope>>>,
     pub(crate) state: PluginState,
     pub(crate) load_error: Option<String>,
     pub(crate) stats: PluginStats,
@@ -49,6 +49,8 @@ impl PluginEntry {
         Self {
             metadata,
             instance,
+            generation: uuid::Uuid::new_v4(),
+            resource_scopes: std::sync::Mutex::new(Vec::new()),
             state: PluginState::Loaded,
             load_error: None,
             stats: PluginStats::new(),
@@ -58,6 +60,37 @@ impl PluginEntry {
 
     pub(crate) fn set_state(&mut self, state: PluginState) {
         self.state = state;
+    }
+
+    pub(crate) fn track_resource_scope(
+        &self,
+        scope: &Arc<crate::plugin::resources::ResourceScope>,
+    ) -> Result<()> {
+        let mut scopes = self.resource_scopes.lock().map_err(|_| {
+            TingError::PluginExecutionError("Resource scope registry unavailable".into())
+        })?;
+        scopes.retain(|scope| scope.strong_count() != 0);
+        if scopes.len() >= 128 {
+            return Err(TingError::PluginExecutionError(
+                "Plugin scope limit reached".into(),
+            ));
+        }
+        scopes.push(Arc::downgrade(scope));
+        Ok(())
+    }
+
+    pub(crate) fn cancel_resource_scopes(&self) {
+        if let Ok(mut scopes) = self.resource_scopes.lock() {
+            for scope in scopes.drain(..).filter_map(|scope| scope.upgrade()) {
+                scope.cancel();
+            }
+        }
+    }
+}
+
+impl Drop for PluginEntry {
+    fn drop(&mut self) {
+        self.cancel_resource_scopes();
     }
 }
 
@@ -72,7 +105,6 @@ pub struct PluginInfo {
     pub description: String,
     #[serde(default)]
     pub description_i18n: LocalizedText,
-    pub plugin_type: PluginType,
     pub state: PluginState,
     pub total_calls: u64,
     pub successful_calls: u64,
@@ -87,7 +119,7 @@ pub struct PluginInfo {
     #[serde(default)]
     pub config_schema: Option<serde_json::Value>,
     #[serde(default)]
-    pub permissions: Vec<String>,
+    pub permissions: Vec<Permission>,
     #[serde(default)]
     pub license: Option<String>,
     #[serde(default)]
@@ -113,7 +145,6 @@ impl PluginInfo {
             author: metadata.author.clone(),
             description: metadata.description.clone(),
             description_i18n: metadata.description_i18n.clone(),
-            plugin_type: metadata.plugin_type,
             state: *state,
             total_calls: 0,
             successful_calls: 0,
@@ -123,7 +154,7 @@ impl PluginInfo {
             dependencies: metadata.dependencies.clone(),
             error: None,
             config_schema: metadata.config_schema.clone(),
-            permissions: metadata.permissions.iter().map(|p| p.to_string()).collect(),
+            permissions: metadata.permissions.clone(),
             license: metadata.license.clone(),
             repo: metadata.repo.clone(),
             min_core_version: metadata.min_core_version.clone(),
@@ -185,12 +216,6 @@ impl Plugin for FailedPlugin {
     async fn shutdown(&self) -> Result<()> {
         Ok(())
     }
-    fn plugin_type(&self) -> PluginType {
-        self.metadata.plugin_type
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
 }
 
 type PluginStateSubscriber = Box<dyn Fn(crate::plugin::types::PluginStateEvent) + Send + Sync>;
@@ -207,14 +232,17 @@ pub struct PluginManager {
     pub(crate) load_semaphore: Arc<Semaphore>,
     pub(crate) store_cache: Arc<crate::plugin::store::PluginCache>,
     pub(crate) config_manager: std::sync::RwLock<Option<Arc<PluginConfigManager>>>,
-    pub(crate) npm_manager: Arc<NpmManager>,
     pub(crate) host_gateway_handle: PluginHostGatewayHandle,
+    pub(crate) event_bus: Arc<crate::plugin::events::DefaultPluginEventBus>,
 }
 
 impl PluginManager {
     /// Create a new plugin manager
     pub fn new(config: PluginConfig) -> Result<Self> {
-        let wasm_runtime = Arc::new(WasmRuntime::new()?);
+        let wasm_runtime = Arc::new(WasmRuntime::with_limits(
+            config.max_memory_per_plugin,
+            config.max_execution_time,
+        )?);
         let http_client = reqwest::Client::builder()
             .user_agent("TingReader/1.0")
             .redirect(reqwest::redirect::Policy::none())
@@ -223,8 +251,6 @@ impl PluginManager {
             .no_proxy()
             .build()
             .map_err(|e| TingError::NetworkError(e.to_string()))?;
-
-        let npm_cache_dir = config.plugin_dir.join("data").join("npm-cache");
 
         Ok(Self {
             config,
@@ -236,8 +262,8 @@ impl PluginManager {
             load_semaphore: Arc::new(Semaphore::new(2)),
             store_cache: Arc::new(crate::plugin::store::PluginCache::new()),
             config_manager: std::sync::RwLock::new(None),
-            npm_manager: Arc::new(NpmManager::new(None, Some(npm_cache_dir))),
             host_gateway_handle: PluginHostGatewayHandle::default(),
+            event_bus: Arc::new(crate::plugin::events::DefaultPluginEventBus::new()),
         })
     }
 
@@ -319,29 +345,25 @@ impl PluginManager {
         providers.sort_by(|left, right| {
             left.plugin_id
                 .cmp(&right.plugin_id)
-                .then_with(|| left.capability.id.cmp(&right.capability.id))
+                .then_with(|| left.capability.id().cmp(right.capability.id()))
         });
 
         let Some(provider) = providers.into_iter().next() else {
             return Ok(Vec::new());
         };
 
-        let cache_key = format!("{}:{}", provider.plugin_id, provider.capability.id);
-        if !force_refresh
-            && let Some(cached) = self.store_cache.get(&cache_key).await {
-                return Ok(cached);
-            }
+        let cache_key = format!("{}:{}", provider.plugin_id, provider.capability.id());
+        if !force_refresh && let Some(cached) = self.store_cache.get(&cache_key).await {
+            return Ok(cached);
+        }
 
-        let invoke = provider
-            .capability
-            .invoke
-            .clone()
-            .unwrap_or_else(|| "listPlugins".to_string());
         let response = self
-            .invoke_plugin(
+            .invoke_capability(
                 &provider.plugin_id,
-                &invoke,
+                provider.capability.id(),
+                "list_plugins",
                 serde_json::json!({ "force_refresh": force_refresh }),
+                &crate::plugin::types::PluginInvocationContext::default(),
             )
             .await?;
         let plugins = crate::plugin::store::parse_store_plugins_response(response)?;
@@ -365,25 +387,6 @@ impl PluginManager {
             .ok_or_else(|| TingError::PluginNotFound(id.clone()))
     }
 
-    pub async fn find_plugins_by_type(&self, plugin_type: PluginType) -> Vec<PluginInfo> {
-        let registry = self.registry.read().await;
-        registry
-            .values()
-            .filter(|e| e.metadata.plugin_type == plugin_type)
-            .map(|entry| {
-                if entry.state == PluginState::Failed {
-                    PluginInfo::from_metadata_with_error(
-                        &entry.metadata,
-                        &entry.state,
-                        entry.load_error.clone().unwrap_or_default(),
-                    )
-                } else {
-                    PluginInfo::from_metadata(&entry.metadata, &entry.state)
-                }
-            })
-            .collect()
-    }
-
     pub async fn find_plugins_by_capability_kind(&self, kind: &str) -> Vec<PluginInfo> {
         let registry = self.registry.read().await;
         registry
@@ -392,7 +395,7 @@ impl PluginManager {
                 e.metadata
                     .effective_capabilities()
                     .iter()
-                    .any(|capability| capability.kind == kind)
+                    .any(|capability| capability.kind() == kind)
             })
             .map(|entry| {
                 if entry.state == PluginState::Failed {
@@ -406,50 +409,6 @@ impl PluginManager {
                 }
             })
             .collect()
-    }
-
-    pub fn is_system_supported_format(extension: &str) -> bool {
-        matches!(
-            extension.to_lowercase().as_str(),
-            "mp3" | "m4a" | "wav" | "ogg" | "flac" | "aac" | "wma" | "opus" | "m4b"
-        )
-    }
-
-    pub async fn find_plugin_for_format(&self, file_path: &Path) -> Option<PluginInfo> {
-        let extension = file_path.extension()?.to_string_lossy().to_lowercase();
-
-        if Self::is_system_supported_format(&extension) {
-            return None;
-        }
-
-        let registry = self.registry.read().await;
-
-        registry
-            .values()
-            .filter(|e| {
-                e.metadata
-                    .effective_capabilities()
-                    .iter()
-                    .any(|capability| capability.kind == "format_handler")
-            })
-            .find(|e| {
-                e.metadata
-                    .supported_extensions
-                    .as_ref()
-                    .map(|exts| exts.contains(&extension))
-                    .unwrap_or(false)
-            })
-            .map(|entry| {
-                if entry.state == PluginState::Failed {
-                    PluginInfo::from_metadata_with_error(
-                        &entry.metadata,
-                        &entry.state,
-                        entry.load_error.clone().unwrap_or_default(),
-                    )
-                } else {
-                    PluginInfo::from_metadata(&entry.metadata, &entry.state)
-                }
-            })
     }
 }
 

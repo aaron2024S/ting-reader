@@ -191,48 +191,49 @@ impl PluginStats {
         if let (Some(avg), Some(max_avg)) = (
             self.avg_execution_time_ms,
             thresholds.max_avg_execution_time_ms,
-        )
-            && avg > max_avg as f64 {
-                alerts.push(PerformanceAlert {
-                    alert_type: AlertType::AvgExecutionTime,
-                    current_value: avg,
-                    threshold_value: max_avg as f64,
-                    message: format!(
-                        "Average execution time ({:.2}ms) exceeds threshold ({}ms)",
-                        avg, max_avg
-                    ),
-                });
-            }
+        ) && avg > max_avg as f64
+        {
+            alerts.push(PerformanceAlert {
+                alert_type: AlertType::AvgExecutionTime,
+                current_value: avg,
+                threshold_value: max_avg as f64,
+                message: format!(
+                    "Average execution time ({:.2}ms) exceeds threshold ({}ms)",
+                    avg, max_avg
+                ),
+            });
+        }
 
         if let (Some(p95), Some(max_p95)) = (
             self.p95_execution_time_ms,
             thresholds.max_p95_execution_time_ms,
-        )
-            && p95 > max_p95 {
-                alerts.push(PerformanceAlert {
-                    alert_type: AlertType::P95ExecutionTime,
-                    current_value: p95 as f64,
-                    threshold_value: max_p95 as f64,
-                    message: format!(
-                        "P95 execution time ({}ms) exceeds threshold ({}ms)",
-                        p95, max_p95
-                    ),
-                });
-            }
+        ) && p95 > max_p95
+        {
+            alerts.push(PerformanceAlert {
+                alert_type: AlertType::P95ExecutionTime,
+                current_value: p95 as f64,
+                threshold_value: max_p95 as f64,
+                message: format!(
+                    "P95 execution time ({}ms) exceeds threshold ({}ms)",
+                    p95, max_p95
+                ),
+            });
+        }
 
         if let (Some(memory), Some(max_memory)) =
             (self.memory_usage_bytes, thresholds.max_memory_bytes)
-            && memory > max_memory {
-                alerts.push(PerformanceAlert {
-                    alert_type: AlertType::MemoryUsage,
-                    current_value: memory as f64,
-                    threshold_value: max_memory as f64,
-                    message: format!(
-                        "Memory usage ({} bytes) exceeds threshold ({} bytes)",
-                        memory, max_memory
-                    ),
-                });
-            }
+            && memory > max_memory
+        {
+            alerts.push(PerformanceAlert {
+                alert_type: AlertType::MemoryUsage,
+                current_value: memory as f64,
+                threshold_value: max_memory as f64,
+                message: format!(
+                    "Memory usage ({} bytes) exceeds threshold ({} bytes)",
+                    memory, max_memory
+                ),
+            });
+        }
 
         if let Some(min_success) = thresholds.min_success_rate {
             let success_rate = self.success_rate();

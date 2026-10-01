@@ -5,10 +5,15 @@ import { usePlayerStore } from "../../core/stores/playerStore";
 import { useAuthStore } from "../../core/stores/authStore";
 import { useWebSocket } from "../../core/hooks/useWebSocket";
 import apiClient from "../../core/api/client";
+import { BOOKMARK_SEEK_REQUESTED } from "../../core/api/reading";
 import type { Chapter } from "../../core/types";
 import { sortChaptersForPlayback } from "../../core/utils/chapter";
 import { setAlpha, toSolidColor, isTooLight } from "../../core/utils/color";
 import { useBookshelfCoverShape } from "../../core/hooks/useBookshelfCoverShape";
+import {
+  PLAYBACK_PREFERENCES_UPDATED,
+  type PlaybackPreferences,
+} from "../../core/utils/playbackPreferences";
 import ProgressBar from "./ProgressBar";
 import {
   isAppleMobileBrowser,
@@ -17,6 +22,7 @@ import {
 } from "./platform";
 import { getRuntimeBaseUrl, getRuntimePathname, getRuntimeUrl } from "../../core/utils/runtimeUrl";
 import PlayerSettingsModal from "./PlayerSettingsModal";
+import BookmarkManagerModal from "./BookmarkManagerModal";
 import ChapterListDrawer from "./ChapterListDrawer";
 import {
   useIsDarkMode,
@@ -91,11 +97,14 @@ const Player: React.FC = () => {
   const [showChapters, setShowChapters] = useState(false);
   const [showSleepTimer, setShowSleepTimer] = useState(false);
   const [showVolumeControl, setShowVolumeControl] = useState(false);
+  const [showSpeedControl, setShowSpeedControl] = useState(false);
+  const [showBookmarks, setShowBookmarks] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [currentGroupIndex, setCurrentGroupIndex] = useState(0);
   const [activeTab, setActiveTab] = useState<"main" | "extra">("main");
   const scrollRef = useRef<HTMLDivElement>(null);
   const volumeControlRef = useRef<HTMLDivElement>(null);
+  const speedControlRef = useRef<HTMLDivElement>(null);
 
   const scrollGroups = (direction: "left" | "right") => {
     if (scrollRef.current) {
@@ -186,7 +195,6 @@ const Player: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [bufferedTime, setBufferedTime] = useState(0);
   const [autoPreload, setAutoPreload] = useState(false);
-  const [autoCache, setAutoCache] = useState(false);
   const [retryCount, setRetryCount] = useState(0);
   const [shouldTranscode, setShouldTranscode] = useState(false);
   const [seekOffset, setSeekOffset] = useState<number | null>(null);
@@ -198,6 +206,7 @@ const Player: React.FC = () => {
   const [hlsSessionId, setHlsSessionId] = useState<string | null>(null);
   const [hlsChapterId, setHlsChapterId] = useState<string | null>(null);
   const [hlsSeekOffset, setHlsSeekOffset] = useState(0);
+  const [hlsUnavailable, setHlsUnavailable] = useState(false);
   const isInitialLoadRef = useRef(true);
   const hlsRequestIdRef = useRef(0);
   // 防止 skip-outro 在同一章节内多次触发 nextChapter。
@@ -205,18 +214,19 @@ const Player: React.FC = () => {
   const shouldUseHlsForCurrentChapter =
     isAppleMobileBrowser() &&
     isStrmPath(currentChapter?.path) &&
-    !shouldTranscode;
+    shouldTranscode &&
+    !hlsUnavailable;
   const isUsingHlsForCurrentChapter =
     shouldUseHlsForCurrentChapter &&
     hlsChapterId === currentChapter?.id &&
     !!hlsStreamUrl;
-  const getStreamUrl = (chapterId: string) => {
+  const getStreamUrl = (chapterId: string, forPreload = false) => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let url = (window as any).electronAPI
       ? `ting://stream/${chapterId}?token=${token}&remote=${encodeURIComponent(API_BASE_URL)}`
       : `${getRuntimeUrl(`/api/stream/${chapterId}`, API_BASE_URL)}?token=${token}`;
 
-    if (shouldTranscode) url += "&transcode=mp3";
+    if (!forPreload && shouldTranscode && !shouldUseHlsForCurrentChapter) url += "&transcode=mp3";
 
     const initialOffset =
       streamStartOffset.chapterId === chapterId
@@ -226,8 +236,9 @@ const Player: React.FC = () => {
           : 0;
     const explicitSeekOffset = currentChapter?.id === chapterId ? seekOffset : null;
     const requestSeekOffset = explicitSeekOffset !== null ? explicitSeekOffset : initialOffset;
-    if (requestSeekOffset > 0) url += `&seek=${Math.floor(requestSeekOffset)}`;
-    if (retryCount > 0) url += `&retry=${retryCount}`;
+    if (!forPreload && requestSeekOffset > 0) url += `&seek=${Math.floor(requestSeekOffset)}`;
+    if (!forPreload && retryCount > 0) url += `&retry=${retryCount}`;
+    if (forPreload) url += "&preload=true";
     return url;
   };
   const getTranscodeStartOffset = () => {
@@ -261,26 +272,33 @@ const Player: React.FC = () => {
 
   // Fetch settings for auto_preload and user preferences
   useEffect(() => {
+    const controller = new AbortController();
+    const updatePreloadSettings = (event: Event) => {
+      controller.abort();
+      const settings = (event as CustomEvent<PlaybackPreferences>).detail;
+      setAutoPreload(settings.auto_preload);
+    };
+    window.addEventListener(PLAYBACK_PREFERENCES_UPDATED, updatePreloadSettings);
     apiClient
-      .get("/api/settings")
+      .get("/api/settings", { signal: controller.signal })
       .then((res) => {
+        if (controller.signal.aborted) return;
         setAutoPreload(!!res.data.auto_preload);
-        setAutoCache(!!res.data.auto_cache);
 
         // Apply user's default playback speed
         if (res.data.playback_speed) {
           setPlaybackSpeed(res.data.playback_speed);
         }
 
-        // Apply volume if present in settings (check both root and settings_json)
-        // Note: Volume might be stored in settings_json as it's not a core column
-        const vol = res.data.volume ?? res.data.settings_json?.volume;
-        if (vol !== undefined) {
-          setVolume(vol);
-        }
       })
-      .catch((err) => console.error("Failed to fetch playback settings", err));
-  }, [setPlaybackSpeed, setVolume]);
+      .catch((err) => {
+        if (!controller.signal.aborted) console.error("Failed to fetch playback settings", err);
+      });
+    return () => {
+      controller.abort();
+      window.removeEventListener(PLAYBACK_PREFERENCES_UPDATED, updatePreloadSettings);
+    };
+  }, [setPlaybackSpeed, token, activeUrl]);
 
   // Fetch chapters for the current book
   useEffect(() => {
@@ -314,9 +332,10 @@ const Player: React.FC = () => {
   }, [currentBook?.id]);
 
   // Close timer / volume menus when clicking outside.
-  useOutsideClickClose([timerMenuRef, volumeControlRef], (ref) => {
+  useOutsideClickClose([timerMenuRef, volumeControlRef, speedControlRef], (ref) => {
     if (ref === timerMenuRef) setShowSleepTimer(false);
     if (ref === volumeControlRef) setShowVolumeControl(false);
+    if (ref === speedControlRef) setShowSpeedControl(false);
   });
 
   useEffect(() => {
@@ -337,12 +356,14 @@ const Player: React.FC = () => {
     skipOutroChapterRef.current = null;
     hlsRequestIdRef.current += 1;
     const timer = window.setTimeout(() => {
+      setError(null);
       setShouldTranscode(false);
       setSeekOffset(null);
       setHlsStreamUrl(null);
       setHlsSessionId(null);
       setHlsChapterId(null);
       setHlsSeekOffset(0);
+      setHlsUnavailable(false);
       setBufferedTime(0);
       setRetryCount(0);
       if (currentChapter?.duration && currentChapter.duration > 0) {
@@ -417,7 +438,7 @@ const Player: React.FC = () => {
           setHlsStreamUrl(null);
           setHlsSessionId(null);
           setHlsChapterId(null);
-          tryTranscodeFallback();
+          setHlsUnavailable(true);
         });
     }, 0);
 
@@ -474,8 +495,6 @@ const Player: React.FC = () => {
   useEffect(() => {
     if (!audioRef.current || !currentChapter) return;
     if (shouldUseHlsForCurrentChapter && !hlsStreamUrl) return;
-    setTimeout(() => setError(null), 0); // Clear error on source change
-
     // Reset retry count when chapter changes (this is also handled in another effect, but safe to double check)
     // IMPORTANT: If source changes due to transcoding, we do NOT want to reset retry count immediately here
     // or we might enter a loop.
@@ -505,16 +524,18 @@ const Player: React.FC = () => {
     chapterId: currentChapter?.id,
     shouldTranscode,
     retryCount,
-    onStuck: tryTranscodeFallback,
+    onStuck: isStrmPath(currentChapter?.path)
+      ? () => setError(t("player.strmDirectError"))
+      : tryTranscodeFallback,
   });
 
   // Preload and Server-side Cache next chapter logic
   useNextChapterPreloader({
     autoPreload,
-    autoCache,
     bookId: currentBook?.id,
     chapterId: currentChapter?.id,
-    getNextStreamUrl: getStreamUrl,
+    sourceKey: `${API_BASE_URL}:${token ?? ""}`,
+    getNextStreamUrl: (id) => getStreamUrl(id, true),
   });
 
   // Handle Skip Intro and Outro
@@ -593,7 +614,7 @@ const Player: React.FC = () => {
   useEffect(() => {
     if (!audioRef.current) return;
     audioRef.current.volume = isMuted ? 0 : volume;
-  }, [volume, isMuted]);
+  }, [volume, isMuted, currentChapter?.id]);
 
   // Sync progress to backend via WebSocket (primary) and HTTP (fallback);
   // also flushes once immediately on pause.
@@ -608,6 +629,7 @@ const Player: React.FC = () => {
 
   const handleLoadedMetadata = () => {
     if (audioRef.current) {
+      audioRef.current.volume = isMuted ? 0 : volume;
       let browserDuration = audioRef.current.duration;
 
       // Prefer duration already stored with the chapter.
@@ -721,6 +743,22 @@ const Player: React.FC = () => {
     }
   };
 
+  const jumpToBookmark = (chapterId: string, position: number) => {
+    if (!currentBook) return;
+    const chapter = chapters.find((item) => item.id === chapterId);
+    if (!chapter) {
+      alert(t('bookmarks.chapterUnavailable', '当前书籍章节尚未加载'));
+      return;
+    }
+    if (currentChapter?.id === chapterId) {
+      seekToTime(position);
+      usePlayerStore.setState({ isPlaying: true });
+    } else {
+      playChapter(currentBook, chapters, chapter, position);
+    }
+    setShowBookmarks(false);
+  };
+
   const [isSeeking, setIsSeeking] = useState(false);
   const [seekTime, setSeekTime] = useState(0);
 
@@ -801,6 +839,17 @@ const Player: React.FC = () => {
     setIsSeeking(false);
     seekToTime(time);
   };
+
+  const onBookmarkSeek = React.useEffectEvent((event: Event) => {
+    const request = (event as CustomEvent<{ chapterId: string; position: number }>).detail;
+    if (request.chapterId !== currentChapter?.id || !Number.isFinite(request.position)) return;
+    seekToTime(request.position);
+    setIsPlaying(true);
+  });
+  useEffect(() => {
+    window.addEventListener(BOOKMARK_SEEK_REQUESTED, onBookmarkSeek);
+    return () => window.removeEventListener(BOOKMARK_SEEK_REQUESTED, onBookmarkSeek);
+  }, []);
 
   const formatTime = formatPlayerTime;
   const getLocalizedChapterProgressText = React.useCallback(
@@ -936,12 +985,12 @@ const Player: React.FC = () => {
   return (
     <div
       className={`
-        absolute transition-all duration-500 ease-in-out
+        transition-all duration-500 ease-in-out
         ${(isHiddenPage || isSeriesEditing) && !isExpanded ? "translate-y-full opacity-0 pointer-events-none" : ""}
         ${
           isExpanded
-            ? "inset-0 z-[110] bg-white dark:bg-slate-950"
-            : "left-0 right-0 z-[30] bg-transparent pointer-events-none"
+            ? "fixed inset-0 z-[110] bg-white dark:bg-slate-950"
+            : "absolute left-0 right-0 z-[30] bg-transparent pointer-events-none"
         }
       `}
       style={miniPlayerStyle}
@@ -950,11 +999,11 @@ const Player: React.FC = () => {
         key={currentChapter.id}
         ref={audioRef}
         src={audioSrc || undefined}
-        crossOrigin="anonymous"
         onTimeUpdate={handleTimeUpdate}
         onProgress={handleProgress}
         onLoadedMetadata={handleLoadedMetadata}
         onCanPlay={() => {
+          setError(null);
           const audio = audioRef.current;
           if (
             audio &&
@@ -992,23 +1041,23 @@ const Player: React.FC = () => {
               return;
             }
 
-            // Auto retry on network (2), decode error (3) or source not supported (4)
-            // We include network error (2) in retry logic just in case, but transcode mainly fixes 3 & 4
-            if (retryCount < 3) {
+            // A network error (or an ambiguous unsupported error on a remote .strm)
+            // must not silently turn a direct stream into a server download.
+            if (!shouldTranscode && retryCount < 3 &&
+                (!isStrmPath(currentChapter?.path) || audio.error.code === 3)) {
               tryTranscodeFallback();
               return;
             }
             console.error("Audio element error", audio.error);
           } else {
-            // Even if audio.error is null, if we have an error event and haven't retried max times, try transcoding
-            // This handles edge cases where browser doesn't populate error object properly
-            if (retryCount < 3) {
+            if (!isStrmPath(currentChapter?.path) && !shouldTranscode && retryCount < 3) {
               tryTranscodeFallback();
               return;
             }
             console.error("Audio element error (unknown)", e);
           }
-          setError(t("player.audioLoadError"));
+          setError(t(isStrmPath(currentChapter?.path)
+            ? "player.strmDirectError" : "player.audioLoadError"));
         }}
       />
 
@@ -1017,7 +1066,6 @@ const Player: React.FC = () => {
           {error}
         </div>
       )}
-
       {/* Mini Player - Floating Card Style on Mobile */}
       {!isExpanded && (
         <div
@@ -1154,8 +1202,10 @@ const Player: React.FC = () => {
       {/* Expanded Player View */}
       {isExpanded && (
         <div
-          className="absolute inset-0 flex flex-col p-4 sm:p-8 md:p-12 overflow-y-auto animate-in slide-in-from-bottom duration-500 pb-40 xl:pb-12 bg-white dark:bg-slate-950"
-          style={{
+          className="absolute inset-0 flex flex-col p-4 sm:p-8 md:p-12 overflow-y-auto animate-in slide-in-from-bottom duration-500 bg-white dark:bg-slate-950"
+            style={{
+              paddingTop: "max(env(safe-area-inset-top, 0px), clamp(1rem, 3vw, 3rem))",
+              paddingBottom: "max(env(safe-area-inset-bottom, 0px), clamp(1rem, 3vw, 3rem))",
             backgroundColor: isWidgetMode
               ? effectiveThemeColor
                 ? toSolidColor(effectiveThemeColor)
@@ -1206,20 +1256,11 @@ const Player: React.FC = () => {
 
               <ExpandedBottomControls
                 playbackSpeed={playbackSpeed}
-                onCyclePlaybackSpeed={() =>
-                  setPlaybackSpeed(
-                    playbackSpeed >= 2 ? 0.5 : playbackSpeed + 0.25,
-                  )
-                }
-                volume={volume}
-                isMuted={isMuted}
-                showVolumeControl={showVolumeControl}
-                volumeControlRef={volumeControlRef}
-                onToggleShowVolumeControl={() =>
-                  setShowVolumeControl(!showVolumeControl)
-                }
-                onChangeVolume={setVolume}
-                onToggleMuted={() => setIsMuted(!isMuted)}
+                showSpeedControl={showSpeedControl}
+                speedControlRef={speedControlRef}
+                onToggleSpeedControl={() => setShowSpeedControl((value) => !value)}
+                onChangePlaybackSpeed={setPlaybackSpeed}
+                onOpenBookmarks={() => setShowBookmarks(true)}
                 sleepTimer={sleepTimer}
                 showSleepTimer={showSleepTimer}
                 customMinutes={customMinutes}
@@ -1245,6 +1286,11 @@ const Player: React.FC = () => {
             <PlayerSettingsModal
               editSkipIntro={editSkipIntro}
               editSkipOutro={editSkipOutro}
+              volume={volume}
+              onChangeVolume={(value) => {
+                setVolume(value);
+                if (value > 0) setIsMuted(false);
+              }}
               onChangeSkipIntro={setEditSkipIntro}
               onChangeSkipOutro={setEditSkipOutro}
               onClose={() => setShowSettings(false)}
@@ -1276,6 +1322,15 @@ const Player: React.FC = () => {
             formatTime={formatTime}
             getChapterProgressText={getLocalizedChapterProgressText}
           />
+          {showBookmarks && currentBook && currentChapter && <BookmarkManagerModal
+            key={currentBook.id}
+            bookId={currentBook.id}
+            bookTitle={currentBook.title}
+            chapterId={currentChapter.id}
+            position={currentTime}
+            onClose={() => setShowBookmarks(false)}
+            onJump={jumpToBookmark}
+          />}
         </div>
       )}
     </div>

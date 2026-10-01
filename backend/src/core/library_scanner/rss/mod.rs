@@ -3,8 +3,8 @@ use crate::core::error::{Result, TingError};
 use crate::db::models::{Book, Chapter, Library};
 use crate::db::repository::{LibraryScanState, Repository};
 use chrono::{DateTime, Utc};
-use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
+use quick_xml::events::{BytesStart, Event};
 use reqwest::header::{ETAG, IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -574,10 +574,12 @@ fn parse_rss_feed(xml: &str, base_url: &Url) -> Result<RssFeed> {
             }
             Ok(Event::End(event)) => {
                 let tag = tag_name(event.name().as_ref());
-                if (tag == "item" || tag == "entry") && current_episode.is_some()
-                    && let Some(episode) = current_episode.take() {
-                        feed.episodes.push(episode);
-                    }
+                if (tag == "item" || tag == "entry")
+                    && current_episode.is_some()
+                    && let Some(episode) = current_episode.take()
+                {
+                    feed.episodes.push(episode);
+                }
                 stack.pop();
             }
             Ok(Event::Eof) => break,
@@ -585,7 +587,7 @@ fn parse_rss_feed(xml: &str, base_url: &Url) -> Result<RssFeed> {
                 return Err(TingError::DeserializationError(format!(
                     "Failed to parse RSS XML: {}",
                     e
-                )))
+                )));
             }
             _ => {}
         }
@@ -642,15 +644,15 @@ fn handle_attrs(
         "link" if in_episode => {
             let rel = attr_value(event, &["rel"]).unwrap_or_default();
             if rel.eq_ignore_ascii_case("enclosure")
-                && let Some(episode) = current_episode.as_mut() {
-                    set_episode_media(
-                        episode,
-                        attr_value(event, &["href"])
-                            .and_then(|value| resolve_url(base_url, &value)),
-                        attr_value(event, &["type"]),
-                        attr_value(event, &["length"]).and_then(|value| value.parse::<u64>().ok()),
-                    );
-                }
+                && let Some(episode) = current_episode.as_mut()
+            {
+                set_episode_media(
+                    episode,
+                    attr_value(event, &["href"]).and_then(|value| resolve_url(base_url, &value)),
+                    attr_value(event, &["type"]),
+                    attr_value(event, &["length"]).and_then(|value| value.parse::<u64>().ok()),
+                );
+            }
         }
         "itunes:image" | "image" | "media:thumbnail" if !in_episode => {
             if feed.image.is_none() {
@@ -757,9 +759,11 @@ fn handle_text(
             }
         }
         "url"
-            if feed.image.is_none() && stack.iter().rev().skip(1).any(|parent| parent == "image") => {
-                feed.image = clean_text(raw_value);
-            }
+            if feed.image.is_none()
+                && stack.iter().rev().skip(1).any(|parent| parent == "image") =>
+        {
+            feed.image = clean_text(raw_value);
+        }
         _ => {}
     }
 }

@@ -194,12 +194,13 @@ impl BookService {
                 ));
             }
             if let Some(existing) = self.book_repo.find_by_hash(&hash).await?
-                && existing.id != id {
-                    return Err(TingError::ValidationError(format!(
-                        "Another book with hash {} already exists with ID {}",
-                        hash, existing.id
-                    )));
-                }
+                && existing.id != id
+            {
+                return Err(TingError::ValidationError(format!(
+                    "Another book with hash {} already exists with ID {}",
+                    hash, existing.id
+                )));
+            }
             book.hash = hash;
         }
         if let Some(tags) = request.tags {

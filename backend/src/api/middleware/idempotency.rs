@@ -1,5 +1,5 @@
 use axum::{
-    body::{to_bytes, Body, Bytes},
+    body::{Body, Bytes, to_bytes},
     extract::Request,
     http::{HeaderMap, Method, StatusCode},
     middleware::Next,
@@ -10,7 +10,7 @@ use std::{
     sync::OnceLock,
     time::{Duration, Instant},
 };
-use tokio::sync::{watch, Mutex};
+use tokio::sync::{Mutex, watch};
 
 const IDEMPOTENCY_TTL: Duration = Duration::from_secs(120);
 const MAX_CACHED_RESPONSE_SIZE: usize = 2 * 1024 * 1024;
@@ -158,7 +158,7 @@ pub async fn idempotency(request: Request, next: Next) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{middleware, routing::post, Router};
+    use axum::{Router, middleware, routing::post};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tower::ServiceExt;
 

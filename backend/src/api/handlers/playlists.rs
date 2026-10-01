@@ -8,10 +8,10 @@ use crate::core::error::{Result, TingError};
 use crate::db::models::{Playlist, PlaylistItem};
 use crate::db::repository::Repository;
 use axum::{
+    Json,
     extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
-    Json,
 };
 use uuid::Uuid;
 
@@ -200,6 +200,10 @@ async fn build_playlist_response(
     user_id: &str,
     is_admin: bool,
 ) -> Result<PlaylistResponse> {
+    let percentages =
+        crate::db::repository::reading::ReadingRepository::new(state.book_repo.db().clone())
+            .percentages(user_id)
+            .await?;
     let mut response = PlaylistResponse::from(playlist.clone());
     let items = state
         .playlist_repo
@@ -218,7 +222,9 @@ async fn build_playlist_response(
                         continue;
                     }
 
-                    let book_response = BookResponse::from(book);
+                    let mut book_response = BookResponse::from(book);
+                    book_response.progress_percent =
+                        percentages.get(&book_response.id).copied().unwrap_or(0.0);
                     response.book_ids.push(book_response.id.clone());
                     response.books.push(book_response.clone());
                     response.items.push(PlaylistItemResponse {
@@ -248,7 +254,9 @@ async fn build_playlist_response(
                         .await?;
 
                     for (book, _) in series_books {
-                        let book_response = BookResponse::from(book);
+                        let mut book_response = BookResponse::from(book);
+                        book_response.progress_percent =
+                            percentages.get(&book_response.id).copied().unwrap_or(0.0);
                         response.book_ids.push(book_response.id.clone());
                         response.books.push(book_response.clone());
                         series_response.books.push(book_response);

@@ -56,6 +56,7 @@ const ScraperConfigurator: React.FC<Props> = ({ configStr, sources, onChange, li
 
   const nfoEnabled = config.nfo_writing_enabled ?? false;
   const metadataWritingEnabled = config.metadata_writing_enabled ?? false;
+  const webdavMetadataWritingEnabled = config.webdav_metadata_writing_enabled ?? false;
   const useFilenameAsTitle = config.use_filename_as_title ?? true;
   const extractAudioCover = config.extract_audio_cover ?? true;
   const extractExtraChapters = config.extract_extra_chapters ?? true;
@@ -134,8 +135,24 @@ const ScraperConfigurator: React.FC<Props> = ({ configStr, sources, onChange, li
     <div className="bg-slate-50 dark:bg-slate-800 rounded-xl p-4 border border-slate-200 dark:border-slate-700">
       {/* Settings Toggles */}
       <div className="space-y-2 mb-4">
-        {/* WebDAV libraries are read-only and never write sidecar metadata. */}
-        {libraryType !== 'webdav' && (
+        {libraryType === 'webdav' && (
+          <div className="flex items-center gap-3 p-3 bg-white dark:bg-slate-900 rounded-lg border border-slate-200 dark:border-slate-700 shadow-sm">
+            <input
+              type="checkbox"
+              id="webdav-metadata-writing"
+              checked={webdavMetadataWritingEnabled}
+              onChange={event => onChange(JSON.stringify({ ...config, webdav_metadata_writing_enabled: event.target.checked }, null, 2))}
+              className="w-4 h-4 text-primary-600 rounded focus:ring-primary-500 cursor-pointer"
+            />
+            <div className="flex min-w-0 items-center gap-1.5">
+              <label htmlFor="webdav-metadata-writing" className="text-sm font-bold text-slate-700 dark:text-slate-300 cursor-pointer">
+                {t('scraperConfig.writeMetadataToWebdav')}
+              </label>
+              <HelpHint text={t('scraperConfig.writeMetadataToWebdavHelp')} />
+            </div>
+          </div>
+        )}
+        {libraryType === 'local' && (
           <>
         {/* NFO Toggle */}
         <div className="flex items-center gap-3 p-3 bg-white dark:bg-slate-900 rounded-lg border border-slate-200 dark:border-slate-700 shadow-sm">

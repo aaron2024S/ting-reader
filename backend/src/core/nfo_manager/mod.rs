@@ -102,13 +102,11 @@ impl NfoManager {
 
         if !book_dir.exists() {
             std::fs::create_dir_all(&book_dir).map_err(|e| {
-                TingError::IoError(std::io::Error::other(
-                    format!(
-                        "Failed to create book directory {}: {}",
-                        book_dir.display(),
-                        e
-                    ),
-                ))
+                TingError::IoError(std::io::Error::other(format!(
+                    "Failed to create book directory {}: {}",
+                    book_dir.display(),
+                    e
+                )))
             })?;
         }
 
@@ -133,9 +131,11 @@ impl NfoManager {
     pub fn write_book_nfo_to_dir(&self, dir: &Path, metadata: &BookMetadata) -> Result<PathBuf> {
         if !dir.exists() {
             std::fs::create_dir_all(dir).map_err(|e| {
-                TingError::IoError(std::io::Error::other(
-                    format!("Failed to create directory {}: {}", dir.display(), e),
-                ))
+                TingError::IoError(std::io::Error::other(format!(
+                    "Failed to create directory {}: {}",
+                    dir.display(),
+                    e
+                )))
             })?;
         }
 
@@ -151,13 +151,11 @@ impl NfoManager {
 
         // Write to file
         fs::write(&nfo_path, xml_with_declaration).map_err(|e| {
-            TingError::IoError(std::io::Error::other(
-                format!(
-                    "Failed to write book NFO file {}: {}",
-                    nfo_path.display(),
-                    e
-                ),
-            ))
+            TingError::IoError(std::io::Error::other(format!(
+                "Failed to write book NFO file {}: {}",
+                nfo_path.display(),
+                e
+            )))
         })?;
 
         Ok(nfo_path)
@@ -204,13 +202,11 @@ impl NfoManager {
 
         // Write to file
         fs::write(&nfo_path, xml_with_declaration).map_err(|e| {
-            TingError::IoError(std::io::Error::other(
-                format!(
-                    "Failed to write book NFO file {}: {}",
-                    nfo_path.display(),
-                    e
-                ),
-            ))
+            TingError::IoError(std::io::Error::other(format!(
+                "Failed to write book NFO file {}: {}",
+                nfo_path.display(),
+                e
+            )))
         })?;
 
         Ok(nfo_path)
@@ -238,9 +234,11 @@ impl NfoManager {
     pub fn read_book_nfo(&self, nfo_path: &Path) -> Result<BookMetadata> {
         // Read file content
         let xml = fs::read_to_string(nfo_path).map_err(|e| {
-            TingError::IoError(std::io::Error::other(
-                format!("Failed to read book NFO file {}: {}", nfo_path.display(), e),
-            ))
+            TingError::IoError(std::io::Error::other(format!(
+                "Failed to read book NFO file {}: {}",
+                nfo_path.display(),
+                e
+            )))
         })?;
 
         // Deserialize from XML
@@ -295,13 +293,11 @@ impl NfoManager {
 
         // Write to file
         fs::write(&nfo_path, xml_with_declaration).map_err(|e| {
-            TingError::IoError(std::io::Error::other(
-                format!(
-                    "Failed to write chapter NFO file {}: {}",
-                    nfo_path.display(),
-                    e
-                ),
-            ))
+            TingError::IoError(std::io::Error::other(format!(
+                "Failed to write chapter NFO file {}: {}",
+                nfo_path.display(),
+                e
+            )))
         })?;
 
         Ok(nfo_path)
@@ -329,13 +325,11 @@ impl NfoManager {
     pub fn read_chapter_nfo(&self, nfo_path: &Path) -> Result<ChapterMetadata> {
         // Read file content
         let xml = fs::read_to_string(nfo_path).map_err(|e| {
-            TingError::IoError(std::io::Error::other(
-                format!(
-                    "Failed to read chapter NFO file {}: {}",
-                    nfo_path.display(),
-                    e
-                ),
-            ))
+            TingError::IoError(std::io::Error::other(format!(
+                "Failed to read chapter NFO file {}: {}",
+                nfo_path.display(),
+                e
+            )))
         })?;
 
         // Deserialize from XML
@@ -366,28 +360,29 @@ impl NfoManager {
 
         // Read directory and delete all .nfo files
         let entries = fs::read_dir(&book_dir).map_err(|e| {
-            TingError::IoError(std::io::Error::other(
-                format!(
-                    "Failed to read book directory {}: {}",
-                    book_dir.display(),
-                    e
-                ),
-            ))
+            TingError::IoError(std::io::Error::other(format!(
+                "Failed to read book directory {}: {}",
+                book_dir.display(),
+                e
+            )))
         })?;
 
         for entry in entries {
             let entry = entry.map_err(|e| {
-                TingError::IoError(std::io::Error::other(
-                    format!("Failed to read directory entry: {}", e),
-                ))
+                TingError::IoError(std::io::Error::other(format!(
+                    "Failed to read directory entry: {}",
+                    e
+                )))
             })?;
 
             let path = entry.path();
             if path.extension().and_then(|s| s.to_str()) == Some("nfo") {
                 fs::remove_file(&path).map_err(|e| {
-                    TingError::IoError(std::io::Error::other(
-                        format!("Failed to delete NFO file {}: {}", path.display(), e),
-                    ))
+                    TingError::IoError(std::io::Error::other(format!(
+                        "Failed to delete NFO file {}: {}",
+                        path.display(),
+                        e
+                    )))
                 })?;
             }
         }
@@ -414,9 +409,11 @@ impl NfoManager {
 
         // Try to read the file
         let xml = fs::read_to_string(nfo_path).map_err(|e| {
-            TingError::IoError(std::io::Error::other(
-                format!("Failed to read NFO file {}: {}", nfo_path.display(), e),
-            ))
+            TingError::IoError(std::io::Error::other(format!(
+                "Failed to read NFO file {}: {}",
+                nfo_path.display(),
+                e
+            )))
         })?;
 
         // Check if it's valid XML by trying to parse it

@@ -90,8 +90,9 @@ const AdminStatisticsPage: React.FC = () => {
 
   const { overview } = report;
   const totalLibraries = Math.max(1, overview.total_libraries);
-  const localPercent = Math.round((overview.local_libraries / totalLibraries) * 100);
-  const webdavPercent = Math.round((overview.webdav_libraries / totalLibraries) * 100);
+  const localPercent = (overview.local_libraries / totalLibraries) * 100;
+  const webdavPercent = (overview.webdav_libraries / totalLibraries) * 100;
+  const rssPercent = (overview.rss_libraries / totalLibraries) * 100;
   const activeUserRate = overview.total_users > 0
     ? Math.round((overview.active_users / overview.total_users) * 100)
     : 0;
@@ -144,7 +145,7 @@ const AdminStatisticsPage: React.FC = () => {
           icon={<Database size={19} />}
           label={t('adminStats.libraries')}
           value={formatNumber(overview.total_libraries)}
-          detail={t('adminStats.libraryTypeDetail', { local: formatNumber(overview.local_libraries), webdav: formatNumber(overview.webdav_libraries) })}
+          detail={t('adminStats.libraryTypeDetail', { local: formatNumber(overview.local_libraries), webdav: formatNumber(overview.webdav_libraries), rss: formatNumber(overview.rss_libraries) })}
           tone="text-amber-600 bg-amber-50 dark:bg-amber-900/20"
         />
       </section>
@@ -163,8 +164,10 @@ const AdminStatisticsPage: React.FC = () => {
             total={overview.total_libraries}
             local={overview.local_libraries}
             webdav={overview.webdav_libraries}
+            rss={overview.rss_libraries}
             localPercent={localPercent}
             webdavPercent={webdavPercent}
+            rssPercent={rssPercent}
           />
         </Panel>
       </section>
@@ -230,7 +233,7 @@ const MetricTile = ({
       <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wide">{label}</span>
     </div>
     <p className="text-xl md:text-2xl font-black text-slate-900 dark:text-white truncate mt-4">{value}</p>
-    <p className="text-xs text-slate-500 truncate mt-1">{detail}</p>
+    <p className="text-xs leading-relaxed text-slate-500 mt-1">{detail}</p>
   </div>
 );
 
@@ -310,30 +313,35 @@ const LibraryMix = ({
   total,
   local,
   webdav,
+  rss,
   localPercent,
   webdavPercent,
+  rssPercent,
 }: {
   total: number;
   local: number;
   webdav: number;
+  rss: number;
   localPercent: number;
   webdavPercent: number;
+  rssPercent: number;
 }) => (
   <div className="space-y-4">
-    <div className="grid grid-cols-3 gap-3">
-      <LibraryMixStats total={total} local={local} webdav={webdav} />
+    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+      <LibraryMixStats total={total} local={local} webdav={webdav} rss={rss} />
     </div>
     <div className="h-3 rounded-full bg-slate-100 dark:bg-slate-800 overflow-hidden flex">
       <div className="bg-sky-500" style={{ width: `${localPercent}%` }} />
       <div className="bg-violet-500" style={{ width: `${webdavPercent}%` }} />
+      <div className="bg-amber-500" style={{ width: `${rssPercent}%` }} />
     </div>
     <div className="space-y-3">
-      <LibraryMixRows localPercent={localPercent} webdavPercent={webdavPercent} />
+      <LibraryMixRows localPercent={localPercent} webdavPercent={webdavPercent} rssPercent={rssPercent} />
     </div>
   </div>
 );
 
-const LibraryMixStats = ({ total, local, webdav }: { total: number; local: number; webdav: number }) => {
+const LibraryMixStats = ({ total, local, webdav, rss }: { total: number; local: number; webdav: number; rss: number }) => {
   const { t } = useTranslation();
 
   return (
@@ -341,17 +349,19 @@ const LibraryMixStats = ({ total, local, webdav }: { total: number; local: numbe
       <SmallStat label={t('adminStats.totalLabel')} value={formatNumber(total)} />
       <SmallStat label={t('adminStats.localLabel')} value={formatNumber(local)} />
       <SmallStat label="WebDAV" value={formatNumber(webdav)} />
+      <SmallStat label="RSS" value={formatNumber(rss)} />
     </>
   );
 };
 
-const LibraryMixRows = ({ localPercent, webdavPercent }: { localPercent: number; webdavPercent: number }) => {
+const LibraryMixRows = ({ localPercent, webdavPercent, rssPercent }: { localPercent: number; webdavPercent: number; rssPercent: number }) => {
   const { t } = useTranslation();
 
   return (
     <>
       <MixRow label={t('adminStats.localLibrary')} value={localPercent} color="bg-sky-500" />
       <MixRow label="WebDAV" value={webdavPercent} color="bg-violet-500" />
+      <MixRow label="RSS" value={rssPercent} color="bg-amber-500" />
     </>
   );
 };
@@ -369,7 +379,7 @@ const MixRow = ({ label, value, color }: { label: string; value: number; color: 
       <span className={`w-2.5 h-2.5 rounded-full ${color}`} />
       {label}
     </div>
-    <span className="text-sm font-black text-slate-900 dark:text-white">{value}%</span>
+    <span className="text-sm font-black text-slate-900 dark:text-white">{Math.round(value)}%</span>
   </div>
 );
 
@@ -495,11 +505,14 @@ const CompactStat = ({ label, value }: { label: string; value: string }) => (
 
 const TypeBadge = ({ value }: { value: string }) => {
   const isWebdav = value.toLowerCase() === 'webdav';
+  const isRss = value.toLowerCase() === 'rss';
   return (
     <span className={`inline-flex items-center px-2.5 py-1 rounded-lg text-xs font-black ${
       isWebdav
         ? 'bg-violet-50 dark:bg-violet-900/20 text-violet-600'
-        : 'bg-sky-50 dark:bg-sky-900/20 text-sky-600'
+        : isRss
+          ? 'bg-amber-50 dark:bg-amber-900/20 text-amber-600'
+          : 'bg-sky-50 dark:bg-sky-900/20 text-sky-600'
     }`}>
       {value.toUpperCase()}
     </span>

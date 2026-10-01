@@ -265,8 +265,10 @@ impl MergeService {
 
                 // Check path equality - do not merge if in different folders
                 if target.path != source.path {
-                    info!("Skipping auto-merge for '{}' due to path mismatch (different folders): '{}' vs '{}'",
-                        title, target.path, source.path);
+                    info!(
+                        "Skipping auto-merge for '{}' due to path mismatch (different folders): '{}' vs '{}'",
+                        title, target.path, source.path
+                    );
                     continue;
                 }
 

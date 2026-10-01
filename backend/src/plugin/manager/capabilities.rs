@@ -1,8 +1,10 @@
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::collections::BTreeMap;
+use ting_plugin_contract::capability::{ToolDeclaration, route_parameter};
 
-use super::PluginManager;
+use super::{PluginManager, PluginRegistry};
+use crate::core::error::{Result, TingError};
+use crate::plugin::types::PluginMetadata;
 use crate::plugin::types::{PluginCapability, PluginId, PluginState};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -25,47 +27,92 @@ pub struct MatchedHttpRoute {
 pub struct MatchedContentProcessor {
     pub registration: RegisteredCapability,
 }
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MatchedToolProvider {
     pub registration: RegisteredCapability,
-    pub tool: Option<Value>,
+    pub tool: Option<ToolDeclaration>,
 }
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MatchedTaskHandler {
     pub registration: RegisteredCapability,
 }
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MatchedEventHandler {
     pub registration: RegisteredCapability,
 }
 
 impl PluginManager {
+    /// Called under the registry lock, so concurrent loads cannot both claim
+    /// the same route or publish two versions of one stable plugin ID.
+    pub(crate) fn validate_capability_registration(
+        registry: &PluginRegistry,
+        metadata: &PluginMetadata,
+        replacing: Option<&str>,
+    ) -> Result<()> {
+        ting_plugin_contract::capability::validate_capabilities(&metadata.capabilities)
+            .map_err(|error| TingError::PluginLoadError(error.to_string()))?;
+        for (instance_id, entry) in registry {
+            if entry.state == PluginState::Failed || replacing == Some(instance_id.as_str()) {
+                continue;
+            }
+            if entry.metadata.id == metadata.id {
+                return Err(TingError::PluginLoadError(format!(
+                    "Plugin {} already has a registered instance: {}",
+                    metadata.id, instance_id
+                )));
+            }
+            for candidate in &metadata.capabilities {
+                let PluginCapability::HttpRoute(candidate) = candidate else {
+                    continue;
+                };
+                for existing in &entry.metadata.capabilities {
+                    let PluginCapability::HttpRoute(existing) = existing else {
+                        continue;
+                    };
+                    if ting_plugin_contract::capability::routes_overlap(
+                        &candidate.route,
+                        &existing.route,
+                    ) {
+                        return Err(TingError::PluginLoadError(format!(
+                            "Route conflict: {} {} with plugin {} capability {}",
+                            candidate.route.method.as_str(),
+                            candidate.route.path,
+                            entry.metadata.id,
+                            existing.id
+                        )));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub async fn list_capabilities(&self) -> Vec<RegisteredCapability> {
         let registry = self.registry.read().await;
         let mut capabilities = Vec::new();
-
         for entry in registry.values() {
             if entry.state == PluginState::Failed {
                 continue;
             }
-
-            let plugin_id = entry.metadata.instance_id();
-            let plugin_name = entry.metadata.name.clone();
-            let admin_only = entry.metadata.admin_only;
-
-            capabilities.extend(entry.metadata.effective_capabilities().into_iter().map(
-                |capability| RegisteredCapability {
-                    plugin_id: plugin_id.clone(),
-                    plugin_name: plugin_name.clone(),
-                    admin_only,
-                    capability,
-                },
-            ));
+            capabilities.extend(
+                entry
+                    .metadata
+                    .capabilities
+                    .iter()
+                    .cloned()
+                    .map(|capability| RegisteredCapability {
+                        plugin_id: entry.metadata.instance_id(),
+                        plugin_name: entry.metadata.name.clone(),
+                        admin_only: entry.metadata.admin_only,
+                        capability,
+                    }),
+            );
         }
-
+        capabilities.sort_by(|a, b| {
+            a.plugin_id
+                .cmp(&b.plugin_id)
+                .then_with(|| a.capability.id().cmp(b.capability.id()))
+        });
         capabilities
     }
 
@@ -73,46 +120,33 @@ impl PluginManager {
         self.list_capabilities()
             .await
             .into_iter()
-            .filter(|registration| registration.capability.kind == kind)
+            .filter(|r| r.capability.kind() == kind)
             .collect()
     }
 
     pub async fn find_http_route(&self, method: &str, path: &str) -> Option<MatchedHttpRoute> {
-        let candidates = self.find_capabilities_by_kind("http_route").await;
-        let path = normalize_route_path(path);
-        let mut best_match: Option<(usize, MatchedHttpRoute)> = None;
-
-        for registration in candidates {
-            let Some((route_method, route_path)) = http_route_declaration(&registration.capability)
-            else {
+        let mut matched = None;
+        for registration in self.find_capabilities_by_kind("http_route").await {
+            let PluginCapability::HttpRoute(cap) = &registration.capability else {
                 continue;
             };
-
-            if route_method != "*" && !route_method.eq_ignore_ascii_case(method) {
+            if cap.route.method.as_str() != method {
                 continue;
             }
-
-            let Some(path_match) = match_route_path(&route_path, &path) else {
+            let Some(params) = match_route_path(&cap.route.path, path) else {
                 continue;
             };
-
-            let should_replace = best_match
-                .as_ref()
-                .map(|(specificity, _)| path_match.specificity > *specificity)
-                .unwrap_or(true);
-
-            if should_replace {
-                best_match = Some((
-                    path_match.specificity,
-                    MatchedHttpRoute {
-                        registration,
-                        params: path_match.params,
-                    },
-                ));
+            // Registration rejects conflicts. Fail closed even if an unvalidated
+            // registry entry is introduced by an internal caller.
+            if matched.is_some() {
+                return None;
             }
+            matched = Some(MatchedHttpRoute {
+                registration,
+                params,
+            });
         }
-
-        best_match.map(|(_, route)| route)
+        matched
     }
 
     pub async fn find_content_processors(
@@ -120,321 +154,94 @@ impl PluginManager {
         extension: &str,
         operation: Option<&str>,
     ) -> Vec<MatchedContentProcessor> {
-        let extension = normalize_extension(extension);
-        let candidates = self.find_capabilities_by_kind("content_processor").await;
-
-        candidates
+        let extension = extension
+            .trim()
+            .trim_start_matches('.')
+            .to_ascii_lowercase();
+        self.find_capabilities_by_kind("content_processor")
+            .await
             .into_iter()
-            .filter(|registration| {
-                content_processor_matches(&registration.capability, extension.as_deref(), operation)
+            .filter(|r| {
+                r.capability.extensions().contains(&extension)
+                    && operation.is_none_or(|op| r.capability.supports(op))
             })
             .map(|registration| MatchedContentProcessor { registration })
             .collect()
     }
 
     pub async fn find_tool_providers(&self, tool_name: Option<&str>) -> Vec<MatchedToolProvider> {
-        let candidates = self.find_capabilities_by_kind("tool_provider").await;
-
-        candidates
+        self.find_capabilities_by_kind("tool_provider")
+            .await
             .into_iter()
             .filter_map(|registration| {
-                let tool =
-                    tool_name.and_then(|name| find_declared_tool(&registration.capability, name));
+                let PluginCapability::ToolProvider(cap) = &registration.capability else {
+                    return None;
+                };
+                let tool = tool_name
+                    .and_then(|name| cap.tools.iter().find(|tool| tool.name == name))
+                    .cloned();
                 if tool_name.is_some() && tool.is_none() {
                     return None;
                 }
-
                 Some(MatchedToolProvider { registration, tool })
             })
             .collect()
     }
 
     pub async fn find_task_handlers(&self, task_type: Option<&str>) -> Vec<MatchedTaskHandler> {
-        let candidates = self.find_capabilities_by_kind("task_handler").await;
-
-        candidates
+        self.find_capabilities_by_kind("task_handler")
+            .await
             .into_iter()
-            .filter(|registration| task_handler_matches(&registration.capability, task_type))
+            .filter(|r| {
+                let PluginCapability::TaskHandler(cap) = &r.capability else {
+                    return false;
+                };
+                task_type.is_none_or(|name| cap.tasks.iter().any(|task| task.task_type == name))
+            })
             .map(|registration| MatchedTaskHandler { registration })
             .collect()
     }
 
     pub async fn find_event_handlers(&self, event: Option<&str>) -> Vec<MatchedEventHandler> {
-        let candidates = self.find_capabilities_by_kind("event_handler").await;
-
-        candidates
+        self.find_capabilities_by_kind("event_handler")
+            .await
             .into_iter()
-            .filter(|registration| event_handler_matches(&registration.capability, event))
+            .filter(|r| {
+                let PluginCapability::EventHandler(cap) = &r.capability else {
+                    return false;
+                };
+                event.is_none_or(|name| cap.events.iter().any(|event| event.name == name))
+            })
             .map(|registration| MatchedEventHandler { registration })
             .collect()
     }
 }
 
-fn http_route_declaration(capability: &PluginCapability) -> Option<(String, String)> {
-    let route = capability.extra.get("route");
-
-    let method = route
-        .and_then(|value| value.get("method"))
-        .or_else(|| capability.extra.get("method"))
-        .and_then(Value::as_str)
-        .unwrap_or("*");
-
-    let path = route
-        .and_then(|value| value.get("path"))
-        .or_else(|| capability.extra.get("path"))
-        .and_then(Value::as_str)?;
-
-    Some((method.to_string(), normalize_route_path(path)))
-}
-
-fn content_processor_matches(
-    capability: &PluginCapability,
-    extension: Option<&str>,
-    operation: Option<&str>,
-) -> bool {
-    let matches = capability.extra.get("matches");
-    let declared_extensions = matches
-        .and_then(|value| value.get("extensions"))
-        .or_else(|| capability.extra.get("extensions"));
-
-    let extension_matches = match (extension, declared_extensions) {
-        (None, _) => true,
-        (Some(_), None) => true,
-        (Some(extension), Some(value)) => string_array_contains(value, extension),
-    };
-
-    if !extension_matches {
-        return false;
+fn match_route_path(pattern: &str, path: &str) -> Option<BTreeMap<String, String>> {
+    let pattern: Vec<_> = pattern.split('/').collect();
+    let path: Vec<_> = path.split('/').collect();
+    if pattern.len() != path.len() {
+        return None;
     }
-
-    let Some(operation) = operation else {
-        return true;
-    };
-
-    let declared_operations = capability
-        .extra
-        .get("operations")
-        .or_else(|| matches.and_then(|value| value.get("operations")));
-
-    match declared_operations {
-        None => true,
-        Some(value) => string_array_contains(value, operation),
-    }
-}
-
-fn normalize_extension(extension: &str) -> Option<String> {
-    let extension = extension.trim().trim_start_matches('.').to_lowercase();
-    (!extension.is_empty()).then_some(extension)
-}
-
-fn string_array_contains(value: &Value, needle: &str) -> bool {
-    if let Some(values) = value.as_array() {
-        return values
-            .iter()
-            .filter_map(Value::as_str)
-            .any(|value| value.eq_ignore_ascii_case(needle) || value == "*");
-    }
-
-    value
-        .as_str()
-        .map(|value| value.eq_ignore_ascii_case(needle) || value == "*")
-        .unwrap_or(false)
-}
-
-fn find_declared_tool(capability: &PluginCapability, tool_name: &str) -> Option<Value> {
-    let tools = capability.extra.get("tools")?;
-
-    if let Some(array) = tools.as_array() {
-        return array
-            .iter()
-            .find(|tool| {
-                tool.get("name")
-                    .or_else(|| tool.get("id"))
-                    .and_then(Value::as_str)
-                    .map(|name| name == tool_name)
-                    .unwrap_or(false)
-            })
-            .cloned();
-    }
-
-    if tools
-        .get(tool_name)
-        .map(|tool| tool.is_object())
-        .unwrap_or(false)
-    {
-        return tools.get(tool_name).cloned();
-    }
-
-    None
-}
-
-fn task_handler_matches(capability: &PluginCapability, task_type: Option<&str>) -> bool {
-    let Some(task_type) = task_type else {
-        return true;
-    };
-
-    let declared_tasks = capability
-        .extra
-        .get("task_types")
-        .or_else(|| capability.extra.get("tasks"))
-        .or_else(|| capability.extra.get("task_type"));
-
-    declared_tasks
-        .map(|value| string_array_contains(value, task_type))
-        .unwrap_or(true)
-}
-
-fn event_handler_matches(capability: &PluginCapability, event: Option<&str>) -> bool {
-    let Some(event) = event else {
-        return true;
-    };
-
-    let declared_events = capability
-        .extra
-        .get("events")
-        .or_else(|| capability.extra.get("event"));
-
-    declared_events
-        .map(|value| string_array_contains(value, event))
-        .unwrap_or(true)
-}
-
-#[derive(Debug, Clone, PartialEq)]
-struct RoutePathMatch {
-    params: BTreeMap<String, String>,
-    specificity: usize,
-}
-
-fn match_route_path(pattern: &str, path: &str) -> Option<RoutePathMatch> {
-    let pattern = normalize_route_path(pattern);
-    let path = normalize_route_path(path);
-
-    if pattern == path {
-        return Some(RoutePathMatch {
-            params: BTreeMap::new(),
-            specificity: usize::MAX,
-        });
-    }
-
-    let pattern_segments = route_segments(&pattern);
-    let path_segments = route_segments(&path);
     let mut params = BTreeMap::new();
-    let mut specificity = 0usize;
-    let mut path_index = 0usize;
-
-    for pattern_segment in pattern_segments.iter() {
-        if is_wildcard_segment(pattern_segment) {
-            params.insert(
-                wildcard_name(pattern_segment).to_string(),
-                path_segments[path_index..].join("/"),
-            );
-            return Some(RoutePathMatch {
-                params,
-                specificity,
-            });
-        }
-
-        let path_segment = path_segments.get(path_index)?;
-
-        if let Some(dynamic) = parse_dynamic_segment(pattern_segment) {
-            let value = dynamic.capture(path_segment)?;
-            params.insert(dynamic.name.to_string(), value.to_string());
-        } else if pattern_segment == path_segment {
-            specificity += pattern_segment.len();
-        } else {
+    for (expected, actual) in pattern.into_iter().zip(path) {
+        if let Some(name) = route_parameter(expected) {
+            if actual.is_empty() {
+                return None;
+            }
+            params.insert(name.to_string(), actual.to_string());
+        } else if expected != actual {
             return None;
         }
-
-        path_index += 1;
     }
-
-    if path_index == path_segments.len() {
-        Some(RoutePathMatch {
-            params,
-            specificity,
-        })
-    } else {
-        None
-    }
-}
-
-fn normalize_route_path(path: &str) -> String {
-    let path = path.split('?').next().unwrap_or(path).trim();
-    let mut normalized = if path.starts_with('/') {
-        path.to_string()
-    } else {
-        format!("/{}", path)
-    };
-
-    while normalized.len() > 1 && normalized.ends_with('/') {
-        normalized.pop();
-    }
-
-    normalized
-}
-
-fn route_segments(path: &str) -> Vec<&str> {
-    path.trim_matches('/')
-        .split('/')
-        .filter(|segment| !segment.is_empty())
-        .collect()
-}
-
-fn is_wildcard_segment(segment: &str) -> bool {
-    segment == "*" || segment.starts_with('*') || segment.starts_with("{*")
-}
-
-fn wildcard_name(segment: &str) -> &str {
-    segment
-        .trim_start_matches('{')
-        .trim_end_matches('}')
-        .trim_start_matches('*')
-        .trim_start_matches(':')
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct DynamicSegment<'a> {
-    name: &'a str,
-    suffix: &'a str,
-}
-
-impl<'a> DynamicSegment<'a> {
-    fn capture<'b>(&self, segment: &'b str) -> Option<&'b str> {
-        if self.suffix.is_empty() {
-            return (!segment.is_empty()).then_some(segment);
-        }
-
-        let value = segment.strip_suffix(self.suffix)?;
-        (!value.is_empty()).then_some(value)
-    }
-}
-
-fn parse_dynamic_segment(segment: &str) -> Option<DynamicSegment<'_>> {
-    if let Some(rest) = segment.strip_prefix(':') {
-        let (name, suffix) = split_param_suffix(rest);
-        return (!name.is_empty()).then_some(DynamicSegment { name, suffix });
-    }
-
-    if let Some(rest) = segment.strip_prefix('{') {
-        let (name, suffix) = rest.split_once('}')?;
-        return (!name.is_empty()).then_some(DynamicSegment { name, suffix });
-    }
-
-    None
-}
-
-fn split_param_suffix(value: &str) -> (&str, &str) {
-    value
-        .find('.')
-        .map(|index| (&value[..index], &value[index..]))
-        .unwrap_or((value, ""))
+    Some(params)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::plugin::manager::{FailedPlugin, PluginConfig, PluginEntry};
-    use crate::plugin::types::{Plugin, PluginMetadata, PluginType};
+    use crate::plugin::types::{Plugin, PluginMetadata};
     use serde_json::json;
     use std::sync::Arc;
     use std::time::Duration;
@@ -471,24 +278,18 @@ mod tests {
             "metadata-plugin".to_string(),
             "Metadata Plugin".to_string(),
             "1.0.0".to_string(),
-            PluginType::Scraper,
             "Ting Reader".to_string(),
             "Metadata provider".to_string(),
             "plugin.js".to_string(),
         );
-        metadata.capabilities.push(PluginCapability {
-            id: "metadata.search".to_string(),
-            kind: "metadata_provider".to_string(),
-            invoke: Some("search".to_string()),
-            extra: BTreeMap::new(),
-        });
+        metadata.capabilities.push(serde_json::from_value(json!({"id": "metadata.search", "kind": "metadata_provider", "operations": ["search"], "search_fields": [{"key": "title", "label": {"en": "Title"}, "required": true, "type": "text"}], "result_fields": [{"key": "title", "label": {"en": "Title"}}]})).unwrap());
         let plugin_id = insert_metadata(&manager, metadata).await;
 
         let capabilities = manager.list_capabilities().await;
 
         assert_eq!(capabilities.len(), 1);
         assert_eq!(capabilities[0].plugin_id, plugin_id);
-        assert_eq!(capabilities[0].capability.kind, "metadata_provider");
+        assert_eq!(capabilities[0].capability.kind(), "metadata_provider");
     }
 
     #[tokio::test]
@@ -498,18 +299,12 @@ mod tests {
             "admin-panel".to_string(),
             "Admin Panel".to_string(),
             "1.0.0".to_string(),
-            PluginType::Utility,
             "Ting Reader".to_string(),
             "Admin panel".to_string(),
             "plugin.js".to_string(),
         );
         metadata.admin_only = true;
-        metadata.capabilities.push(PluginCapability {
-            id: "admin.panel".to_string(),
-            kind: "ui_extension".to_string(),
-            invoke: Some("open".to_string()),
-            extra: BTreeMap::new(),
-        });
+        metadata.capabilities.push(serde_json::from_value(json!({"id": "admin.panel", "kind": "ui_extension", "slots": ["global.panel"], "contexts": ["global"], "title": {"en": "Admin"}, "render": {"mode": "action", "bridge": {"capabilities": [], "host_methods": []}}})).unwrap());
         insert_metadata(&manager, metadata).await;
 
         let capabilities = manager.list_capabilities().await;
@@ -525,40 +320,69 @@ mod tests {
             "rss-plugin".to_string(),
             "RSS Plugin".to_string(),
             "1.0.0".to_string(),
-            PluginType::Utility,
             "Ting Reader".to_string(),
             "RSS generator".to_string(),
             "plugin.js".to_string(),
         );
-        metadata.capabilities.push(PluginCapability {
-            id: "rss.feed".to_string(),
-            kind: "http_route".to_string(),
-            invoke: Some("generateFeed".to_string()),
-            extra: BTreeMap::from([(
-                "route".to_string(),
-                json!({
-                    "method": "GET",
-                    "path": "/rss/:library_id.xml"
-                }),
-            )]),
-        });
+        metadata.capabilities.push(serde_json::from_value(json!({"id": "rss.feed", "kind": "http_route", "route": {"method": "GET", "path": "/rss/{library_id}/feed.xml", "auth": "signed"}})).unwrap());
         let plugin_id = insert_metadata(&manager, metadata).await;
 
         let matched = manager
-            .find_http_route("GET", "/rss/main.xml")
+            .find_http_route("GET", "/rss/main/feed.xml")
             .await
             .expect("route should match");
 
         assert_eq!(matched.registration.plugin_id, plugin_id);
-        assert_eq!(
-            matched.registration.capability.invoke.as_deref(),
-            Some("generateFeed")
-        );
+        assert!(matched.registration.capability.supports("handle"));
         assert_eq!(matched.params["library_id"], "main");
-        assert!(manager
-            .find_http_route("POST", "/rss/main.xml")
-            .await
-            .is_none());
+        assert!(
+            manager
+                .find_http_route("POST", "/rss/main/feed.xml")
+                .await
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn overlapping_routes_and_duplicate_plugin_id_are_rejected_before_registration() {
+        let manager = test_manager();
+        let mut first = PluginMetadata::new(
+            "source-a".into(),
+            "Source A".into(),
+            "2.0.0".into(),
+            "Ting Reader".into(),
+            "Test".into(),
+            "plugin.js".into(),
+        );
+        first.capabilities.push(serde_json::from_value(json!({
+            "kind":"http_route","id":"feed","route":{"method":"GET","path":"/rss/{book_id}/feed.xml","auth":"signed"}
+        })).unwrap());
+        let id = insert_metadata(&manager, first).await;
+        let mut conflicting = PluginMetadata::new(
+            "source-b".into(),
+            "Source B".into(),
+            "2.0.0".into(),
+            "Ting Reader".into(),
+            "Test".into(),
+            "plugin.js".into(),
+        );
+        conflicting.capabilities.push(serde_json::from_value(json!({
+            "kind":"http_route","id":"feed","route":{"method":"GET","path":"/rss/latest/feed.xml","auth":"public"}
+        })).unwrap());
+        let registry = manager.registry.read().await;
+        let error = PluginManager::validate_capability_registration(&registry, &conflicting, None)
+            .unwrap_err();
+        assert!(error.to_string().contains("Route conflict"));
+        conflicting.id = "source-a".into();
+        conflicting.version = "2.0.1".into();
+        let error = PluginManager::validate_capability_registration(&registry, &conflicting, None)
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("already has a registered instance")
+        );
+        assert_eq!(id, "source-a@2.0.0");
     }
 
     #[tokio::test]
@@ -568,44 +392,31 @@ mod tests {
             "txt-reader".to_string(),
             "TXT Reader".to_string(),
             "1.0.0".to_string(),
-            PluginType::Utility,
             "Ting Reader".to_string(),
             "TXT reader".to_string(),
             "plugin.js".to_string(),
         );
-        metadata.capabilities.push(PluginCapability {
-            id: "document.reader".to_string(),
-            kind: "content_processor".to_string(),
-            invoke: Some("documentInvoke".to_string()),
-            extra: BTreeMap::from([
-                (
-                    "matches".to_string(),
-                    json!({
-                        "extensions": ["txt", "md"]
-                    }),
-                ),
-                (
-                    "operations".to_string(),
-                    json!(["probe", "extract_metadata", "read_chunk"]),
-                ),
-            ]),
-        });
+        metadata.capabilities.push(serde_json::from_value(json!({"id": "document.reader", "kind": "content_processor", "extensions": ["txt", "md"], "operations": ["probe", "open", "close", "cancel", "extract_metadata", "read_text"]})).unwrap());
         let plugin_id = insert_metadata(&manager, metadata).await;
 
         let matched = manager
-            .find_content_processors(".TXT", Some("read_chunk"))
+            .find_content_processors(".TXT", Some("read_text"))
             .await;
 
         assert_eq!(matched.len(), 1);
         assert_eq!(matched[0].registration.plugin_id, plugin_id);
-        assert!(manager
-            .find_content_processors("pdf", Some("read_chunk"))
-            .await
-            .is_empty());
-        assert!(manager
-            .find_content_processors("txt", Some("render_page"))
-            .await
-            .is_empty());
+        assert!(
+            manager
+                .find_content_processors("pdf", Some("read_text"))
+                .await
+                .is_empty()
+        );
+        assert!(
+            manager
+                .find_content_processors("txt", Some("render_page"))
+                .await
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -615,40 +426,24 @@ mod tests {
             "assistant-tools".to_string(),
             "Assistant Tools".to_string(),
             "1.0.0".to_string(),
-            PluginType::Utility,
             "Ting Reader".to_string(),
             "Assistant tools".to_string(),
             "plugin.js".to_string(),
         );
-        metadata.capabilities.push(PluginCapability {
-            id: "assistant.tools".to_string(),
-            kind: "tool_provider".to_string(),
-            invoke: Some("invokeTool".to_string()),
-            extra: BTreeMap::from([(
-                "tools".to_string(),
-                json!([
-                    {
-                        "name": "book.search",
-                        "description": "Search books"
-                    },
-                    {
-                        "name": "library.stats",
-                        "description": "Read library stats"
-                    }
-                ]),
-            )]),
-        });
+        metadata.capabilities.push(serde_json::from_value(json!({"id": "assistant.tools", "kind": "tool_provider", "invoke": "invokeTool", "tools": [{"name": "book.search", "description": {"en": "Search books"}, "input_schema": {"type": "object"}, "output_schema": {"type": "object"}, "side_effects": false}, {"name": "library.stats", "description": {"en": "Search books"}, "input_schema": {"type": "object"}, "output_schema": {"type": "object"}, "side_effects": false}]})).unwrap());
         let plugin_id = insert_metadata(&manager, metadata).await;
 
         let matched = manager.find_tool_providers(Some("book.search")).await;
 
         assert_eq!(matched.len(), 1);
         assert_eq!(matched[0].registration.plugin_id, plugin_id);
-        assert_eq!(matched[0].tool.as_ref().unwrap()["name"], "book.search");
-        assert!(manager
-            .find_tool_providers(Some("missing.tool"))
-            .await
-            .is_empty());
+        assert_eq!(matched[0].tool.as_ref().unwrap().name, "book.search");
+        assert!(
+            manager
+                .find_tool_providers(Some("missing.tool"))
+                .await
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -658,30 +453,23 @@ mod tests {
             "batch-tools".to_string(),
             "Batch Tools".to_string(),
             "1.0.0".to_string(),
-            PluginType::Utility,
             "Ting Reader".to_string(),
             "Batch tools".to_string(),
             "plugin.js".to_string(),
         );
-        metadata.capabilities.push(PluginCapability {
-            id: "batch.summarize".to_string(),
-            kind: "task_handler".to_string(),
-            invoke: Some("runTask".to_string()),
-            extra: BTreeMap::from([(
-                "task_types".to_string(),
-                json!(["book.summarize", "library.reindex"]),
-            )]),
-        });
+        metadata.capabilities.push(serde_json::from_value(json!({"id": "batch.summarize", "kind": "task_handler", "tasks": [{"task_type": "book.summarize", "input_schema": {"type": "object"}, "output_schema": {"type": "object"}, "idempotent": true}, {"task_type": "library.reindex", "input_schema": {"type": "object"}, "output_schema": {"type": "object"}, "idempotent": true}]})).unwrap());
         let plugin_id = insert_metadata(&manager, metadata).await;
 
         let matched = manager.find_task_handlers(Some("book.summarize")).await;
 
         assert_eq!(matched.len(), 1);
         assert_eq!(matched[0].registration.plugin_id, plugin_id);
-        assert!(manager
-            .find_task_handlers(Some("missing.task"))
-            .await
-            .is_empty());
+        assert!(
+            manager
+                .find_task_handlers(Some("missing.task"))
+                .await
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -691,17 +479,11 @@ mod tests {
             "event-tools".to_string(),
             "Event Tools".to_string(),
             "1.0.0".to_string(),
-            PluginType::Utility,
             "Ting Reader".to_string(),
             "Event tools".to_string(),
             "plugin.js".to_string(),
         );
-        metadata.capabilities.push(PluginCapability {
-            id: "events.all".to_string(),
-            kind: "event_handler".to_string(),
-            invoke: Some("onEvent".to_string()),
-            extra: BTreeMap::from([("events".to_string(), json!(["scan.completed", "*"]))]),
-        });
+        metadata.capabilities.push(serde_json::from_value(json!({"id": "events.all", "kind": "event_handler", "events": [{"name": "book.added", "schema": {"type": "object"}}]})).unwrap());
         let plugin_id = insert_metadata(&manager, metadata).await;
 
         let matched = manager.find_event_handlers(Some("book.added")).await;

@@ -14,26 +14,26 @@ use crate::api::require_admin;
 use crate::auth::middleware::AuthUser;
 use crate::core::error::{Result, TingError};
 use crate::core::signing::{
+    DEFAULT_PLUGIN_ROUTE_SIGNATURE_TTL_SECONDS, MAX_PLUGIN_ROUTE_SIGNATURE_TTL_SECONDS,
     constant_time_eq, normalize_plugin_route_sign_path, sign_plugin_route_request,
-    signature_expires_from_ttl, signature_has_expired, DEFAULT_PLUGIN_ROUTE_SIGNATURE_TTL_SECONDS,
-    MAX_PLUGIN_ROUTE_SIGNATURE_TTL_SECONDS,
+    signature_expires_from_ttl, signature_has_expired,
 };
 use crate::db::repository::Repository;
+use crate::plugin::PluginHostUser;
 use crate::plugin::manager::capabilities::RegisteredCapability;
 use crate::plugin::tr_package::{self, TrPackageSignatureStatus};
 use crate::plugin::types::metadata::parse_plugin_metadata_content;
 use crate::plugin::types::{PluginCapability, PluginMetadata, PluginState};
-use crate::plugin::PluginHostUser;
 use axum::{
+    Json,
     body::{Body, Bytes},
     extract::{Multipart, Path, Query, State},
     http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri},
     response::{IntoResponse, Response},
-    Json,
 };
 use base64::Engine;
 use chrono::Utc;
-use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
+use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
@@ -190,7 +190,6 @@ pub async fn list_plugins(
             id: info.id,
             name: info.name,
             version: info.version,
-            plugin_type: format!("{:?}", info.plugin_type).to_lowercase(),
             runtime: info.runtime,
             author: Some(info.author),
             description: Some(info.description),
@@ -239,7 +238,6 @@ pub async fn get_plugin_detail(
         id: plugin_info.id.clone(),
         name: metadata.name.clone(),
         version: metadata.version.to_string(),
-        plugin_type: format!("{:?}", metadata.plugin_type).to_lowercase(),
         runtime: metadata.runtime.clone(),
         author: Some(metadata.author.clone()),
         description: Some(metadata.description.clone()),
@@ -261,11 +259,7 @@ pub async fn get_plugin_detail(
                 version_requirement: dep.version_requirement.to_string(),
             })
             .collect(),
-        permissions: metadata
-            .permissions
-            .iter()
-            .map(|perm| format!("{:?}", perm))
-            .collect(),
+        permissions: metadata.permissions.clone(),
         supported_extensions: metadata.supported_extensions.clone(),
         config_schema: metadata.config_schema.clone(),
         scraper: metadata.scraper.clone(),
@@ -558,15 +552,14 @@ pub async fn list_plugin_capabilities(
         .into_iter()
         .filter(|registration| registration_visible_to_user(registration, is_admin))
     {
-        let is_ui_capability = registration.capability.kind == "ui_extension"
-            || registration.capability.kind == "client_extension";
+        let is_ui_capability = matches!(registration.capability, PluginCapability::UiExtension(_));
         let client_grant = if is_ui_capability {
             Some(
                 issue_plugin_client_grant(
                     &state,
                     &user,
                     &registration.plugin_id,
-                    &registration.capability.id,
+                    registration.capability.id(),
                 )
                 .await?,
             )
@@ -692,15 +685,6 @@ fn plugin_capability_not_found(plugin_id: &str, capability_id: &str) -> TingErro
     ))
 }
 
-fn ui_bridge(capability: &PluginCapability) -> Option<&serde_json::Map<String, Value>> {
-    capability
-        .extra
-        .get("render")?
-        .as_object()?
-        .get("bridge")?
-        .as_object()
-}
-
 fn find_ui_bridge_capability(
     metadata: &PluginMetadata,
     ui_capability_id: &str,
@@ -708,9 +692,9 @@ fn find_ui_bridge_capability(
     let capability = metadata
         .effective_capabilities()
         .into_iter()
-        .find(|capability| capability.id == ui_capability_id)
+        .find(|capability| capability.id() == ui_capability_id)
         .ok_or_else(|| plugin_capability_not_found(&metadata.id, ui_capability_id))?;
-    if capability.kind != "ui_extension" && capability.kind != "client_extension" {
+    if !matches!(capability, PluginCapability::UiExtension(_)) {
         return Err(TingError::PermissionDenied(
             "Bridge source must be a UI capability".to_string(),
         ));
@@ -724,25 +708,13 @@ fn require_ui_bridge_capability(
     target_capability_id: &str,
 ) -> Result<()> {
     let source = find_ui_bridge_capability(metadata, ui_capability_id)?;
-    let bridge = ui_bridge(&source);
-    if bridge
-        .and_then(|bridge| bridge.get("allow_capability_invoke"))
-        .and_then(Value::as_bool)
-        == Some(false)
-    {
-        return Err(TingError::PermissionDenied(
-            "Capability invocation is disabled for this view".to_string(),
-        ));
-    }
-
-    let declared = bridge
-        .and_then(|bridge| bridge.get("capabilities"))
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .any(|id| id.trim() == target_capability_id);
-    if target_capability_id != source.id && !declared {
+    let declared = source.ui_bridge().is_some_and(|bridge| {
+        bridge
+            .capabilities
+            .iter()
+            .any(|id| id == target_capability_id)
+    });
+    if target_capability_id != source.id() && !declared {
         return Err(TingError::PermissionDenied(
             "Capability is not allowed for this view".to_string(),
         ));
@@ -756,13 +728,12 @@ fn require_ui_bridge_host_method(
     method: &str,
 ) -> Result<()> {
     let source = find_ui_bridge_capability(metadata, ui_capability_id)?;
-    let declared = ui_bridge(&source)
-        .and_then(|bridge| bridge.get("host_methods"))
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .any(|candidate| candidate.trim() == method);
+    let declared = source.ui_bridge().is_some_and(|bridge| {
+        bridge
+            .host_methods
+            .iter()
+            .any(|candidate| candidate == method)
+    });
     if !declared {
         return Err(TingError::PermissionDenied(
             "Host method is not allowed for this view".to_string(),
@@ -772,7 +743,7 @@ fn require_ui_bridge_host_method(
 }
 
 fn require_unbridged_client_capability(capability: &PluginCapability) -> Result<()> {
-    if capability.kind == "content_processor" {
+    if capability.kind() == "content_processor" {
         return Ok(());
     }
     Err(TingError::PermissionDenied(
@@ -796,7 +767,7 @@ pub async fn invoke_plugin_capability(
     let capability = metadata
         .effective_capabilities()
         .into_iter()
-        .find(|capability| capability.id == capability_id)
+        .find(|capability| capability.id() == capability_id)
         .ok_or_else(|| plugin_capability_not_found(&id, &capability_id))?;
 
     if let Some(ui_capability_id) = req.ui_capability_id.as_deref() {
@@ -814,10 +785,7 @@ pub async fn invoke_plugin_capability(
         require_unbridged_client_capability(&capability)?;
     }
 
-    let invoke_method = capability
-        .invoke
-        .clone()
-        .unwrap_or_else(|| capability.id.clone());
+    let invoke_method = client_capability_operation(&capability, &req.params)?;
 
     let params = attach_plugin_invocation_context(
         req.params,
@@ -829,10 +797,35 @@ pub async fn invoke_plugin_capability(
 
     let result = state
         .plugin_manager
-        .invoke_plugin(&id, &invoke_method, params)
+        .invoke_capability(
+            &id,
+            &capability_id,
+            &invoke_method,
+            params,
+            &plugin_invocation_context(Some(&user)),
+        )
         .await?;
 
     Ok(Json(InvokePluginCapabilityResponse { result }))
+}
+
+fn client_capability_operation(capability: &PluginCapability, params: &Value) -> Result<String> {
+    let fixed = match capability {
+        PluginCapability::UiExtension(_) => Some("open"),
+        PluginCapability::ToolProvider(_) => Some("invokeTool"),
+        _ => None,
+    };
+    let operation = fixed
+        .or_else(|| params.get("operation").and_then(Value::as_str))
+        .ok_or_else(|| TingError::ValidationError("A declared operation is required".into()))?;
+    if !capability.supports(operation) {
+        return Err(TingError::ValidationError(format!(
+            "Capability {} does not declare operation {}",
+            capability.id(),
+            operation
+        )));
+    }
+    Ok(operation.to_string())
 }
 
 /// Handler for /api/v1/plugin-routes/*path - Invoke a plugin-declared HTTP route.
@@ -1100,10 +1093,20 @@ pub async fn invoke_plugin_host(
         username: user.username.clone(),
         role: user.role.clone(),
     };
-    let result = state
-        .plugin_host_gateway
-        .invoke_plugin(&req.plugin_id, &host_user, &req.method, req.params)
-        .await?;
+    let result = if req.method == "config.get" {
+        state.config_manager.get_redacted_config(&req.plugin_id)?
+    } else {
+        state
+            .plugin_host_gateway
+            .invoke_plugin(
+                &req.plugin_id,
+                Some(&host_user),
+                &req.method,
+                req.params,
+                None,
+            )
+            .await?
+    };
     Ok(Json(InvokePluginHostResponse { result }))
 }
 
@@ -1208,12 +1211,13 @@ async fn call_plugin_route_inner(
     let mut route_access = access;
 
     if access == PluginRouteAccess::Public {
-        validate_public_plugin_route_access(
+        validate_public_plugin_route_access_with_revocations(
             &matched.registration.capability,
             &method,
             &route_path,
             &uri,
             state.encryption_key.as_ref(),
+            Some(&state.plugin_route_revocations),
         )?;
 
         if let Some(user_id) = signed_plugin_route_user(&uri) {
@@ -1238,13 +1242,6 @@ async fn call_plugin_route_inner(
         }
     }
 
-    let invoke_method = matched
-        .registration
-        .capability
-        .invoke
-        .clone()
-        .unwrap_or_else(|| matched.registration.capability.id.clone());
-
     let params = serde_json::json!({
         "method": method.as_str(),
         "path": route_path,
@@ -1253,14 +1250,24 @@ async fn call_plugin_route_inner(
         "params": matched.params,
         "body_text": std::str::from_utf8(body.as_ref()).ok(),
         "body_base64": base64::engine::general_purpose::STANDARD.encode(body.as_ref()),
-        "capability_id": matched.registration.capability.id,
+        "capability_id": matched.registration.capability.id(),
         "plugin_id": matched.registration.plugin_id,
         "context": plugin_route_context_json(route_access, route_user.as_ref()),
     });
 
     let result = state
         .plugin_manager
-        .invoke_plugin(&matched.registration.plugin_id, &invoke_method, params)
+        .invoke_capability(
+            &matched.registration.plugin_id,
+            matched.registration.capability.id(),
+            "handle",
+            params,
+            &plugin_invocation_context(if matches!(route_access, PluginRouteAccess::Public) {
+                None
+            } else {
+                route_user.as_ref()
+            }),
+        )
         .await?;
 
     plugin_route_result_to_response(result)
@@ -1282,6 +1289,19 @@ fn plugin_route_path_from_uri(uri: &Uri) -> String {
         "/".to_string()
     } else {
         route_path.to_string()
+    }
+}
+
+fn plugin_invocation_context(
+    user: Option<&AuthUser>,
+) -> crate::plugin::types::PluginInvocationContext {
+    crate::plugin::types::PluginInvocationContext {
+        user: user.map(|user| PluginHostUser {
+            id: user.id.clone(),
+            username: user.username.clone(),
+            role: user.role.clone(),
+        }),
+        resources: None,
     }
 }
 
@@ -1327,17 +1347,14 @@ fn normalize_plugin_asset_path(asset_path: &str) -> Result<PathBuf> {
 }
 
 fn plugin_route_auth_policy(capability: &PluginCapability) -> PluginRouteAuthPolicy {
-    let route = capability.extra.get("route");
-    let auth = route
-        .and_then(|value| value.get("auth"))
-        .or_else(|| capability.extra.get("auth"))
-        .and_then(Value::as_str)
-        .unwrap_or("user");
-
-    match auth {
-        "public" => PluginRouteAuthPolicy::Public,
-        "signed" => PluginRouteAuthPolicy::Signed,
-        "public_or_signed" => PluginRouteAuthPolicy::PublicOrSigned,
+    use ting_plugin_contract::capability::RouteAuth;
+    match capability {
+        PluginCapability::HttpRoute(cap) => match cap.route.auth {
+            RouteAuth::Public => PluginRouteAuthPolicy::Public,
+            RouteAuth::Signed => PluginRouteAuthPolicy::Signed,
+            RouteAuth::PublicOrSigned => PluginRouteAuthPolicy::PublicOrSigned,
+            RouteAuth::User => PluginRouteAuthPolicy::User,
+        },
         _ => PluginRouteAuthPolicy::User,
     }
 }
@@ -1346,6 +1363,7 @@ fn plugin_route_allows_public_access(capability: &PluginCapability) -> bool {
     plugin_route_auth_policy(capability).can_use_public_prefix()
 }
 
+#[cfg(test)]
 fn validate_public_plugin_route_access(
     capability: &PluginCapability,
     method: &Method,
@@ -1353,24 +1371,58 @@ fn validate_public_plugin_route_access(
     uri: &Uri,
     signing_key: &[u8; 32],
 ) -> Result<()> {
+    validate_public_plugin_route_access_with_revocations(
+        capability,
+        method,
+        route_path,
+        uri,
+        signing_key,
+        None,
+    )
+}
+
+fn validate_public_plugin_route_access_with_revocations(
+    capability: &PluginCapability,
+    method: &Method,
+    route_path: &str,
+    uri: &Uri,
+    signing_key: &[u8; 32],
+    revocations: Option<&crate::core::signing::PluginRouteRevocations>,
+) -> Result<()> {
     match plugin_route_auth_policy(capability) {
         PluginRouteAuthPolicy::Public => {
             if plugin_route_has_signature(uri) {
-                validate_plugin_route_signature(method.as_str(), route_path, uri, signing_key)
+                validate_plugin_route_signature_with_revocations(
+                    method.as_str(),
+                    route_path,
+                    uri,
+                    signing_key,
+                    revocations,
+                )
             } else {
                 Ok(())
             }
         }
         PluginRouteAuthPolicy::PublicOrSigned => {
             if plugin_route_has_signature(uri) {
-                validate_plugin_route_signature(method.as_str(), route_path, uri, signing_key)
+                validate_plugin_route_signature_with_revocations(
+                    method.as_str(),
+                    route_path,
+                    uri,
+                    signing_key,
+                    revocations,
+                )
             } else {
                 Ok(())
             }
         }
-        PluginRouteAuthPolicy::Signed => {
-            validate_plugin_route_signature(method.as_str(), route_path, uri, signing_key)
-        }
+        PluginRouteAuthPolicy::Signed => validate_plugin_route_signature_with_revocations(
+            method.as_str(),
+            route_path,
+            uri,
+            signing_key,
+            revocations,
+        ),
         PluginRouteAuthPolicy::User => Err(TingError::PermissionDenied(format!(
             "Plugin route is not public: {} {}",
             method.as_str(),
@@ -1391,11 +1443,12 @@ fn signed_plugin_route_user(uri: &Uri) -> Option<String> {
     }
 }
 
-fn validate_plugin_route_signature(
+fn validate_plugin_route_signature_with_revocations(
     method: &str,
     route_path: &str,
     uri: &Uri,
     signing_key: &[u8; 32],
+    revocations: Option<&crate::core::signing::PluginRouteRevocations>,
 ) -> Result<()> {
     let expires = query_param(uri, "expires")
         .ok_or_else(|| {
@@ -1414,6 +1467,11 @@ fn validate_plugin_route_signature(
 
     let signature = query_param(uri, "signature")
         .ok_or_else(|| TingError::PermissionDenied("Missing plugin route signature".to_string()))?;
+    if revocations.is_some_and(|revocations| revocations.is_revoked(&signature)) {
+        return Err(TingError::PermissionDenied(
+            "Plugin route signature has been revoked".to_string(),
+        ));
+    }
     let signed_user_id = query_param(uri, "user");
     let expected = sign_plugin_route_request(
         signing_key,
@@ -1553,10 +1611,7 @@ pub async fn scraper_search(
     let page_size = request.page_size.unwrap_or(20);
     let mut search_params = request.search_params.unwrap_or_default();
     if let Some(query) = request.query {
-        search_params
-            .entry("title".to_string())
-            .or_insert(query.clone());
-        search_params.entry("query".to_string()).or_insert(query);
+        search_params.entry("title".to_string()).or_insert(query);
     }
     if let Some(author) = request.author {
         search_params.entry("author".to_string()).or_insert(author);
@@ -1575,6 +1630,7 @@ pub async fn scraper_search(
     Ok(Json(SearchResponse {
         items: result.items,
         total: result.total,
+        has_more: result.has_more,
         page: result.page,
         page_size: result.page_size,
     }))
@@ -1631,9 +1687,10 @@ pub async fn install_store_plugin(
         .await?
         .into_iter()
         .find(|plugin| plugin.id == req.plugin_id)
-        && plugin.admin_only {
-            require_admin(&user)?;
-        }
+        && plugin.admin_only
+    {
+        require_admin(&user)?;
+    }
 
     let temp_path = state
         .plugin_manager
@@ -1735,11 +1792,13 @@ mod tests {
             &EncodingKey::from_secret("test-plugin-grant-secret".as_bytes()),
         )
         .unwrap();
-        assert!(decode_plugin_client_grant_with_secrets(
-            &wrong_type_grant,
-            &["test-plugin-grant-secret".to_string()]
-        )
-        .is_err());
+        assert!(
+            decode_plugin_client_grant_with_secrets(
+                &wrong_type_grant,
+                &["test-plugin-grant-secret".to_string()]
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -1757,20 +1816,9 @@ mod tests {
 
     #[test]
     fn plugin_route_public_access_requires_explicit_auth_policy() {
-        let mut private_capability = PluginCapability {
-            id: "private.route".to_string(),
-            kind: "http_route".to_string(),
-            invoke: None,
-            extra: Default::default(),
-        };
+        let private_capability = test_route("user");
         assert!(!plugin_route_allows_public_access(&private_capability));
-
-        private_capability.extra.insert(
-            "route".to_string(),
-            json!({
-                "auth": "public_or_signed"
-            }),
-        );
+        let private_capability = test_route("public_or_signed");
         assert!(plugin_route_allows_public_access(&private_capability));
     }
 
@@ -1837,18 +1885,7 @@ mod tests {
 
     #[test]
     fn signed_plugin_route_requires_valid_signature() {
-        let mut capability = PluginCapability {
-            id: "signed.route".to_string(),
-            kind: "http_route".to_string(),
-            invoke: None,
-            extra: Default::default(),
-        };
-        capability.extra.insert(
-            "route".to_string(),
-            json!({
-                "auth": "signed"
-            }),
-        );
+        let capability = test_route("signed");
 
         let key = [7_u8; 32];
         let unsigned_uri: Uri = "/api/v1/public/plugin-routes/rss/main.xml".parse().unwrap();
@@ -1882,18 +1919,7 @@ mod tests {
 
     #[test]
     fn signed_plugin_route_can_bind_user_context() {
-        let mut capability = PluginCapability {
-            id: "signed.route".to_string(),
-            kind: "http_route".to_string(),
-            invoke: None,
-            extra: Default::default(),
-        };
-        capability.extra.insert(
-            "route".to_string(),
-            json!({
-                "auth": "signed"
-            }),
-        );
+        let capability = test_route("signed");
 
         let key = [9_u8; 32];
         let expires = chrono::Utc::now().timestamp() + 60;
@@ -1924,30 +1950,21 @@ mod tests {
         )
         .parse()
         .unwrap();
-        assert!(validate_public_plugin_route_access(
-            &capability,
-            &Method::GET,
-            "/rss/main.xml",
-            &tampered_uri,
-            &key,
-        )
-        .is_err());
+        assert!(
+            validate_public_plugin_route_access(
+                &capability,
+                &Method::GET,
+                "/rss/main.xml",
+                &tampered_uri,
+                &key,
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn expired_plugin_route_signature_is_rejected() {
-        let mut capability = PluginCapability {
-            id: "signed.route".to_string(),
-            kind: "http_route".to_string(),
-            invoke: None,
-            extra: Default::default(),
-        };
-        capability.extra.insert(
-            "route".to_string(),
-            json!({
-                "auth": "signed"
-            }),
-        );
+        let capability = test_route("signed");
 
         let key = [3_u8; 32];
         let expires = chrono::Utc::now().timestamp() - 60;
@@ -2013,6 +2030,12 @@ mod tests {
         assert!(!plugin_assets_available(PluginState::Failed));
     }
 
+    fn test_route(auth: &str) -> PluginCapability {
+        serde_json::from_value(json!({"kind":"http_route","id":"test.route",
+            "route":{"method":"GET","path":"/rss/{id}","auth":auth}}))
+        .unwrap()
+    }
+
     fn bridge_test_metadata() -> PluginMetadata {
         parse_plugin_metadata_content(
             r#"
@@ -2020,12 +2043,16 @@ id: bridge-test
 name: Bridge Test
 version: 1.0.0
 author: Ting Reader
-description: Bridge policy test
+description: {en: Bridge policy test}
+min_core_version: 2.0.0
 entry_point: index.js
 runtime: javascript
 capabilities:
   - id: assistant.panel
     kind: ui_extension
+    slots: [global.panel]
+    contexts: [global]
+    title: {en: Panel}
     render:
       mode: web_container
       entry: ui/index.html
@@ -2033,16 +2060,32 @@ capabilities:
         capabilities: [assistant.tools]
         host_methods: [books.list, user_settings.get]
   - id: disabled.panel
-    kind: client_extension
+    kind: ui_extension
+    slots: [global.panel]
+    contexts: [global]
+    title: {en: Panel}
     render:
       mode: web_container
       entry: ui/disabled.html
       bridge:
-        allow_capability_invoke: false
+        capabilities: []
+        host_methods: []
   - id: assistant.tools
     kind: tool_provider
+    invoke: invokeTool
+    tools:
+      - name: test.search
+        description: {en: Search}
+        input_schema: {type: object}
+        output_schema: {type: object}
+        side_effects: false
   - id: background.task
     kind: task_handler
+    tasks:
+      - task_type: books.summarize
+        input_schema: {type: object}
+        output_schema: {type: object}
+        idempotent: true
 "#,
             "bridge-test.yml",
         )
@@ -2062,10 +2105,10 @@ capabilities:
     }
 
     #[test]
-    fn ui_bridge_can_disable_capability_invocation() {
+    fn ui_bridge_with_empty_allowlist_rejects_other_capabilities() {
         let metadata = bridge_test_metadata();
 
-        let error = require_ui_bridge_capability(&metadata, "disabled.panel", "disabled.panel")
+        let error = require_ui_bridge_capability(&metadata, "disabled.panel", "assistant.tools")
             .unwrap_err();
         assert!(matches!(error, TingError::PermissionDenied(_)));
     }
@@ -2091,27 +2134,14 @@ capabilities:
 
     #[test]
     fn unbridged_client_invocation_only_allows_content_processors() {
-        let capability = |id: &str, kind: &str| PluginCapability {
-            id: id.to_string(),
-            kind: kind.to_string(),
-            invoke: None,
-            extra: Default::default(),
-        };
-        let content_processor = capability("document.processor", "content_processor");
-        assert!(require_unbridged_client_capability(&content_processor).is_ok());
-
-        for kind in [
-            "tool_provider",
-            "task_handler",
-            "event_handler",
-            "metadata_provider",
-            "ui_extension",
-        ] {
-            let target = capability("unsafe.direct", kind);
-            assert!(
-                require_unbridged_client_capability(&target).is_err(),
-                "unexpectedly allowed unbridged {kind}"
-            );
+        let content: PluginCapability = serde_json::from_value(json!({
+            "id":"content","kind":"content_processor","extensions":["txt"],
+            "operations":["probe","open","close","cancel"]
+        }))
+        .unwrap();
+        assert!(require_unbridged_client_capability(&content).is_ok());
+        for cap in bridge_test_metadata().capabilities {
+            assert!(require_unbridged_client_capability(&cap).is_err());
         }
     }
 

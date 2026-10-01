@@ -5,6 +5,7 @@ import type {
   Plugin,
   PluginCapability,
   PluginDependency,
+  PluginPermission,
   StorePlugin,
 } from "../../core/types";
 import {
@@ -98,7 +99,7 @@ type PluginCardData = {
   min_flutter_version?: string;
   admin_only?: boolean;
   dependencies?: string[];
-  permissions?: string[];
+  permissions?: PluginPermission[];
   config_schema?: Record<string, unknown>;
   supported_extensions?: string[];
   capabilities?: PluginCapability[];
@@ -222,25 +223,12 @@ const getPluginCategory = (capabilities?: PluginCapability[]) => {
   return "utility";
 };
 
-const capabilityObject = (value: unknown) =>
-  value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : undefined;
-
-const getCapabilityArray = (capability: PluginCapability, key: string) => {
-  const metadata = capabilityObject(capability.metadata);
-  const value = Array.isArray(capability[key])
-    ? capability[key]
-    : metadata?.[key];
-  return Array.isArray(value) ? value : [];
-};
-
 const getMetadataSearchFieldCount = (capabilities?: PluginCapability[]) =>
   (capabilities || [])
     .filter((capability) => capability.kind === "metadata_provider")
     .reduce(
       (count, capability) =>
-        count + getCapabilityArray(capability, "search_fields").length,
+        count + capability.search_fields.length,
       0,
     );
 
@@ -249,24 +237,14 @@ const getMetadataResultFieldCount = (capabilities?: PluginCapability[]) =>
     .filter((capability) => capability.kind === "metadata_provider")
     .reduce(
       (count, capability) =>
-        count + getCapabilityArray(capability, "result_fields").length,
+        count + capability.result_fields.length,
       0,
     );
 
-const getCapabilityExtensions = (capability: PluginCapability) => {
-  const direct = capability.extensions;
-  const matches = capability.matches;
-  const nested =
-    matches && typeof matches === "object" && !Array.isArray(matches)
-      ? (matches as { extensions?: unknown }).extensions
-      : undefined;
-  const value = Array.isArray(direct) ? direct : nested;
-  if (!Array.isArray(value)) return [];
-  return value
-    .filter((item): item is string => typeof item === "string")
-    .map((extension) => extension.trim().replace(/^\./, "").toLowerCase())
-    .filter(Boolean);
-};
+const getCapabilityExtensions = (capability: PluginCapability) =>
+  capability.kind === "format_handler" || capability.kind === "content_processor"
+    ? capability.extensions
+    : [];
 
 const getCapabilitySupportedExtensions = (
   capabilities?: PluginCapability[],
@@ -299,31 +277,13 @@ const getSupportLabel = (support: string) => {
   return support;
 };
 
-const capabilityRenderMode = (capability: PluginCapability) => {
-  const render = capability.render;
-  if (typeof capability.render_mode === "string") return capability.render_mode;
-  if (typeof render === "string") return render;
-  if (render && typeof render === "object" && "mode" in render) {
-    const mode = (render as { mode?: unknown }).mode;
-    return typeof mode === "string" ? mode : undefined;
-  }
-  return undefined;
-};
+const capabilityRenderMode = (capability: PluginCapability) =>
+  capability.kind === "ui_extension" ? capability.render.mode : undefined;
 
-const capabilityRouteAuth = (capability: PluginCapability) => {
-  const route = capability.route;
-  if (route && typeof route === "object" && "auth" in route) {
-    const auth = (route as { auth?: unknown }).auth;
-    return typeof auth === "string" ? auth : undefined;
-  }
-  return typeof capability.auth === "string" ? capability.auth : undefined;
-};
+const capabilityRouteAuth = (capability: PluginCapability) =>
+  capability.kind === "http_route" ? capability.route.auth : undefined;
 
-const normalizePermission = (permission: string) =>
-  permission
-    .replace(/\(.+\)$/, "")
-    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
-    .toLowerCase();
+const normalizePermission = (permission: PluginPermission) => permission.type;
 
 const getPluginSignals = (
   data: Pick<PluginCardData, "runtime" | "permissions" | "capabilities">,
@@ -354,9 +314,12 @@ const getPluginSignals = (
   }
   if (
     permissions.some((permission) =>
-      ["books_read", "chapters_read", "media_read", "media_read_url"].includes(
-        permission,
-      ),
+      [
+        "books_read",
+        "libraries_read",
+        "chapters_read",
+        "media_read_url",
+      ].includes(permission),
     )
   ) {
     signals.add("Library read");
@@ -385,7 +348,7 @@ const normalizeDependencyIds = (
 ) => {
   if (!dependencies) return [];
   return dependencies.map((dependency) =>
-    typeof dependency === "string" ? dependency : dependency.plugin_name,
+    typeof dependency === "string" ? dependency : dependency.plugin_id,
   );
 };
 

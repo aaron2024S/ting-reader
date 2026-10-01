@@ -1,6 +1,6 @@
 use crate::api::models::tools::{GenerateRegexRequest, GenerateRegexResponse};
 use crate::core::error::Result;
-use axum::{response::IntoResponse, Json};
+use axum::{Json, response::IntoResponse};
 
 pub async fn generate_regex(Json(req): Json<GenerateRegexRequest>) -> Result<impl IntoResponse> {
     let filename = req.filename.trim().to_string();
@@ -18,18 +18,20 @@ pub async fn generate_regex(Json(req): Json<GenerateRegexRequest>) -> Result<imp
     if num_val >= 0 {
         for mat in re_digits.find_iter(&filename) {
             if let Ok(val) = mat.as_str().parse::<i32>()
-                && val == num_val {
-                    num_range = Some(mat.range());
-                    break; // Take first match
-                }
+                && val == num_val
+            {
+                num_range = Some(mat.range());
+                break; // Take first match
+            }
         }
     }
 
     // Fallback: if not found as digits (or num is not integer), search as string literal
     if num_range.is_none()
-        && let Some(idx) = filename.find(&num_str) {
-            num_range = Some(idx..idx + num_str.len());
-        }
+        && let Some(idx) = filename.find(&num_str)
+    {
+        num_range = Some(idx..idx + num_str.len());
+    }
 
     // 2. Find title range
     // Search for title AFTER the number if possible

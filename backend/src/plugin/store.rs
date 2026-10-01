@@ -1,6 +1,6 @@
 use crate::core::error::{Result, TingError};
 use futures::StreamExt;
-use reqwest::{header::LOCATION, Url};
+use reqwest::{Url, header::LOCATION};
 use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -10,7 +10,7 @@ use tokio::sync::RwLock;
 use tracing::info;
 use uuid::Uuid;
 
-use super::types::{LocalizedText, PluginCapability};
+use super::types::{LocalizedText, Permission, PluginCapability};
 
 const MAX_PLUGIN_DOWNLOAD_BYTES: u64 = 50 * 1024 * 1024;
 const MAX_PLUGIN_DOWNLOAD_REDIRECTS: usize = 5;
@@ -105,7 +105,7 @@ pub struct StorePlugin {
     pub description_i18n: LocalizedText,
     /// Required permissions
     #[serde(default)]
-    pub permissions: Option<Vec<String>>,
+    pub permissions: Option<Vec<Permission>>,
     /// Configuration schema (JSON Schema format)
     #[serde(default)]
     pub config_schema: Option<serde_json::Value>,

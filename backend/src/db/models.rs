@@ -142,6 +142,18 @@ pub struct Library {
     pub scraper_config: Option<String>,
 }
 
+impl Library {
+    pub fn can_write_metadata_files(&self) -> bool {
+        self.library_type == "local"
+            || self.library_type == "webdav"
+                && self
+                    .scraper_config
+                    .as_deref()
+                    .and_then(|json| serde_json::from_str::<ScraperConfig>(json).ok())
+                    .is_some_and(|config| config.webdav_metadata_writing_enabled)
+    }
+}
+
 /// Scraper configuration stored in Library
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScraperConfig {
@@ -164,6 +176,9 @@ pub struct ScraperConfig {
     /// Whether to write metadata to metadata.json files
     #[serde(default)]
     pub metadata_writing_enabled: bool,
+    /// Synchronize edited sidecars and file covers to the WebDAV book folder.
+    #[serde(default)]
+    pub webdav_metadata_writing_enabled: bool,
     /// Whether to force using file/folder name as title (ignoring priority)
     #[serde(default = "default_use_filename_as_title")]
     pub use_filename_as_title: bool,
@@ -202,6 +217,7 @@ impl Default for ScraperConfig {
             tags_sources: None,
             nfo_writing_enabled: false,
             metadata_writing_enabled: false,
+            webdav_metadata_writing_enabled: false,
             use_filename_as_title: default_use_filename_as_title(),
             metadata_priority: default_metadata_priority(),
             extract_audio_cover: default_extract_audio_cover(),

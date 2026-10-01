@@ -1,6 +1,12 @@
 import { useAuthStore } from '../stores/authStore';
 import { getRuntimeAssetUrl, getRuntimeBaseUrl, getRuntimeUrl } from './runtimeUrl';
 
+const coverRevisions = new Map<string, number>();
+
+export const invalidateBookCover = (bookId: string) => {
+  coverRevisions.set(bookId, (coverRevisions.get(bookId) || 0) + 1);
+};
+
 export const getCoverUrl = (url?: string, libraryId?: string, bookId?: string) => {
   // Prioritize the store's activeUrl, which is dynamically updated and authoritative
   let baseUrl = useAuthStore.getState().activeUrl;
@@ -47,6 +53,8 @@ export const getCoverUrl = (url?: string, libraryId?: string, bookId?: string) =
     
     if (bookId) {
       coverUrl += `&book_id=${encodeURIComponent(bookId)}`;
+      const revision = coverRevisions.get(bookId);
+      if (revision) coverUrl += `&v=${revision}`;
     }
     
     if (token) {

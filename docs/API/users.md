@@ -62,6 +62,7 @@
   "auto_cache": false,
   "widget_css": "string | null",
   "settings_json": {
+    "bookshelf_progress_enabled": true,
     "homeLayout": {
       "showHero": true,
       "showStats": true,
@@ -79,6 +80,8 @@
 
 - 普通用户响应中会隐藏 `widget_css`，并强制 `auto_cache = false`。
 - `settings_json` 为扩展配置容器，可保存客户端展示与播放偏好等设置。
+- `settings_json.bookshelf_progress_enabled` 控制书架封面进度标记；缺省时客户端启用。
+- 播放速度范围为 0.5–3.0，必须为有限数值。音量保存在客户端本地，不属于服务器账号设置。
 
 ### POST /api/settings
 
@@ -97,6 +100,7 @@
   "auto_preload": true,
   "auto_cache": false,
   "widget_css": "string",
+  "bookshelf_progress_enabled": true,
   "homeLayout": {
     "showHero": true,
     "showStats": true,

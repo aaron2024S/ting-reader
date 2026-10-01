@@ -3,10 +3,10 @@ use crate::api::require_admin;
 use crate::core::error::{Result, TingError};
 use crate::db::models::NotificationWebhook;
 use axum::{
+    Json,
     extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
-    Json,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

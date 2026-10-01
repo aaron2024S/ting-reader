@@ -1,12 +1,95 @@
 use super::super::LibraryScanner;
-use crate::plugin::manager::FormatMethod;
-use base64::Engine;
+use crate::core::StorageService;
+use crate::db::models::Library;
+use crate::plugin::resources::{ResourceError, ResourceResult, ResourceSource};
 use id3::TagLike;
 use sha2::{Digest, Sha256};
 use std::path::Path;
+use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio_util::sync::CancellationToken;
 use tracing::debug;
 use uuid::Uuid;
+
+struct WebDavFormatSource {
+    storage: Arc<StorageService>,
+    library: Library,
+    path: String,
+    key: [u8; 32],
+    length: u64,
+    runtime: tokio::runtime::Handle,
+}
+
+impl ResourceSource for WebDavFormatSource {
+    fn stat(&self) -> ting_plugin_contract::resources::ResourceStat {
+        ting_plugin_contract::resources::ResourceStat {
+            length: Some(self.length),
+            mime_type: None,
+            readable: true,
+            writable: false,
+            seekable: true,
+            revision: None,
+            finished: true,
+        }
+    }
+
+    fn read_at(
+        &self,
+        offset: u64,
+        max_bytes: usize,
+        cancel: &CancellationToken,
+    ) -> ResourceResult<Vec<u8>> {
+        let storage = Arc::clone(&self.storage);
+        let library = self.library.clone();
+        let path = self.path.clone();
+        let key = self.key;
+        let runtime = self.runtime.clone();
+        let token = cancel.clone();
+        std::thread::spawn(move || {
+            runtime.block_on(async move {
+                let (mut reader, _) = storage
+                    .get_webdav_reader(
+                        &library,
+                        &path,
+                        Some((offset, offset.saturating_add(max_bytes as u64))),
+                        &key,
+                    )
+                    .await
+                    .map_err(|_| ResourceError {
+                        code: ting_plugin_contract::protocol::PluginErrorCode::NetworkError,
+                        message: "Remote format source read failed",
+                    })?;
+                let mut output = vec![0; max_bytes];
+                let mut length = 0;
+                while length < output.len() {
+                    let read = tokio::select! {
+                        _ = token.cancelled() => {
+                            return Err(ResourceError {
+                                code: ting_plugin_contract::protocol::PluginErrorCode::Cancelled,
+                                message: "Resource scope cancelled",
+                            });
+                        }
+                        read = reader.read(&mut output[length..]) => read.map_err(|_| ResourceError {
+                            code: ting_plugin_contract::protocol::PluginErrorCode::NetworkError,
+                            message: "Remote format source read failed",
+                        })?,
+                    };
+                    if read == 0 {
+                        break;
+                    }
+                    length += read;
+                }
+                output.truncate(length);
+                Ok(output)
+            })
+        })
+        .join()
+        .map_err(|_| ResourceError {
+            code: ting_plugin_contract::protocol::PluginErrorCode::InternalError,
+            message: "Remote format source worker failed",
+        })?
+    }
+}
 
 impl LibraryScanner {
     pub(crate) async fn extract_webdav_metadata(
@@ -31,6 +114,11 @@ impl LibraryScanner {
             .and_then(|e| e.to_str())
             .unwrap_or("tmp")
             .to_lowercase();
+        let fallback_title = Path::new(file_url)
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or("chapter")
+            .to_string();
         if ext == "strm" {
             let decoded_url = self.decode_url_path(file_url);
             let filename = decoded_url.split('/').next_back().unwrap_or("chapter");
@@ -50,9 +138,10 @@ impl LibraryScanner {
                 if let Ok((mut reader, _)) = storage
                     .get_webdav_reader(library, file_url, None, key)
                     .await
-                    && let Ok(mut file) = tokio::fs::File::create(&temp_path).await {
-                        let _ = tokio::io::copy(&mut reader, &mut file).await;
-                    }
+                    && let Ok(mut file) = tokio::fs::File::create(&temp_path).await
+                {
+                    let _ = tokio::io::copy(&mut reader, &mut file).await;
+                }
 
                 // Read the URL from the .strm file
                 let url = match tokio::fs::read_to_string(&temp_path).await {
@@ -86,12 +175,12 @@ impl LibraryScanner {
                     return (String::new(), title, None, None, None, 0);
                 }
 
-                let duration = if let Some(ffprobe_path) =
-                    self.plugin_manager.get_ffprobe_path().await
+                let duration = if let Ok(mut ffprobe) =
+                    crate::core::audio::AudioService::ffprobe_command()
                 {
                     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
-                    match tokio::process::Command::new(&ffprobe_path)
+                    match ffprobe
                             .arg("-v").arg("error")
                             .arg("-user_agent").arg("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
                             .arg("-headers").arg("Accept: */*")
@@ -149,18 +238,98 @@ impl LibraryScanner {
 
                 return (String::new(), title, None, None, None, duration);
             } else {
-                return (String::new(), title, None, None, None, 0);
+                return (String::new(), fallback_title, None, None, None, 0);
             }
         }
 
         if let Some(storage) = &self.storage_service {
+            let key = self.encryption_key.as_deref().unwrap_or(&[0u8; 32]);
+
+            // Special-format plugins inspect a Host-owned remote resource.
+            // This keeps bounded reads and cancellation in the common
+            // ResourceScope path instead of copying the source to a temp file.
+            if let Ok((_, remote_length)) = storage
+                .get_webdav_reader(library, file_url, Some((0, 1)), key)
+                .await
+                && remote_length > 0
+                && let Ok(Some(extracted)) = self
+                    .plugin_manager
+                    .extract_source_format_metadata(
+                        Path::new(file_url),
+                        Arc::new(WebDavFormatSource {
+                            storage: Arc::clone(storage),
+                            library: library.clone(),
+                            path: file_url.to_string(),
+                            key: *key,
+                            length: remote_length,
+                            runtime: tokio::runtime::Handle::current(),
+                        }),
+                        remote_length,
+                        None,
+                        extract_cover,
+                    )
+                    .await
+                && let Ok(result) = extracted.into_scanner_json(cover_target_dir)
+            {
+                let album = result
+                    .get("album")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let title = result
+                    .get("title")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let author = result
+                    .get("album_artist")
+                    .or_else(|| result.get("artist"))
+                    .and_then(|value| value.as_str())
+                    .filter(|value| !value.trim().is_empty())
+                    .map(ToOwned::to_owned);
+                let narrator = result
+                    .get("narrator")
+                    .and_then(|value| value.as_str())
+                    .filter(|value| !value.trim().is_empty())
+                    .map(ToOwned::to_owned);
+                let cover = result
+                    .get("cover_url")
+                    .and_then(|value| value.as_str())
+                    .filter(|value| !value.trim().is_empty())
+                    .map(ToOwned::to_owned);
+                let duration = result
+                    .get("duration")
+                    .and_then(|value| value.as_f64())
+                    .filter(|value| value.is_finite() && *value >= 0.0)
+                    .map(|value| value.round() as i32)
+                    .unwrap_or_default();
+                return (album, title, author, narrator, cover, duration);
+            }
+
+            // A declared format handler owns the special-format path. If its
+            // remote resource call fails, do not silently copy the file to a
+            // temporary path and bypass the plugin resource contract.
+            let special_format_declared = self
+                .plugin_manager
+                .has_format_operation(
+                    Path::new(file_url),
+                    ting_plugin_contract::format::FormatOperation::ExtractMetadata,
+                )
+                .await
+                .unwrap_or(false);
+            if special_format_declared {
+                tracing::warn!(
+                    path = %file_url,
+                    message_key = "format.remote_plugin_failed",
+                    "Declared remote format plugin did not extract metadata"
+                );
+                return (String::new(), fallback_title, None, None, None, 0);
+            }
+
             // Determine temp file path
             let temp_dir = std::env::temp_dir();
             let temp_filename = format!("ting_scan_{}.{}", Uuid::new_v4(), ext);
             let temp_path = temp_dir.join(&temp_filename);
-
-            // Decryption key
-            let key = self.encryption_key.as_deref().unwrap_or(&[0u8; 32]);
 
             // 1. Probe Header
             // We need enough bytes to detect ID3v2 header and size.
@@ -193,37 +362,21 @@ impl LibraryScanner {
 
                     // Total size = Header (10) + Tag Size + Footer (10, optional but we ignore for read size)
                     // We need to download at least this much to get full ID3 tag including cover
-                    let total_id3_size = 10 + tag_size as u64;
+                    let total_id3_size = 10
+                        + tag_size as u64
+                        + if probe_data[3] == 4 && probe_data[5] & 0x10 != 0 {
+                            10
+                        } else {
+                            0
+                        };
                     if total_id3_size > required_size {
                         required_size = total_id3_size;
                         debug!("Detected ID3v2 tag size: {} bytes", required_size);
                     }
                 }
-
-                // Ask plugins for required size (e.g. for encrypted formats)
-                let plugins = self
-                    .plugin_manager
-                    .find_plugins_by_capability_kind("format_handler")
-                    .await;
-                for plugin in plugins {
-                    let params = serde_json::json!({
-                        "header_base64": base64::engine::general_purpose::STANDARD.encode(&probe_data)
-                    });
-
-                    if let Ok(result) = self
-                        .plugin_manager
-                        .call_format(&plugin.id, FormatMethod::GetMetadataReadSize, params)
-                        .await
-                        && let Some(size) = result.get("size").and_then(|v| v.as_u64())
-                            && size > required_size {
-                                required_size = size;
-                                debug!(
-                                    "Plugin {} requested {} bytes for metadata",
-                                    plugin.name, required_size
-                                );
-                            }
-                }
             }
+            required_size =
+                required_size.min(ting_plugin_contract::format_calls::MAX_METADATA_READ_BYTES);
 
             // 2. Download required data
             if let Ok(mut file) = tokio::fs::File::create(&temp_path).await {
@@ -234,11 +387,11 @@ impl LibraryScanner {
                         let start = probe_data.len() as u64;
                         let end = required_size;
 
-                        if let Ok((mut reader, _)) = storage
+                        if let Ok((reader, _)) = storage
                             .get_webdav_reader(library, file_url, Some((start, end)), key)
                             .await
                         {
-                            let _ = tokio::io::copy(&mut reader, &mut file).await;
+                            let _ = tokio::io::copy(&mut reader.take(end - start), &mut file).await;
                         }
                     }
 
@@ -257,110 +410,101 @@ impl LibraryScanner {
                     // 格式插件使用 lofty 等库，对部分文件支持更好，不会报 "end of stream" 错误
 
                     // 1. 查找支持该格式的插件
-                    let plugins = self
-                        .plugin_manager
-                        .find_plugins_by_capability_kind("format_handler")
-                        .await;
                     let mut plugin_handled = false;
 
-                    for plugin in plugins {
-                        // 检查插件是否声明支持该扩展名
-                        let supports_ext = plugin
-                            .supported_extensions
-                            .as_ref()
-                            .map(|exts| exts.iter().any(|e| e.eq_ignore_ascii_case(&ext)))
-                            .unwrap_or(false);
+                    if let Ok(Some(extracted)) = self
+                        .plugin_manager
+                        .extract_local_format_metadata(&temp_path, false)
+                        .await
+                        && let Ok(result) = extracted.into_scanner_json(None)
+                    {
+                        tracing::debug!(
+                            "Using format plugin {} to process {} file",
+                            "format_handler",
+                            ext
+                        );
 
-                        if !supports_ext {
-                            continue;
-                        }
-
-                        // 交由格式插件处理
-                        let params = serde_json::json!({
-                            "file_path": temp_path.to_string_lossy(),
-                            "extract_cover": extract_cover
-                        });
-
-                        if let Ok(result) = self
-                            .plugin_manager
-                            .call_format(&plugin.id, FormatMethod::ExtractMetadata, params)
-                            .await
+                        // 提取元数据
+                        if let Some(a) = result.get("album").and_then(|v| v.as_str())
+                            && !a.trim().is_empty()
                         {
-                            tracing::debug!(
-                                "Using format plugin {} to process {} file",
-                                plugin.name,
-                                ext
-                            );
-
-                            // 提取元数据
-                            if let Some(a) = result.get("album").and_then(|v| v.as_str())
-                                && !a.trim().is_empty() {
-                                    album = a.to_string();
-                                }
-                            if let Some(t) = result.get("title").and_then(|v| v.as_str())
-                                && !t.trim().is_empty() {
-                                    title = t.to_string();
-                                }
-                            if let Some(au) = result.get("author").and_then(|v| v.as_str())
-                                && !au.trim().is_empty() {
-                                    author = Some(au.to_string());
-                                }
-                            if let Some(n) = result.get("narrator").and_then(|v| v.as_str())
-                                && !n.trim().is_empty() {
-                                    narrator = Some(n.to_string());
-                                }
-                            if let Some(dur) = result.get("duration").and_then(|v| v.as_f64()) {
-                                duration = dur.round() as i32;
-                                if duration > 0 {
-                                    tracing::debug!(
-                                        "Format plugin {} detected duration: {} seconds",
-                                        plugin.name,
-                                        duration
-                                    );
-                                }
-                            }
-                            if let Some(c) = result.get("cover_url").and_then(|v| v.as_str())
-                                && !c.trim().is_empty() {
-                                    cover_url = Some(c.to_string());
-                                }
-
-                            plugin_handled = true;
-                            break;
+                            album = a.to_string();
                         }
+                        if let Some(t) = result.get("title").and_then(|v| v.as_str())
+                            && !t.trim().is_empty()
+                        {
+                            title = t.to_string();
+                        }
+                        if let Some(au) = result
+                            .get("album_artist")
+                            .or_else(|| result.get("artist"))
+                            .and_then(|v| v.as_str())
+                            && !au.trim().is_empty()
+                        {
+                            author = Some(au.to_string());
+                        }
+                        if let Some(n) = result.get("narrator").and_then(|v| v.as_str())
+                            && !n.trim().is_empty()
+                        {
+                            narrator = Some(n.to_string());
+                        }
+                        if let Some(dur) = result.get("duration").and_then(|v| v.as_f64()) {
+                            duration = dur.round() as i32;
+                            if duration > 0 {
+                                tracing::debug!(
+                                    "Format plugin {} detected duration: {} seconds",
+                                    "format_handler",
+                                    duration
+                                );
+                            }
+                        }
+                        if let Some(c) = result.get("cover_url").and_then(|v| v.as_str())
+                            && !c.trim().is_empty()
+                        {
+                            cover_url = Some(c.to_string());
+                        }
+
+                        plugin_handled = true;
                     }
 
                     // 2. 如果没有插件处理，且是 MP3 文件，尝试使用 ID3 库（对部分文件支持好）
-                    if !plugin_handled && ext == "mp3"
-                        && let Ok(tag) = id3::Tag::read_from_path(&temp_path) {
-                            debug!("Using ID3 library to process MP3 file");
-                            if let Some(t) = tag.album()
-                                && !t.trim().is_empty() {
-                                    album = t.to_string();
-                                }
-                            if let Some(t) = tag.title()
-                                && !t.trim().is_empty() {
-                                    title = t.to_string();
-                                }
+                    if !plugin_handled
+                        && ext == "mp3"
+                        && let Ok(tag) = id3::Tag::read_from_path(&temp_path)
+                    {
+                        debug!("Using ID3 library to process MP3 file");
+                        if let Some(t) = tag.album()
+                            && !t.trim().is_empty()
+                        {
+                            album = t.to_string();
+                        }
+                        if let Some(t) = tag.title()
+                            && !t.trim().is_empty()
+                        {
+                            title = t.to_string();
+                        }
 
-                            // Author logic: Album Artist > Artist
-                            if let Some(t) = tag.album_artist()
-                                && !t.trim().is_empty() {
-                                    author = Some(t.to_string());
-                                }
+                        // Author logic: Album Artist > Artist
+                        if let Some(t) = tag.album_artist()
+                            && !t.trim().is_empty()
+                        {
+                            author = Some(t.to_string());
+                        }
 
-                            if let Some(t) = tag.artist()
-                                && !t.trim().is_empty() {
-                                    if author.is_none() {
-                                        author = Some(t.to_string());
-                                    } else if author.as_deref() != Some(t) {
-                                        narrator = Some(t.to_string());
-                                    }
-                                }
-
-                            if let Some(d) = tag.duration() {
-                                duration = (d / 1000) as i32;
+                        if let Some(t) = tag.artist()
+                            && !t.trim().is_empty()
+                        {
+                            if author.is_none() {
+                                author = Some(t.to_string());
+                            } else if author.as_deref() != Some(t) {
+                                narrator = Some(t.to_string());
                             }
                         }
+
+                        if let Some(d) = tag.duration() {
+                            duration = (d / 1000) as i32;
+                        }
+                    }
 
                     // 注意：不再调用 extract_chapter_metadata，因为它使用 Symphonia
                     // 对部分文件会报 "end of stream" 错误
@@ -372,41 +516,45 @@ impl LibraryScanner {
                         if let Ok((_, file_size)) = storage
                             .get_webdav_reader(library, file_url, Some((0, 1)), key)
                             .await
-                            && file_size > 0 {
-                                // 根据文件大小和格式估算时长
-                                let estimated_duration =
-                                    self.estimate_duration_by_size(file_size, &ext);
+                            && file_size > 0
+                        {
+                            // 根据文件大小和格式估算时长
+                            let estimated_duration =
+                                self.estimate_duration_by_size(file_size, &ext);
 
-                                if estimated_duration > 0 {
-                                    let diff_ratio = (duration as f64 - estimated_duration as f64)
-                                        .abs()
-                                        / estimated_duration as f64;
+                            if estimated_duration > 0 {
+                                let diff_ratio = (duration as f64 - estimated_duration as f64)
+                                    .abs()
+                                    / estimated_duration as f64;
 
-                                    if diff_ratio > 0.15 {
-                                        // 差距超过15%，时长可能不准确，需要用 FFprobe 验证
-                                        tracing::warn!(
-                                            message_key = "webdav.duration.mismatch",
-                                            message_params = %serde_json::json!({
-                                                "file_url": file_url,
-                                                "duration": duration,
-                                                "estimated_duration": estimated_duration,
-                                                "diff_percent": diff_ratio * 100.0,
-                                            }),
-                                            file_url = %file_url,
-                                            duration = duration,
-                                            estimated_duration = estimated_duration,
-                                            diff_percent = diff_ratio * 100.0,
-                                            "WebDAV duration differs from size estimate; using FFprobe"
-                                        );
-                                        use_ffprobe = true;
-                                    } else {
-                                        tracing::debug!(
-                                            "WebDAV file {} duration verified (detected: {}s, estimated: {}s, diff: {:.1}%)",
-                                            file_url, duration, estimated_duration, diff_ratio * 100.0
-                                        );
-                                    }
+                                if diff_ratio > 0.15 {
+                                    // 差距超过15%，时长可能不准确，需要用 FFprobe 验证
+                                    tracing::warn!(
+                                        message_key = "webdav.duration.mismatch",
+                                        message_params = %serde_json::json!({
+                                            "file_url": file_url,
+                                            "duration": duration,
+                                            "estimated_duration": estimated_duration,
+                                            "diff_percent": diff_ratio * 100.0,
+                                        }),
+                                        file_url = %file_url,
+                                        duration = duration,
+                                        estimated_duration = estimated_duration,
+                                        diff_percent = diff_ratio * 100.0,
+                                        "WebDAV duration differs from size estimate; using FFprobe"
+                                    );
+                                    use_ffprobe = true;
+                                } else {
+                                    tracing::debug!(
+                                        "WebDAV file {} duration verified (detected: {}s, estimated: {}s, diff: {:.1}%)",
+                                        file_url,
+                                        duration,
+                                        estimated_duration,
+                                        diff_ratio * 100.0
+                                    );
                                 }
                             }
+                        }
                     } else {
                         // 无法从部分文件中获取时长，需要 FFprobe
                         use_ffprobe = true;
@@ -418,7 +566,8 @@ impl LibraryScanner {
 
                     // 4. Use FFprobe when needed (fallback or validation)
                     if use_ffprobe {
-                        if let Some(ffprobe_path) = self.plugin_manager.get_ffprobe_path().await {
+                        if let Ok(mut ffprobe) = crate::core::audio::AudioService::ffprobe_command()
+                        {
                             // Add small delay before FFprobe to avoid overwhelming the server
                             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
@@ -445,7 +594,7 @@ impl LibraryScanner {
 
                                 let url_str = url.to_string();
 
-                                match tokio::process::Command::new(&ffprobe_path)
+                                match ffprobe
                                     .arg("-v")
                                     .arg("error")
                                     .arg("-show_entries")
@@ -527,83 +676,53 @@ impl LibraryScanner {
                         // Only extract if we didn't find an existing cover
                         if final_cover_url.is_none() {
                             // First try plugin-based extraction (supports M4A, etc.)
-                            let ext = temp_path
-                                .extension()
-                                .and_then(|e| e.to_str())
-                                .unwrap_or("")
-                                .to_lowercase();
-
-                            let plugins = self
+                            if let Ok(Some(extracted)) = self
                                 .plugin_manager
-                                .find_plugins_by_capability_kind("format_handler")
-                                .await;
-                            for plugin in plugins {
-                                let supports_ext = plugin
-                                    .supported_extensions
-                                    .as_ref()
-                                    .map(|exts| exts.iter().any(|e| e.eq_ignore_ascii_case(&ext)))
-                                    .unwrap_or(false);
-                                if !supports_ext {
-                                    continue;
-                                }
-
-                                let params = serde_json::json!({
-                                    "file_path": temp_path.to_string_lossy(),
-                                    "extract_cover": true
-                                });
-
-                                if let Ok(result) = self
-                                    .plugin_manager
-                                    .call_format(&plugin.id, FormatMethod::ExtractMetadata, params)
-                                    .await
-                                    && let Some(c) =
-                                        result.get("cover_url").and_then(|v| v.as_str())
-                                        && !c.trim().is_empty() {
-                                            // Plugin returned a cover path, use it
-                                            final_cover_url = Some(c.to_string());
-                                            break;
-                                        }
+                                .extract_local_format_metadata(&temp_path, true)
+                                .await
+                                && let Ok(result) = extracted.into_scanner_json(Some(&target_dir))
+                                && let Some(c) = result.get("cover_url").and_then(|v| v.as_str())
+                                && !c.trim().is_empty()
+                            {
+                                final_cover_url = Some(c.to_string());
                             }
 
                             // Fallback to ID3 extraction (for MP3)
                             if final_cover_url.is_none()
                                 && let Ok(tag) = id3::Tag::read_from_path(&temp_path)
-                                    && let Some(picture) = tag.pictures().next() {
-                                        let ext = match picture.mime_type.as_str() {
-                                            "image/png" => "png",
-                                            "image/webp" => "webp",
-                                            "image/gif" => "gif",
-                                            _ => "jpg",
-                                        };
+                                && let Some(picture) = tag.pictures().next()
+                            {
+                                let ext = match picture.mime_type.as_str() {
+                                    "image/png" => "png",
+                                    "image/webp" => "webp",
+                                    "image/gif" => "gif",
+                                    _ => "jpg",
+                                };
 
-                                        let target_path = if use_hash_name {
-                                            // Generate hash from parent URL
-                                            let parent_url = if let Some(idx) = file_url.rfind('/')
-                                            {
-                                                &file_url[..idx]
-                                            } else {
-                                                file_url
-                                            };
-                                            let mut hasher = Sha256::new();
-                                            hasher.update(parent_url.as_bytes());
-                                            let book_hash = format!("{:x}", hasher.finalize());
-                                            target_dir.join(format!("{}.{}", book_hash, ext))
-                                        } else {
-                                            target_dir.join(format!("cover.{}", ext))
-                                        };
+                                let target_path = if use_hash_name {
+                                    // Generate hash from parent URL
+                                    let parent_url = if let Some(idx) = file_url.rfind('/') {
+                                        &file_url[..idx]
+                                    } else {
+                                        file_url
+                                    };
+                                    let mut hasher = Sha256::new();
+                                    hasher.update(parent_url.as_bytes());
+                                    let book_hash = format!("{:x}", hasher.finalize());
+                                    target_dir.join(format!("{}.{}", book_hash, ext))
+                                } else {
+                                    target_dir.join(format!("cover.{}", ext))
+                                };
 
-                                        // Only write if not exists
-                                        if !target_path.exists()
-                                            && std::fs::write(&target_path, &picture.data).is_ok()
-                                        {
-                                            debug!(
-                                                "Saved WebDAV cover from ID3 to {:?}",
-                                                target_path
-                                            );
-                                        }
-                                        final_cover_url =
-                                            Some(target_path.to_string_lossy().replace('\\', "/"));
-                                    }
+                                // Only write if not exists
+                                if !target_path.exists()
+                                    && std::fs::write(&target_path, &picture.data).is_ok()
+                                {
+                                    debug!("Saved WebDAV cover from ID3 to {:?}", target_path);
+                                }
+                                final_cover_url =
+                                    Some(target_path.to_string_lossy().replace('\\', "/"));
+                            }
                         }
                     }
 

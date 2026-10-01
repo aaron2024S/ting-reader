@@ -113,10 +113,11 @@ impl DecryptionCacheService {
     {
         // 检查缓存
         if self.config.enable_cache
-            && let Some(cached_path) = self.get_from_cache(encrypted_path)? {
-                info!("Cache hit for encrypted file: {:?}", encrypted_path);
-                return Ok(cached_path);
-            }
+            && let Some(cached_path) = self.get_from_cache(encrypted_path)?
+        {
+            info!("Cache hit for encrypted file: {:?}", encrypted_path);
+            return Ok(cached_path);
+        }
 
         info!("Cache miss, decrypting file: {:?}", encrypted_path);
 
@@ -150,12 +151,13 @@ impl DecryptionCacheService {
 
             // 检查是否过期
             if let Ok(elapsed) = entry.created_at.elapsed()
-                && elapsed > self.config.cache_expiry {
-                    // 过期，删除
-                    let _ = fs::remove_file(&entry.decrypted_path);
-                    cache.entries.remove(&key);
-                    return Ok(None);
-                }
+                && elapsed > self.config.cache_expiry
+            {
+                // 过期，删除
+                let _ = fs::remove_file(&entry.decrypted_path);
+                cache.entries.remove(&key);
+                return Ok(None);
+            }
 
             // 更新访问时间
             entry.last_accessed = SystemTime::now();
@@ -213,14 +215,15 @@ impl DecryptionCacheService {
             .map(|(key, _)| key.clone());
 
         if let Some(key) = oldest_key
-            && let Some(entry) = cache.entries.remove(&key) {
-                cache.current_size = cache.current_size.saturating_sub(entry.file_size);
+            && let Some(entry) = cache.entries.remove(&key)
+        {
+            cache.current_size = cache.current_size.saturating_sub(entry.file_size);
 
-                if entry.decrypted_path.exists() {
-                    fs::remove_file(&entry.decrypted_path)?;
-                    info!("Evicted and deleted: {:?}", entry.decrypted_path);
-                }
+            if entry.decrypted_path.exists() {
+                fs::remove_file(&entry.decrypted_path)?;
+                info!("Evicted and deleted: {:?}", entry.decrypted_path);
             }
+        }
 
         Ok(())
     }
@@ -235,9 +238,10 @@ impl DecryptionCacheService {
 
         for (key, entry) in &cache.entries {
             if let Ok(elapsed) = entry.created_at.elapsed()
-                && elapsed > self.config.cache_expiry {
-                    to_remove.push(key.clone());
-                }
+                && elapsed > self.config.cache_expiry
+            {
+                to_remove.push(key.clone());
+            }
         }
 
         for key in to_remove {

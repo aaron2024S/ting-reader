@@ -38,7 +38,7 @@ pub async fn security_headers_middleware(request: Request, next: Next) -> Respon
         // Allow framing for widget pages
         parts.headers.insert(
             "Content-Security-Policy",
-            HeaderValue::from_static("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self'; connect-src 'self'; media-src 'self'; object-src 'none'; frame-ancestors *;"),
+            HeaderValue::from_static("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self'; connect-src 'self'; media-src 'self' https: http:; object-src 'none'; frame-ancestors *;"),
         );
     } else if is_plugin_asset {
         parts
@@ -59,7 +59,7 @@ pub async fn security_headers_middleware(request: Request, next: Next) -> Respon
         parts
             .headers
             .entry("Content-Security-Policy")
-            .or_insert(HeaderValue::from_static("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self'; connect-src 'self'; media-src 'self'; object-src 'none'; frame-ancestors 'none';"));
+            .or_insert(HeaderValue::from_static("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self'; connect-src 'self'; media-src 'self' https: http:; object-src 'none'; frame-ancestors 'none';"));
     }
 
     parts.headers.insert(
@@ -69,15 +69,16 @@ pub async fn security_headers_middleware(request: Request, next: Next) -> Respon
 
     // Add HSTS header if HTTPS is enabled
     if let Some(config) = security_config
-        && config.enable_hsts {
-            let hsts_value = format!("max-age={}; includeSubDomains", config.hsts_max_age);
-            parts.headers.insert(
-                "Strict-Transport-Security",
-                HeaderValue::from_str(&hsts_value).unwrap_or_else(|_| {
-                    HeaderValue::from_static("max-age=31536000; includeSubDomains")
-                }),
-            );
-        }
+        && config.enable_hsts
+    {
+        let hsts_value = format!("max-age={}; includeSubDomains", config.hsts_max_age);
+        parts.headers.insert(
+            "Strict-Transport-Security",
+            HeaderValue::from_str(&hsts_value).unwrap_or_else(|_| {
+                HeaderValue::from_static("max-age=31536000; includeSubDomains")
+            }),
+        );
+    }
 
     Response::from_parts(parts, body)
 }
@@ -120,7 +121,7 @@ impl SecurityHeadersConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{body::Body, middleware, routing::get, Router};
+    use axum::{Router, body::Body, middleware, routing::get};
     use tower::util::ServiceExt; // For oneshot method
 
     #[tokio::test]
@@ -244,6 +245,7 @@ mod tests {
         // Verify CSP contains expected directives
         assert!(csp_value.contains("default-src 'self'"));
         assert!(csp_value.contains("script-src 'self'"));
+        assert!(csp_value.contains("media-src 'self' https: http:"));
         assert!(csp_value.contains("object-src 'none'"));
         assert!(csp_value.contains("frame-ancestors 'none'"));
     }

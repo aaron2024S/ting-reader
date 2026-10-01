@@ -3,18 +3,18 @@
 //! This module provides functionality to scan library directories
 //! and discover audiobook files, creating book and chapter records.
 
+use crate::core::StorageService;
 use crate::core::audio_streamer::AudioStreamer;
 use crate::core::error::{Result, TingError};
 use crate::core::merge_service::MergeService;
 use crate::core::nfo_manager::NfoManager;
 use crate::core::services::ScraperService;
 use crate::core::text_cleaner::TextCleaner;
-use crate::core::StorageService;
 use crate::db::repository::{
     BookRepository, ChapterRepository, LibraryRepository, LibraryScanStateRepository, Repository,
     SeriesRepository, TaskRepository,
 };
-use crate::plugin::manager::{FormatMethod, PluginManager};
+use crate::plugin::manager::PluginManager;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -217,18 +217,19 @@ impl LibraryScanner {
             && let Err(e) = repo
                 .update_progress_key(tid, message_key, message_params)
                 .await
-            {
-                warn!("Failed to update task progress: {}", e);
-            }
+        {
+            warn!("Failed to update task progress: {}", e);
+        }
     }
 
     /// Check if task has been cancelled
     pub(crate) async fn check_cancellation(&self, task_id: Option<&str>) -> Result<()> {
         if let (Some(repo), Some(tid)) = (&self.task_repo, task_id)
             && let Ok(Some(task)) = repo.find_by_id(tid).await
-                && task.status == "cancelled" {
-                    return Err(TingError::TaskError("Task cancelled by user".to_string()));
-                }
+            && task.status == "cancelled"
+        {
+            return Err(TingError::TaskError("Task cancelled by user".to_string()));
+        }
         Ok(())
     }
 
@@ -471,24 +472,19 @@ impl LibraryScanner {
         .await;
 
         // Trigger Merge Suggestions
-        if !scan_result.changed_book_ids.is_empty() && scan_result.failed_count == 0
-            && let Some(merge_service) = &self.merge_service {
-                self.update_progress_key(
-                    task_id,
-                    "scan.auto_merge.processing",
-                    serde_json::json!({}),
-                )
+        if !scan_result.changed_book_ids.is_empty()
+            && scan_result.failed_count == 0
+            && let Some(merge_service) = &self.merge_service
+        {
+            self.update_progress_key(task_id, "scan.auto_merge.processing", serde_json::json!({}))
                 .await;
-                if let Err(e) = merge_service
-                    .process_auto_merges_for_library_books(
-                        library_id,
-                        &scan_result.changed_book_ids,
-                    )
-                    .await
-                {
-                    warn!("Failed to process auto-merges: {}", e);
-                }
+            if let Err(e) = merge_service
+                .process_auto_merges_for_library_books(library_id, &scan_result.changed_book_ids)
+                .await
+            {
+                warn!("Failed to process auto-merges: {}", e);
             }
+        }
 
         Ok(scan_result)
     }
@@ -576,8 +572,9 @@ impl LibraryScanner {
                 return (String::new(), t, None, None, None, 0);
             }
 
-            // Try to get duration using the plugin-provided FFprobe path.
-            let duration = if let Some(ffprobe_path) = self.plugin_manager.get_ffprobe_path().await
+            // Use the FFprobe binary shipped beside the server.
+            let duration = if let Ok(mut ffprobe) =
+                crate::core::audio::AudioService::ffprobe_command()
             {
                 tracing::info!("Using FFprobe to get strm file duration: {}", url);
 
@@ -585,7 +582,7 @@ impl LibraryScanner {
                 tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
                 // Add User-Agent and other headers to avoid being blocked
-                match tokio::process::Command::new(&ffprobe_path)
+                match ffprobe
                     .arg("-v").arg("error")
                     .arg("-user_agent").arg("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
                     .arg("-headers").arg("Accept: */*")
@@ -658,79 +655,61 @@ impl LibraryScanner {
         let mut cover_url = None;
 
         // 1. 优先尝试格式插件
-        let plugins = self
-            .plugin_manager
-            .find_plugins_by_capability_kind("format_handler")
-            .await;
         let mut plugin_handled = false;
+        if let Ok(Some(extracted)) = self
+            .plugin_manager
+            .extract_local_format_metadata(path, false)
+            .await
+            && let Ok(result) = extracted.into_scanner_json(None)
+        {
+            tracing::debug!(
+                "Using format plugin {} to process {} file",
+                "format_handler",
+                ext
+            );
 
-        for plugin in plugins {
-            // 检查插件是否声明支持该扩展名
-            let supports_ext = plugin
-                .supported_extensions
-                .as_ref()
-                .map(|exts| exts.iter().any(|e| e.eq_ignore_ascii_case(&ext)))
-                .unwrap_or(false);
-
-            if !supports_ext {
-                continue;
-            }
-
-            let params = serde_json::json!({
-                "file_path": path.to_string_lossy(),
-                "extract_cover": false
-            });
-
-            // 交由格式插件处理
-            if let Ok(result) = self
-                .plugin_manager
-                .call_format(&plugin.id, FormatMethod::ExtractMetadata, params)
-                .await
+            if let Some(t) = result.get("title").and_then(|v| v.as_str())
+                && !t.trim().is_empty()
             {
-                tracing::debug!(
-                    "Using format plugin {} to process {} file",
-                    plugin.name,
-                    ext
-                );
-
-                if let Some(t) = result.get("title").and_then(|v| v.as_str())
-                    && !t.trim().is_empty() {
-                        title = t.to_string();
-                    }
-                if let Some(a) = result.get("album").and_then(|v| v.as_str())
-                    && !a.trim().is_empty() {
-                        album = a.to_string();
-                    }
-                if let Some(au) = result.get("artist").and_then(|v| v.as_str())
-                    && !au.trim().is_empty() {
-                        author = Some(au.to_string());
-                    }
-                if let Some(aa) = result.get("album_artist").and_then(|v| v.as_str())
-                    && !aa.trim().is_empty() {
-                        author = Some(aa.to_string());
-                    }
-                if let Some(n) = result.get("narrator").and_then(|v| v.as_str())
-                    && !n.trim().is_empty() {
-                        narrator = Some(n.to_string());
-                    }
-                if let Some(dur) = result.get("duration").and_then(|v| v.as_f64()) {
-                    duration = dur.round() as i32;
-                    if duration > 0 {
-                        tracing::debug!(
-                            "Format plugin {} detected duration: {} seconds",
-                            plugin.name,
-                            duration
-                        );
-                    }
-                }
-                if let Some(c) = result.get("cover_url").and_then(|v| v.as_str())
-                    && !c.trim().is_empty() {
-                        cover_url = Some(c.to_string());
-                    }
-
-                plugin_handled = true;
-                break;
+                title = t.to_string();
             }
+            if let Some(a) = result.get("album").and_then(|v| v.as_str())
+                && !a.trim().is_empty()
+            {
+                album = a.to_string();
+            }
+            if let Some(au) = result.get("artist").and_then(|v| v.as_str())
+                && !au.trim().is_empty()
+            {
+                author = Some(au.to_string());
+            }
+            if let Some(aa) = result.get("album_artist").and_then(|v| v.as_str())
+                && !aa.trim().is_empty()
+            {
+                author = Some(aa.to_string());
+            }
+            if let Some(n) = result.get("narrator").and_then(|v| v.as_str())
+                && !n.trim().is_empty()
+            {
+                narrator = Some(n.to_string());
+            }
+            if let Some(dur) = result.get("duration").and_then(|v| v.as_f64()) {
+                duration = dur.round() as i32;
+                if duration > 0 {
+                    tracing::debug!(
+                        "Format plugin {} detected duration: {} seconds",
+                        "format_handler",
+                        duration
+                    );
+                }
+            }
+            if let Some(c) = result.get("cover_url").and_then(|v| v.as_str())
+                && !c.trim().is_empty()
+            {
+                cover_url = Some(c.to_string());
+            }
+
+            plugin_handled = true;
         }
 
         // 2. 如果插件没有处理，且是标准格式，尝试 Symphonia（仅用于完整文件）
@@ -768,52 +747,62 @@ impl LibraryScanner {
                             diff_ratio * 100.0
                         );
                     } else {
-                        tracing::debug!("ID3 duration differs too much (ID3: {}s, estimated: {}s, diff: {:.1}%); using FFprobe",
-                                      id3_duration, estimated_duration, diff_ratio * 100.0);
+                        tracing::debug!(
+                            "ID3 duration differs too much (ID3: {}s, estimated: {}s, diff: {:.1}%); using FFprobe",
+                            id3_duration,
+                            estimated_duration,
+                            diff_ratio * 100.0
+                        );
                     }
                 }
 
                 // If ID3 is unreliable or missing, use Symphonia as fallback
                 if duration == 0
-                    && let Ok(meta) = self.audio_streamer.read_metadata(path) {
-                        duration = meta.duration.as_secs() as i32;
-                        tracing::debug!(
-                            "Using Symphonia to get {} duration: {} seconds",
-                            ext,
-                            duration
-                        );
-                    }
+                    && let Ok(meta) = self.audio_streamer.read_metadata(path)
+                {
+                    duration = meta.duration.as_secs() as i32;
+                    tracing::debug!(
+                        "Using Symphonia to get {} duration: {} seconds",
+                        ext,
+                        duration
+                    );
+                }
             }
 
             // 提取其他元数据（如果插件没有提供）
-            if duration > 0 && (title.is_empty() || album.is_empty())
-                && let Ok(meta) = self.audio_streamer.read_metadata(path) {
-                    if title.is_empty() {
-                        title = meta.title.unwrap_or_default();
-                    }
-                    if album.is_empty() {
-                        album = meta.album.unwrap_or_default();
-                    }
-
-                    // Standard metadata extraction for author/narrator
-                    if author.is_none() {
-                        author = meta.album_artist;
-                    }
-
-                    if let Some(a) = meta.artist
-                        && !a.trim().is_empty() {
-                            if author.is_none() {
-                                author = Some(a.clone());
-                            } else if author.as_ref() != Some(&a) && narrator.is_none() {
-                                narrator = Some(a);
-                            }
-                        }
-
-                    if let Some(c) = meta.composer
-                        && !c.trim().is_empty() && narrator.is_none() {
-                            narrator = Some(c);
-                        }
+            if duration > 0
+                && (title.is_empty() || album.is_empty())
+                && let Ok(meta) = self.audio_streamer.read_metadata(path)
+            {
+                if title.is_empty() {
+                    title = meta.title.unwrap_or_default();
                 }
+                if album.is_empty() {
+                    album = meta.album.unwrap_or_default();
+                }
+
+                // Standard metadata extraction for author/narrator
+                if author.is_none() {
+                    author = meta.album_artist;
+                }
+
+                if let Some(a) = meta.artist
+                    && !a.trim().is_empty()
+                {
+                    if author.is_none() {
+                        author = Some(a.clone());
+                    } else if author.as_ref() != Some(&a) && narrator.is_none() {
+                        narrator = Some(a);
+                    }
+                }
+
+                if let Some(c) = meta.composer
+                    && !c.trim().is_empty()
+                    && narrator.is_none()
+                {
+                    narrator = Some(c);
+                }
+            }
         }
 
         // 3. 返回提取的元数据

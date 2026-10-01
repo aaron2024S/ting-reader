@@ -5,10 +5,10 @@
 
 use crate::core::error::{Result, TingError};
 use aes_gcm::{
-    aead::{Aead, KeyInit, OsRng},
     Aes256Gcm, Nonce,
+    aead::{Aead, KeyInit, OsRng},
 };
-use base64::{engine::general_purpose, Engine as _};
+use base64::{Engine as _, engine::general_purpose};
 
 /// Encrypt a string value using AES-256-GCM
 ///

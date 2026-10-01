@@ -15,7 +15,7 @@ pub mod models;
 pub mod password;
 
 pub use handlers::{get_me, login, register, update_me};
-pub use jwt::{generate_token, validate_token, validate_token_with_secrets, Claims};
+pub use jwt::{Claims, generate_token, validate_token, validate_token_with_secrets};
 pub use key_rotation::{JwtKeyManager, JwtKeyPair};
-pub use middleware::{authenticate, AuthUser};
+pub use middleware::{AuthUser, authenticate};
 pub use password::{hash_password, verify_password};

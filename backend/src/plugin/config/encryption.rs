@@ -6,10 +6,10 @@ use serde_json::Value;
 /// Encrypt a value using AES-256-GCM
 pub fn encrypt_value(encryption_key: &[u8; 32], value: &str) -> Result<String> {
     use aes_gcm::{
-        aead::{Aead, KeyInit, OsRng},
         Aes256Gcm, Nonce,
+        aead::{Aead, KeyInit, OsRng},
     };
-    use base64::{engine::general_purpose, Engine as _};
+    use base64::{Engine as _, engine::general_purpose};
 
     let cipher = Aes256Gcm::new(encryption_key.into());
 
@@ -31,10 +31,10 @@ pub fn encrypt_value(encryption_key: &[u8; 32], value: &str) -> Result<String> {
 /// Decrypt a value using AES-256-GCM
 pub fn decrypt_value(encryption_key: &[u8; 32], encrypted: &str) -> Result<String> {
     use aes_gcm::{
-        aead::{Aead, KeyInit},
         Aes256Gcm, Nonce,
+        aead::{Aead, KeyInit},
     };
-    use base64::{engine::general_purpose, Engine as _};
+    use base64::{Engine as _, engine::general_purpose};
 
     let cipher = Aes256Gcm::new(encryption_key.into());
 
@@ -143,10 +143,11 @@ pub fn decrypt_sensitive_fields(
         for field_name in encrypted_fields {
             if let Some(field_value) = obj.get(field_name)
                 && let Some(encrypted_str) = field_value.as_str()
-                    && let Some(encrypted_data) = encrypted_str.strip_prefix("encrypted:") {
-                        let decrypted = decrypt_value(encryption_key, encrypted_data)?;
-                        obj.insert(field_name.clone(), Value::String(decrypted));
-                    }
+                && let Some(encrypted_data) = encrypted_str.strip_prefix("encrypted:")
+            {
+                let decrypted = decrypt_value(encryption_key, encrypted_data)?;
+                obj.insert(field_name.clone(), Value::String(decrypted));
+            }
         }
     }
 

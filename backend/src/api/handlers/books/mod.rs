@@ -1,5 +1,10 @@
+mod cover;
+mod metadata;
 pub mod scrape;
 
+pub(crate) use cover::COVER_BODY_LIMIT;
+pub use cover::upload_book_cover;
+pub(crate) use metadata::save_webdav_metadata;
 pub use scrape::{apply_scrape_result, scrape_book_diff};
 
 use super::AppState;
@@ -15,10 +20,10 @@ use crate::core::task_queue::{Priority, Task, TaskPayload};
 use crate::db::models::Book;
 use crate::db::repository::{ChapterRepository, Repository};
 use axum::{
+    Json,
     extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
-    Json,
 };
 use serde::Deserialize;
 use std::collections::HashSet;
@@ -47,14 +52,25 @@ pub async fn list_books(
         .await?;
 
     let libraries = state.library_repo.find_all().await?;
-    let library_types: std::collections::HashMap<String, String> = libraries
+    let library_info: std::collections::HashMap<String, (String, bool)> = libraries
         .into_iter()
-        .map(|l| (l.id, l.library_type))
+        .map(|library| {
+            let can_write = library.can_write_metadata_files();
+            (library.id, (library.library_type, can_write))
+        })
         .collect();
 
     let mut book_responses: Vec<BookResponse> = books.into_iter().map(BookResponse::from).collect();
+    let percentages =
+        crate::db::repository::reading::ReadingRepository::new(state.book_repo.db().clone())
+            .percentages(&user.id)
+            .await?;
     for r in &mut book_responses {
-        r.library_type = library_types.get(&r.library_id).cloned();
+        if let Some((kind, can_write)) = library_info.get(&r.library_id) {
+            r.library_type = Some(kind.clone());
+            r.can_write_metadata_files = Some(*can_write);
+        }
+        r.progress_percent = percentages.get(&r.id).copied().unwrap_or(0.0);
     }
 
     Ok(Json(book_responses))
@@ -83,8 +99,16 @@ pub async fn get_book(
     let is_fav = state.favorite_repo.is_favorited(&user.id, &id).await?;
 
     let mut response = BookResponse::from(book.clone());
+    response.can_write_metadata_files = Some(library.can_write_metadata_files());
     response.library_type = Some(library.library_type);
     response.is_favorite = is_fav;
+    response.progress_percent =
+        crate::db::repository::reading::ReadingRepository::new(state.book_repo.db().clone())
+            .percentages(&user.id)
+            .await?
+            .get(&id)
+            .copied()
+            .unwrap_or(0.0);
 
     Ok((StatusCode::OK, Json(response)))
 }
@@ -100,25 +124,26 @@ pub async fn create_book(
 
     let mut theme_color = req.theme_color.clone();
     if theme_color.is_none()
-        && let Some(ref url) = req.cover_url {
-            let cover_path = if url.starts_with("http://") || url.starts_with("https://") {
+        && let Some(ref url) = req.cover_url
+    {
+        let cover_path = if url.starts_with("http://") || url.starts_with("https://") {
+            url.clone()
+        } else {
+            let path = std::path::Path::new(url);
+            if path.is_absolute() {
                 url.clone()
             } else {
-                let path = std::path::Path::new(url);
-                if path.is_absolute() {
-                    url.clone()
-                } else {
-                    std::path::Path::new(&req.path)
-                        .join(url)
-                        .to_string_lossy()
-                        .to_string()
-                }
-            };
-
-            if let Ok(Some(color)) = crate::core::color::calculate_theme_color(&cover_path).await {
-                theme_color = Some(color);
+                std::path::Path::new(&req.path)
+                    .join(url)
+                    .to_string_lossy()
+                    .to_string()
             }
+        };
+
+        if let Ok(Some(color)) = crate::core::color::calculate_theme_color(&cover_path).await {
+            theme_color = Some(color);
         }
+    }
 
     let book = Book {
         id: book_id.clone(),
@@ -242,29 +267,21 @@ pub async fn update_book(
                         .find_by_id(&existing_book.library_id)
                         .await
                         && library.library_type == "webdav"
-                            && let Ok((mut reader, _)) = state
-                                .storage_service
-                                .get_webdav_reader(
-                                    &library,
-                                    url,
-                                    None,
-                                    state.encryption_key.as_ref(),
-                                )
-                                .await
-                            {
-                                let mut buffer = Vec::new();
-                                if tokio::io::AsyncReadExt::read_to_end(&mut reader, &mut buffer)
-                                    .await
-                                    .is_ok()
-                                    && let Ok(Some(color)) =
-                                        crate::core::color::calculate_theme_color_from_bytes(
-                                            &buffer,
-                                        )
-                                        .await
-                                    {
-                                        theme_color = Some(color);
-                                    }
-                            }
+                        && let Ok((mut reader, _)) = state
+                            .storage_service
+                            .get_webdav_reader(&library, url, None, state.encryption_key.as_ref())
+                            .await
+                    {
+                        let mut buffer = Vec::new();
+                        if tokio::io::AsyncReadExt::read_to_end(&mut reader, &mut buffer)
+                            .await
+                            .is_ok()
+                            && let Ok(Some(color)) =
+                                crate::core::color::calculate_theme_color_from_bytes(&buffer).await
+                        {
+                            theme_color = Some(color);
+                        }
+                    }
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -280,54 +297,55 @@ pub async fn update_book(
             // UNLESS existing cover exists and theme color is missing
             theme_color = existing_book.theme_color.clone();
             if theme_color.is_none()
-                && let Some(ref url) = existing_book.cover_url {
-                    let cover_path = if url.starts_with("http://") || url.starts_with("https://") {
+                && let Some(ref url) = existing_book.cover_url
+            {
+                let cover_path = if url.starts_with("http://") || url.starts_with("https://") {
+                    url.clone()
+                } else {
+                    let path = std::path::Path::new(url);
+                    if path.is_absolute() {
                         url.clone()
                     } else {
-                        let path = std::path::Path::new(url);
-                        if path.is_absolute() {
-                            url.clone()
-                        } else {
-                            book_path.join(url).to_string_lossy().to_string()
-                        }
-                    };
-
-                    match crate::core::color::calculate_theme_color(&cover_path).await {
-                        Ok(Some(color)) => {
-                            theme_color = Some(color);
-                        }
-                        Ok(None) => {
-                            // Try WebDAV fallback for existing cover
-                            if let Ok(Some(library)) = state
-                                .library_repo
-                                .find_by_id(&existing_book.library_id)
-                                .await
-                                && library.library_type == "webdav"
-                                    && let Ok((mut reader, _)) = state
-                                        .storage_service
-                                        .get_webdav_reader(
-                                            &library,
-                                            url,
-                                            None,
-                                            state.encryption_key.as_ref(),
-                                        )
-                                        .await
-                                    {
-                                        let mut buffer = Vec::new();
-                                        if tokio::io::AsyncReadExt::read_to_end(
-                                            &mut reader,
-                                            &mut buffer,
-                                        )
-                                        .await
-                                        .is_ok()
-                                            && let Ok(Some(color)) = crate::core::color::calculate_theme_color_from_bytes(&buffer).await {
-                                                 theme_color = Some(color);
-                                             }
-                                    }
-                        }
-                        Err(_) => {}
+                        book_path.join(url).to_string_lossy().to_string()
                     }
+                };
+
+                match crate::core::color::calculate_theme_color(&cover_path).await {
+                    Ok(Some(color)) => {
+                        theme_color = Some(color);
+                    }
+                    Ok(None) => {
+                        // Try WebDAV fallback for existing cover
+                        if let Ok(Some(library)) = state
+                            .library_repo
+                            .find_by_id(&existing_book.library_id)
+                            .await
+                            && library.library_type == "webdav"
+                            && let Ok((mut reader, _)) = state
+                                .storage_service
+                                .get_webdav_reader(
+                                    &library,
+                                    url,
+                                    None,
+                                    state.encryption_key.as_ref(),
+                                )
+                                .await
+                        {
+                            let mut buffer = Vec::new();
+                            if tokio::io::AsyncReadExt::read_to_end(&mut reader, &mut buffer)
+                                .await
+                                .is_ok()
+                                && let Ok(Some(color)) =
+                                    crate::core::color::calculate_theme_color_from_bytes(&buffer)
+                                        .await
+                            {
+                                theme_color = Some(color);
+                            }
+                        }
+                    }
+                    Err(_) => {}
                 }
+            }
         }
     }
 
@@ -372,11 +390,22 @@ pub async fn update_book(
 
     state.book_repo.update(&updated_book).await?;
 
+    if state
+        .library_repo
+        .find_by_id(&updated_book.library_id)
+        .await?
+        .is_some_and(|library| library.library_type == "webdav")
+    {
+        metadata::save_webdav_metadata(&state, &updated_book).await?;
+        return Ok(Json(BookResponse::from(updated_book)));
+    }
+
     // Check NFO writing
     if let Ok(Some(library)) = state
         .library_repo
         .find_by_id(&updated_book.library_id)
         .await
+        && library.library_type == "local"
     {
         let config: crate::db::models::ScraperConfig = library
             .scraper_config
@@ -384,9 +413,9 @@ pub async fn update_book(
             .and_then(|json| serde_json::from_str(json).ok())
             .unwrap_or_default();
 
-        // Only local libraries write sidecar files. RSS/WebDAV edits stay in
-        // the database and never write back to the source.
-        if library.library_type == "local" && config.nfo_writing_enabled {
+        let target_dir = std::path::PathBuf::from(&updated_book.path);
+
+        if config.nfo_writing_enabled {
             let mut metadata = BookMetadata::new(
                 updated_book.title.clone().unwrap_or_default(),
                 "ting-reader".to_string(),
@@ -406,25 +435,6 @@ pub async fn update_book(
             }
             metadata.touch(); // Update timestamp
 
-            // Determine path
-            let target_dir = if library.library_type == "webdav" {
-                // WebDAV uses hash-based temp dir
-                let mut hasher = sha2::Sha256::new();
-                use sha2::Digest;
-                hasher.update(updated_book.path.as_bytes()); // updated_book.path is the WebDAV URL
-                let book_hash = format!("{:x}", hasher.finalize());
-                let temp_book_dir = std::env::current_dir()
-                    .unwrap_or_else(|_| std::path::PathBuf::from("."))
-                    .join("temp")
-                    .join(&book_hash);
-                if !temp_book_dir.exists() {
-                    std::fs::create_dir_all(&temp_book_dir).ok();
-                }
-                temp_book_dir
-            } else {
-                std::path::PathBuf::from(&updated_book.path)
-            };
-
             if let Err(e) = state
                 .nfo_manager
                 .write_book_nfo_to_dir(&target_dir, &metadata)
@@ -443,25 +453,8 @@ pub async fn update_book(
         }
 
         // Handle metadata.json writing
-        if library.library_type == "local" && config.metadata_writing_enabled {
-            // Read existing metadata.json to preserve extended fields
-            let target_dir = if library.library_type == "webdav" {
-                let mut hasher = sha2::Sha256::new();
-                use sha2::Digest;
-                hasher.update(updated_book.path.as_bytes());
-                let book_hash = format!("{:x}", hasher.finalize());
-                let temp_book_dir = std::env::current_dir()
-                    .unwrap_or_else(|_| std::path::PathBuf::from("."))
-                    .join("temp")
-                    .join(&book_hash);
-                if !temp_book_dir.exists() {
-                    std::fs::create_dir_all(&temp_book_dir).ok();
-                }
-                temp_book_dir
-            } else {
-                std::path::PathBuf::from(&updated_book.path)
-            };
-
+        if config.metadata_writing_enabled {
+            // Preserve extended fields from existing local/cached metadata.
             let mut metadata_json = crate::core::metadata_writer::read_metadata_json(&target_dir)
                 .unwrap_or(None)
                 .unwrap_or_default();
@@ -725,17 +718,17 @@ async fn delete_book_files_inside_library_root(
 
     if let Some(cover_url) = &book.cover_url
         && !cover_url.starts_with("http://")
-            && !cover_url.starts_with("https://")
-            && !cover_url.starts_with("//")
-        {
-            let cover_path = std::path::PathBuf::from(cover_url);
-            let candidate = if cover_path.is_absolute() {
-                cover_path
-            } else {
-                book_dir.join(cover_path)
-            };
-            delete_file_if_inside_root(&candidate, library_root, &mut deleted_paths)?;
-        }
+        && !cover_url.starts_with("https://")
+        && !cover_url.starts_with("//")
+    {
+        let cover_path = std::path::PathBuf::from(cover_url);
+        let candidate = if cover_path.is_absolute() {
+            cover_path
+        } else {
+            book_dir.join(cover_path)
+        };
+        delete_file_if_inside_root(&candidate, library_root, &mut deleted_paths)?;
+    }
 
     tracing::info!(
         book_id = %book.id,
@@ -781,6 +774,7 @@ pub async fn search_books(
     Ok(Json(SearchResponse {
         items: result.items,
         total: result.total,
+        has_more: result.has_more,
         page: result.page,
         page_size: result.page_size,
     }))
@@ -953,7 +947,23 @@ pub async fn update_chapter(
             ))
         })?;
 
-    if let Ok(Some(library)) = state.library_repo.find_by_id(&book.library_id).await {
+    if state
+        .library_repo
+        .find_by_id(&book.library_id)
+        .await?
+        .is_some_and(|library| library.library_type == "webdav")
+    {
+        state
+            .merge_service
+            .update_manual_correction(&book.id, true, book.title.as_deref().map(regex::escape))
+            .await?;
+        metadata::save_webdav_metadata(&state, &book).await?;
+        return Ok(Json(ChapterResponse::from(updated_chapter)));
+    }
+
+    if let Ok(Some(library)) = state.library_repo.find_by_id(&book.library_id).await
+        && library.library_type == "local"
+    {
         let config: crate::db::models::ScraperConfig = library
             .scraper_config
             .as_ref()
@@ -962,22 +972,7 @@ pub async fn update_chapter(
 
         if config.metadata_writing_enabled {
             // Determine path
-            let target_dir = if library.library_type == "webdav" {
-                let mut hasher = sha2::Sha256::new();
-                use sha2::Digest;
-                hasher.update(book.path.as_bytes());
-                let book_hash = format!("{:x}", hasher.finalize());
-                let temp_book_dir = std::env::current_dir()
-                    .unwrap_or_else(|_| std::path::PathBuf::from("."))
-                    .join("temp")
-                    .join(&book_hash);
-                if !temp_book_dir.exists() {
-                    std::fs::create_dir_all(&temp_book_dir).ok();
-                }
-                temp_book_dir
-            } else {
-                std::path::PathBuf::from(&book.path)
-            };
+            let target_dir = std::path::PathBuf::from(&book.path);
 
             let mut metadata_json = crate::core::metadata_writer::read_metadata_json(&target_dir)
                 .unwrap_or(None)
@@ -1171,7 +1166,25 @@ pub async fn batch_update_chapters(
         .await?
         .ok_or_else(|| TingError::NotFound(format!("Book with id {} not found", id)))?;
 
-    if let Ok(Some(library)) = state.library_repo.find_by_id(&book.library_id).await {
+    if state
+        .library_repo
+        .find_by_id(&book.library_id)
+        .await?
+        .is_some_and(|library| library.library_type == "webdav")
+    {
+        state
+            .merge_service
+            .update_manual_correction(&book.id, true, book.title.as_deref().map(regex::escape))
+            .await?;
+        metadata::save_webdav_metadata(&state, &book).await?;
+        return Ok(Json(
+            serde_json::json!({ "message": "Chapters updated successfully" }),
+        ));
+    }
+
+    if let Ok(Some(library)) = state.library_repo.find_by_id(&book.library_id).await
+        && library.library_type == "local"
+    {
         let config: crate::db::models::ScraperConfig = library
             .scraper_config
             .as_ref()
@@ -1180,22 +1193,7 @@ pub async fn batch_update_chapters(
 
         if config.metadata_writing_enabled {
             // Determine path
-            let target_dir = if library.library_type == "webdav" {
-                let mut hasher = sha2::Sha256::new();
-                use sha2::Digest;
-                hasher.update(book.path.as_bytes());
-                let book_hash = format!("{:x}", hasher.finalize());
-                let temp_book_dir = std::env::current_dir()
-                    .unwrap_or_else(|_| std::path::PathBuf::from("."))
-                    .join("temp")
-                    .join(&book_hash);
-                if !temp_book_dir.exists() {
-                    std::fs::create_dir_all(&temp_book_dir).ok();
-                }
-                temp_book_dir
-            } else {
-                std::path::PathBuf::from(&book.path)
-            };
+            let target_dir = std::path::PathBuf::from(&book.path);
 
             let mut metadata_json = crate::core::metadata_writer::read_metadata_json(&target_dir)
                 .unwrap_or(None)
@@ -1320,14 +1318,15 @@ pub async fn write_book_metadata_to_files(
         .ok_or_else(|| {
             TingError::NotFound(format!("Library with id {} not found", book.library_id))
         })?;
-    if library.library_type != "local" {
+    if !library.can_write_metadata_files() {
         return Err(TingError::ValidationError(
-            "Only local books support metadata file writing".to_string(),
+            "Metadata file writing requires a local library or an enabled WebDAV library"
+                .to_string(),
         ));
     }
 
     // Create task
-    let task = Task::new(
+    let mut task = Task::new(
         format!("写入元数据: {}", book.title.unwrap_or_default()),
         Priority::Normal,
         TaskPayload::Custom {
@@ -1337,6 +1336,13 @@ pub async fn write_book_metadata_to_files(
             }),
         },
     );
+    if library.library_type == "webdav" {
+        // A retry must be explicitly requested after reviewing which remote
+        // chapters completed, rather than rewriting successful chapters again.
+        // The queue counts the initial failed attempt toward this limit.
+        task.retry_policy.max_retries = 1;
+        task.timeout = std::time::Duration::from_secs(86400);
+    }
 
     let task_id = state.task_queue.submit(task).await?;
 

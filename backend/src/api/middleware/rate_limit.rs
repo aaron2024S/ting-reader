@@ -1,9 +1,9 @@
 use axum::{
+    Json,
     extract::Request,
     http::{HeaderValue, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
-    Json,
 };
 use serde_json::json;
 use std::collections::HashMap;
@@ -213,17 +213,19 @@ fn extract_client_ip(request: &Request) -> Result<IpAddr, RateLimitError> {
     // Try X-Forwarded-For header first (comma-separated list, first is client)
     if let Some(forwarded) = request.headers().get("X-Forwarded-For")
         && let Ok(forwarded_str) = forwarded.to_str()
-            && let Some(first_ip) = forwarded_str.split(',').next()
-                && let Ok(ip) = first_ip.trim().parse::<IpAddr>() {
-                    return Ok(ip);
-                }
+        && let Some(first_ip) = forwarded_str.split(',').next()
+        && let Ok(ip) = first_ip.trim().parse::<IpAddr>()
+    {
+        return Ok(ip);
+    }
 
     // Try X-Real-IP header
     if let Some(real_ip) = request.headers().get("X-Real-IP")
         && let Ok(ip_str) = real_ip.to_str()
-            && let Ok(ip) = ip_str.parse::<IpAddr>() {
-                return Ok(ip);
-            }
+        && let Ok(ip) = ip_str.parse::<IpAddr>()
+    {
+        return Ok(ip);
+    }
 
     // For testing/development, use a default IP
     // In production, this should be extracted from the connection
@@ -235,11 +237,11 @@ fn extract_client_ip(request: &Request) -> Result<IpAddr, RateLimitError> {
 mod tests {
     use super::*;
     use axum::{
+        Router,
         body::Body,
         http::{Request, StatusCode},
         middleware,
         routing::get,
-        Router,
     };
     use tower::util::ServiceExt; // For oneshot method
 
@@ -425,10 +427,12 @@ mod tests {
 
         // Verify error response structure
         assert_eq!(body["error"], "RateLimitExceeded");
-        assert!(body["message"]
-            .as_str()
-            .unwrap()
-            .contains("Rate limit exceeded"));
+        assert!(
+            body["message"]
+                .as_str()
+                .unwrap()
+                .contains("Rate limit exceeded")
+        );
         assert_eq!(body["details"]["limit"], 1);
         assert_eq!(body["details"]["window_seconds"], 60);
         assert!(body["details"]["retry_after"].as_u64().unwrap() > 0);

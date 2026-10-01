@@ -1,5 +1,4 @@
 use super::super::{LibraryScanner, MetadataSource, STANDARD_EXTENSIONS};
-use crate::plugin::manager::FormatMethod;
 use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
 
@@ -31,9 +30,10 @@ pub(crate) struct ScannedMetadata {
 impl ScannedMetadata {
     fn merge(&mut self, other: ScannedMetadata) {
         if let Some(t) = other.title
-            && !t.trim().is_empty() {
-                self.title = Some(t);
-            }
+            && !t.trim().is_empty()
+        {
+            self.title = Some(t);
+        }
         if other.author.is_some() {
             self.author = other.author;
         }
@@ -50,9 +50,10 @@ impl ScannedMetadata {
             self.genre = other.genre;
         }
         if let Some(c) = other.cover_url
-            && !c.trim().is_empty() {
-                self.cover_url = Some(c);
-            }
+            && !c.trim().is_empty()
+        {
+            self.cover_url = Some(c);
+        }
         if other.subtitle.is_some() {
             self.subtitle = other.subtitle;
         }
@@ -252,9 +253,10 @@ impl LibraryScanner {
         // 2. Post-processing: Cover Image
         // If no cover URL yet, try finding local file (cover.jpg)
         if final_meta.cover_url.is_none()
-            && let Some(path) = self.find_cover_image(dir) {
-                final_meta.cover_url = Some(path);
-            }
+            && let Some(path) = self.find_cover_image(dir)
+        {
+            final_meta.cover_url = Some(path);
+        }
 
         // 3. Fallback Cover Extraction (if still no cover, extract from ID3 and save)
         // This runs only if cover is still missing, regardless of priority,
@@ -269,25 +271,28 @@ impl LibraryScanner {
             } else {
                 // Try extracting cover from non-standard files (like .xm) via plugin
                 if let Some(meta) = self.extract_from_audio(dir, files, true).await
-                    && meta.cover_url.is_some() {
-                        final_meta.cover_url = meta.cover_url;
-                    }
+                    && meta.cover_url.is_some()
+                {
+                    final_meta.cover_url = meta.cover_url;
+                }
             }
         }
 
         // 4. Validate local cover paths to ensure they exist
         if let Some(ref url) = final_meta.cover_url
-            && !url.starts_with("http") && !url.starts_with("//") {
-                let p = Path::new(url);
-                if !p.exists() {
-                    let rel_p = dir.join(url);
-                    if !rel_p.exists() {
-                        final_meta.cover_url = None;
-                    } else {
-                        final_meta.cover_url = Some(rel_p.to_string_lossy().replace('\\', "/"));
-                    }
+            && !url.starts_with("http")
+            && !url.starts_with("//")
+        {
+            let p = Path::new(url);
+            if !p.exists() {
+                let rel_p = dir.join(url);
+                if !rel_p.exists() {
+                    final_meta.cover_url = None;
+                } else {
+                    final_meta.cover_url = Some(rel_p.to_string_lossy().replace('\\', "/"));
                 }
             }
+        }
 
         (final_meta, final_source)
     }
@@ -359,7 +364,7 @@ impl LibraryScanner {
 
     async fn extract_from_audio(
         &self,
-        _dir: &Path,
+        dir: &Path,
         files: &[PathBuf],
         extract_cover: bool,
     ) -> Option<ScannedMetadata> {
@@ -382,151 +387,153 @@ impl LibraryScanner {
             let is_standard = STANDARD_EXTENSIONS.contains(&ext.as_str());
 
             // 1. 优先尝试格式插件
-            let plugins = self
-                .plugin_manager
-                .find_plugins_by_capability_kind("format_handler")
-                .await;
             let mut plugin_handled = false;
 
-            for plugin in plugins {
-                let supports_ext = plugin
-                    .supported_extensions
-                    .as_ref()
-                    .map(|exts| exts.iter().any(|e| e.eq_ignore_ascii_case(&ext)))
-                    .unwrap_or(false);
-                if !supports_ext {
-                    continue;
+            if let Ok(Some(extracted)) = self
+                .plugin_manager
+                .extract_local_format_metadata(file_path, extract_cover)
+                .await
+                && let Ok(result) = extracted.into_scanner_json(Some(dir))
+            {
+                if index == 0 {
+                    tracing::debug!(
+                        "Using format plugin {} to process the first {} file",
+                        "format_handler",
+                        ext
+                    );
+                } else {
+                    tracing::debug!(
+                        "Using format plugin {} to process file #{} ({}) for supplemental metadata",
+                        "format_handler",
+                        index + 1,
+                        ext
+                    );
                 }
 
-                let params = serde_json::json!({ "file_path": file_path.to_string_lossy(), "extract_cover": extract_cover });
-                if let Ok(result) = self
-                    .plugin_manager
-                    .call_format(&plugin.id, FormatMethod::ExtractMetadata, params)
-                    .await
+                // 只在第一个文件或缺失时提取基本元数据
+                if (index == 0 || m.title.is_none())
+                    && let Some(t) = result.get("album").and_then(|v| v.as_str())
+                    && !t.trim().is_empty()
                 {
-                    if index == 0 {
-                        tracing::debug!(
-                            "Using format plugin {} to process the first {} file",
-                            plugin.name,
-                            ext
-                        );
-                    } else {
-                        tracing::debug!(
-                            "Using format plugin {} to process file #{} ({}) for supplemental metadata",
-                            plugin.name,
-                            index + 1,
-                            ext
-                        );
-                    }
-
-                    // 只在第一个文件或缺失时提取基本元数据
-                    if (index == 0 || m.title.is_none())
-                        && let Some(t) = result.get("album").and_then(|v| v.as_str())
-                            && !t.trim().is_empty() {
-                                m.title = Some(t.to_string());
-                                found = true;
-                            }
-                    if index == 0 || m.author.is_none() {
-                        if let Some(aa) = result.get("album_artist").and_then(|v| v.as_str())
-                            && !aa.trim().is_empty() {
-                                m.author = Some(aa.to_string());
-                            }
-                        if let Some(a) = result.get("artist").and_then(|v| v.as_str())
-                            && !a.trim().is_empty() {
-                                if m.author.is_none() {
-                                    m.author = Some(a.to_string());
-                                } else if m.author.as_deref() != Some(a) && m.narrator.is_none() {
-                                    m.narrator = Some(a.to_string());
-                                }
-                            }
-                    }
-                    if (index == 0 || m.narrator.is_none())
-                        && let Some(n) = result.get("narrator").and_then(|v| v.as_str())
-                            && !n.trim().is_empty() {
-                                m.narrator = Some(n.to_string());
-                            }
-
-                    // 封面：如果还没有找到，继续尝试
-                    if extract_cover && m.cover_url.is_none()
-                        && let Some(c) = result.get("cover_url").and_then(|v| v.as_str())
-                            && !c.trim().is_empty() {
-                                m.cover_url = Some(c.to_string());
-                                found = true;
-                                if index > 0 {
-                                    tracing::info!("Found cover in file #{}", index + 1);
-                                }
-                            }
-
-                    if (index == 0 || m.description.is_none())
-                        && let Some(d) = result.get("description").and_then(|v| v.as_str())
-                            && !d.trim().is_empty() {
-                                m.description = Some(d.to_string());
-                            }
-                    if (index == 0 || m.genre.is_none())
-                        && let Some(g) = result.get("genre").and_then(|v| v.as_str())
-                            && !g.trim().is_empty() {
-                                m.genre = Some(g.to_string());
-                            }
-
-                    plugin_handled = true;
-                    break;
+                    m.title = Some(t.to_string());
+                    found = true;
                 }
+                if index == 0 || m.author.is_none() {
+                    if let Some(aa) = result.get("album_artist").and_then(|v| v.as_str())
+                        && !aa.trim().is_empty()
+                    {
+                        m.author = Some(aa.to_string());
+                    }
+                    if let Some(a) = result.get("artist").and_then(|v| v.as_str())
+                        && !a.trim().is_empty()
+                    {
+                        if m.author.is_none() {
+                            m.author = Some(a.to_string());
+                        } else if m.author.as_deref() != Some(a) && m.narrator.is_none() {
+                            m.narrator = Some(a.to_string());
+                        }
+                    }
+                }
+                if (index == 0 || m.narrator.is_none())
+                    && let Some(n) = result.get("narrator").and_then(|v| v.as_str())
+                    && !n.trim().is_empty()
+                {
+                    m.narrator = Some(n.to_string());
+                }
+
+                // 封面：如果还没有找到，继续尝试
+                if extract_cover
+                    && m.cover_url.is_none()
+                    && let Some(c) = result.get("cover_url").and_then(|v| v.as_str())
+                    && !c.trim().is_empty()
+                {
+                    m.cover_url = Some(c.to_string());
+                    found = true;
+                    if index > 0 {
+                        tracing::info!("Found cover in file #{}", index + 1);
+                    }
+                }
+
+                if (index == 0 || m.description.is_none())
+                    && let Some(d) = result.get("description").and_then(|v| v.as_str())
+                    && !d.trim().is_empty()
+                {
+                    m.description = Some(d.to_string());
+                }
+                if (index == 0 || m.genre.is_none())
+                    && let Some(g) = result.get("genre").and_then(|v| v.as_str())
+                    && !g.trim().is_empty()
+                {
+                    m.genre = Some(g.to_string());
+                }
+
+                plugin_handled = true;
             }
 
             // 2. 如果插件没有处理，且是标准格式，尝试 Symphonia（仅用于完整文件）
-            if !plugin_handled && is_standard
-                && let Ok(meta) = self.audio_streamer.read_metadata(file_path) {
-                    if index == 0 {
-                        tracing::debug!("Using Symphonia to process the first {} file", ext);
-                    } else {
-                        tracing::debug!(
-                            "Using Symphonia to process file #{} ({}) for supplemental metadata",
-                            index + 1,
-                            ext
-                        );
-                    }
-
-                    if (index == 0 || m.title.is_none())
-                        && let Some(t) = meta.album
-                            && !t.trim().is_empty() {
-                                m.title = Some(t);
-                                found = true;
-                            }
-                    if index == 0 || m.author.is_none() {
-                        if let Some(aa) = meta.album_artist
-                            && !aa.trim().is_empty() {
-                                m.author = Some(aa);
-                            }
-                        if let Some(a) = meta.artist
-                            && !a.trim().is_empty() {
-                                if m.author.is_none() {
-                                    m.author = Some(a.clone());
-                                } else if m.author.as_ref() != Some(&a) && m.narrator.is_none() {
-                                    m.narrator = Some(a);
-                                }
-                            }
-                    }
-                    if (index == 0 || m.narrator.is_none())
-                        && let Some(c) = meta.composer
-                            && !c.trim().is_empty() && m.narrator.is_none() {
-                                m.narrator = Some(c);
-                            }
-                    if (index == 0 || m.genre.is_none())
-                        && let Some(g) = meta.genre
-                            && !g.trim().is_empty() {
-                                m.genre = Some(g);
-                            }
-
-                    // Symphonia 不提取封面，使用 extract_and_save_cover
-                    if extract_cover && m.cover_url.is_none()
-                        && let Some(path) = self.extract_and_save_cover(file_path, _dir) {
-                            m.cover_url = Some(path);
-                            found = true;
-                            if index > 0 {
-                                tracing::info!("Found cover in file #{}", index + 1);
-                            }
-                        }
+            if !plugin_handled
+                && is_standard
+                && let Ok(meta) = self.audio_streamer.read_metadata(file_path)
+            {
+                if index == 0 {
+                    tracing::debug!("Using Symphonia to process the first {} file", ext);
+                } else {
+                    tracing::debug!(
+                        "Using Symphonia to process file #{} ({}) for supplemental metadata",
+                        index + 1,
+                        ext
+                    );
                 }
+
+                if (index == 0 || m.title.is_none())
+                    && let Some(t) = meta.album
+                    && !t.trim().is_empty()
+                {
+                    m.title = Some(t);
+                    found = true;
+                }
+                if index == 0 || m.author.is_none() {
+                    if let Some(aa) = meta.album_artist
+                        && !aa.trim().is_empty()
+                    {
+                        m.author = Some(aa);
+                    }
+                    if let Some(a) = meta.artist
+                        && !a.trim().is_empty()
+                    {
+                        if m.author.is_none() {
+                            m.author = Some(a.clone());
+                        } else if m.author.as_ref() != Some(&a) && m.narrator.is_none() {
+                            m.narrator = Some(a);
+                        }
+                    }
+                }
+                if (index == 0 || m.narrator.is_none())
+                    && let Some(c) = meta.composer
+                    && !c.trim().is_empty()
+                    && m.narrator.is_none()
+                {
+                    m.narrator = Some(c);
+                }
+                if (index == 0 || m.genre.is_none())
+                    && let Some(g) = meta.genre
+                    && !g.trim().is_empty()
+                {
+                    m.genre = Some(g);
+                }
+
+                // Symphonia 不提取封面，使用 extract_and_save_cover
+                if extract_cover
+                    && m.cover_url.is_none()
+                    && let Some(path) = self.extract_and_save_cover(file_path, dir)
+                {
+                    m.cover_url = Some(path);
+                    found = true;
+                    if index > 0 {
+                        tracing::info!("Found cover in file #{}", index + 1);
+                    }
+                }
+            }
 
             // 如果已经找到了所有需要的元数据，就停止
             // 基本元数据：title 或 author
@@ -550,11 +557,7 @@ impl LibraryScanner {
             "extract_from_audio: returning found={}, meta={:?}",
             found, m
         );
-        if found {
-            Some(m)
-        } else {
-            None
-        }
+        if found { Some(m) } else { None }
     }
     async fn extract_from_scraper(
         &self,
@@ -577,9 +580,10 @@ impl LibraryScanner {
                     m.tags = Some(detail.tags.join(","));
                 }
                 if let Some(g) = detail.genre
-                    && !g.trim().is_empty() {
-                        m.genre = Some(g);
-                    }
+                    && !g.trim().is_empty()
+                {
+                    m.genre = Some(g);
+                }
                 m.cover_url = detail.cover_url;
                 m.narrator = detail.narrator;
                 if !detail.author.is_empty() {

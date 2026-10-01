@@ -11,6 +11,7 @@ import MyPage from './features/mine/MyPage';
 import AboutPage from './features/mine/AboutPage';
 import FavoritesPage from './features/mine/FavoritesPage';
 import HistoryPage from './features/mine/HistoryPage';
+import BookmarksPage from './features/mine/BookmarksPage';
 import PersonalizationPage from './features/mine/PersonalizationPage';
 import NotificationSettingsPage from './features/mine/NotificationSettingsPage';
 import AdminStatisticsPage from './features/mine/AdminStatisticsPage';
@@ -60,6 +61,7 @@ function App() {
           <Route path="favorites" element={<FavoritesPage />} />
           <Route path="mine" element={<MyPage />} />
           <Route path="history" element={<HistoryPage />} />
+          <Route path="bookmarks" element={<BookmarksPage />} />
           <Route path="playlists" element={<MyPlaylistsPage />} />
           <Route path="playlists/:id" element={<PlaylistDetailPage />} />
           <Route path="personalization" element={<PersonalizationPage />} />

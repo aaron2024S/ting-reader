@@ -16,6 +16,7 @@ import {
   Clock,
   Zap,
   ListMusic,
+  Bookmark,
 } from 'lucide-react';
 import type { Book } from '../../core/types';
 import { setAlpha, toSolidColor, isLight } from '../../core/utils/color';
@@ -49,7 +50,6 @@ export const CollapsedPlayerView: React.FC<CollapsedPlayerViewProps> = ({
       <img
         src={getCoverUrl(book?.cover_url, book?.library_id, book?.id)}
         alt={book?.title}
-        crossOrigin="anonymous"
         className="w-full h-full object-cover"
         onError={(e) => {
           (e.target as HTMLImageElement).src = 'https://placehold.co/300x400?text=No+Cover';
@@ -471,20 +471,15 @@ const SleepTimerPanel: React.FC<SleepTimerPanelProps> = ({
 };
 
 // ─── ExpandedBottomControls ────────────────────────────────────────────────
-// 展开视图底部四宫格：倍速 / 音量 / 睡眠定时 / 选集。
+// 展开视图底部四宫格：倍速 / 书签 / 睡眠定时 / 选集。
 
 interface ExpandedBottomControlsProps {
-  // 倍速
   playbackSpeed: number;
-  onCyclePlaybackSpeed: () => void;
-  // 音量
-  volume: number;
-  isMuted: boolean;
-  showVolumeControl: boolean;
-  volumeControlRef: React.RefObject<HTMLDivElement | null>;
-  onToggleShowVolumeControl: () => void;
-  onChangeVolume: (v: number) => void;
-  onToggleMuted: () => void;
+  showSpeedControl: boolean;
+  onToggleSpeedControl: () => void;
+  speedControlRef: React.RefObject<HTMLDivElement | null>;
+  onChangePlaybackSpeed: (speed: number) => void;
+  onOpenBookmarks: () => void;
   // 睡眠定时
   sleepTimer: number | null;
   showSleepTimer: boolean;
@@ -506,14 +501,11 @@ interface ExpandedBottomControlsProps {
 
 export const ExpandedBottomControls: React.FC<ExpandedBottomControlsProps> = ({
   playbackSpeed,
-  onCyclePlaybackSpeed,
-  volume,
-  isMuted,
-  showVolumeControl,
-  volumeControlRef,
-  onToggleShowVolumeControl,
-  onChangeVolume,
-  onToggleMuted,
+  showSpeedControl,
+  onToggleSpeedControl,
+  speedControlRef,
+  onChangePlaybackSpeed,
+  onOpenBookmarks,
   sleepTimer,
   showSleepTimer,
   customMinutes,
@@ -533,44 +525,30 @@ export const ExpandedBottomControls: React.FC<ExpandedBottomControlsProps> = ({
 
   return (
     <div className="grid grid-cols-4 items-start gap-1 sm:gap-2 w-full text-slate-600 dark:text-slate-400 order-1">
-      <button
-        onClick={onCyclePlaybackSpeed}
-        className="flex flex-col items-center gap-1.5 transition-all active:scale-95 group"
-        title={t('player.speed')}
-      >
-      <div className="w-10 h-10 rounded-2xl bg-white/50 dark:bg-slate-800/60 flex items-center justify-center group-hover:bg-white/70 dark:group-hover:bg-slate-800 transition-colors">
-        <Zap size={18} className={playbackSpeed !== 1 ? 'text-primary-600' : ''} />
-      </div>
-      <span className="text-[10px] sm:text-xs font-bold leading-none">{playbackSpeed}x</span>
-    </button>
-
-    <div className="relative" ref={volumeControlRef}>
+      <div ref={speedControlRef} className="relative flex justify-center">
       <button
         onClick={(e) => {
           e.stopPropagation();
-          onToggleShowVolumeControl();
+          onToggleSpeedControl();
         }}
-        className="w-full flex flex-col items-center gap-1.5 transition-all active:scale-95 group"
-        title={t('player.volume')}
+        className="flex flex-col items-center gap-1.5 transition-all active:scale-95 group"
+        title={t('player.speed')}
       >
         <div className="w-10 h-10 rounded-2xl bg-white/50 dark:bg-slate-800/60 flex items-center justify-center group-hover:bg-white/70 dark:group-hover:bg-slate-800 transition-colors">
-          {isMuted || volume === 0 ? <VolumeX size={18} /> : <Volume2 size={18} />}
+          <Zap size={18} className={playbackSpeed !== 1 ? 'text-primary-600' : ''} />
         </div>
-        <span className="text-[10px] sm:text-xs font-bold leading-none">
-          {isMuted || volume === 0 ? t('player.muted') : `${Math.round(volume * 100)}%`}
-        </span>
+        <span className="text-[10px] sm:text-xs font-bold leading-none">{playbackSpeed.toFixed(1)}x</span>
       </button>
-
-      {showVolumeControl && (
-        <VolumeSliderPanel
-          volume={volume}
-          isMuted={isMuted}
-          className="absolute bottom-full mb-4 left-1/2 -translate-x-1/2 shadow-2xl z-[220] animate-in zoom-in-95 duration-200"
-          onChangeVolume={onChangeVolume}
-          onToggleMuted={onToggleMuted}
-        />
-      )}
+      {showSpeedControl && <div className="absolute bottom-full left-0 z-[220] mb-3 w-56 rounded-lg border border-slate-200 bg-white p-3 shadow-xl dark:border-slate-700 dark:bg-slate-900" onClick={(event) => event.stopPropagation()}>
+        <div className="mb-2 flex justify-between text-xs text-slate-500"><span>0.5x</span><span className="font-semibold text-slate-800 dark:text-slate-100">{playbackSpeed.toFixed(1)}x</span><span>3.0x</span></div>
+        <input aria-label={t('player.speed')} type="range" min="0.5" max="3" step="0.1" value={playbackSpeed} onChange={(event) => onChangePlaybackSpeed(Number(event.target.value))} className="w-full accent-primary-600" />
+      </div>}
     </div>
+
+    <button onClick={onOpenBookmarks} className="flex flex-col items-center gap-1.5 transition-all active:scale-95 group" title={t('bookmarks.playerTitle', '书签')}>
+      <div className="w-10 h-10 rounded-2xl bg-white/50 dark:bg-slate-800/60 flex items-center justify-center group-hover:bg-white/70 dark:group-hover:bg-slate-800 transition-colors"><Bookmark size={18} /></div>
+      <span className="text-[10px] sm:text-xs font-bold leading-none">{t('bookmarks.playerTitle', '书签')}</span>
+    </button>
 
     <SleepTimerPopover
       sleepTimer={sleepTimer}

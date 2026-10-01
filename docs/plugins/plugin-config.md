@@ -174,6 +174,8 @@ api_key:
 JavaScript 运行时通过 `Ting.config` 读取配置：
 
 ```js
+import { success, publishSearch } from './sdk.mjs';
+
 function readConfig() {
   const config = Ting.config || {};
   return {
@@ -185,17 +187,20 @@ function readConfig() {
   };
 }
 
-async function search(args) {
+export async function search(request) {
   const config = readConfig();
   if (!config.apiKey) {
-    Ting.log?.warn?.("api_key is empty; returning fallback result.");
+    Ting.log.warn("API key is empty", { op: "metadata.search" });
   }
+  return success(publishSearch({ items: [], total: null, has_more: null }, request));
 }
-
-globalThis.search = search;
 ```
 
-WASM 和 Native 运行时由宿主在调用时注入对应运行时上下文。需要配置时，优先通过运行时提供的插件配置上下文读取；不要直接读取后端配置文件，也不要假设配置文件路径。
+WASM 和 Native 声明 `config_read` 权限，通过 Host 读取当前实例的配置快照：
+
+```rust
+let config = host.invoke("config.get", serde_json::json!({}))?;
+```
 
 ## 6. 保存和更新配置
 
@@ -215,7 +220,7 @@ Content-Type: application/json
 }
 ```
 
-保存后后端会校验 schema、加密敏感字段并通知插件管理器。已运行的插件需要重新加载或由宿主热更新后才能拿到新配置；配置类问题排查时优先执行“保存配置”后再“重新加载插件”。
+保存后后端会校验 schema、加密敏感字段并重新加载插件，后续调用使用更新后的配置。配置类问题排查时检查保存请求是否成功以及插件是否重新初始化成功。
 
 ## 7. 常见坑
 
@@ -223,4 +228,4 @@ Content-Type: application/json
 - `default` 只用于初始化和补齐缺失字段，不会覆盖用户已经保存过的值。
 - 加密字段不要写在普通 `description` 或日志里；插件日志也不要打印 API key。
 - 当前插件管理页不渲染嵌套 object、array 和复杂表单；需要复杂配置时建议拆成多个简单字段，或提供 `ui_extension` 自定义配置面板。
-- 修改 `plugin.yml` 里的 `config_schema` 后，需要重新打包/重装或重新加载插件，后台才会看到新的表单。
+- 修改项目 `plugin.yml` 中的 `config_schema` 后，重新打包并安装，后台显示新表单。

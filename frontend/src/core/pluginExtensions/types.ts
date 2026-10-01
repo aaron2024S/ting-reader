@@ -7,7 +7,7 @@ export type ClientExtensionSlot =
   | "book.detail_action";
 
 export type ClientExtensionRenderMode =
-  "schema" | "builtin" | "web_container" | "action";
+  "web_container" | "action";
 
 export type ClientExtensionIcon =
   | string
@@ -39,57 +39,9 @@ export type ClientExtensionRegistrySnapshot = {
   bySlot: Partial<Record<ClientExtensionSlot, ClientExtensionDescriptor[]>>;
 };
 
-export type UiExtensionCapabilityExtra = {
-  slot?: ClientExtensionSlot;
-  slots?: ClientExtensionSlot[];
-  render?: ClientExtensionRenderMode | UiExtensionRenderConfig;
-  render_mode?: ClientExtensionRenderMode;
-  title?: string;
-  label?: string;
-  icon?: ClientExtensionIcon;
-  priority?: number;
-  contexts?: string[];
-  context?: string[];
-};
+export type UiExtensionCapabilityExtra = Extract<PluginCapability, { kind: "ui_extension" }>;
 
-export type UiExtensionRenderConfig = {
-  mode?: ClientExtensionRenderMode;
-  entry?: string;
-  invoke?: string;
-  schema?: {
-    fields?: Array<{
-      name: string;
-      label?: string;
-      type?: "text" | "textarea" | "number" | "boolean" | "select";
-      placeholder?: string;
-      required?: boolean;
-      default?: unknown;
-      options?: Array<string | { label?: string; value?: unknown }>;
-    }>;
-  };
-  builtin?: {
-    component?: "host_method" | "capability_result" | "document_reader";
-    method?: string;
-    params?: Record<string, unknown>;
-    auto_run?: boolean;
-    submit_label?: string;
-  };
-  component?: "host_method" | "capability_result" | "document_reader";
-  method?: string;
-  params?: Record<string, unknown>;
-  auto_run?: boolean;
-  submit_label?: string;
-  panel?: {
-    type?: string;
-    width?: number;
-    mobile_type?: string;
-  };
-  bridge?: {
-    allow_capability_invoke?: boolean;
-    capabilities?: string[];
-    host_methods?: string[];
-  };
-};
+export type UiExtensionRenderConfig = UiExtensionCapabilityExtra["render"];
 
 export type CapabilityRegistrationLike = Pick<
   PluginCapabilityRegistration,

@@ -49,6 +49,12 @@ pub struct RecentProgressResponse {
 #[derive(Debug, Deserialize)]
 pub struct DeleteProgressHistoryRequest {
     #[serde(default)]
+    pub all: bool,
+    #[serde(default)]
+    pub clear_progress: bool,
+    #[serde(default)]
+    pub book_ids: Vec<String>,
+    #[serde(default)]
     pub progress_ids: Vec<String>,
     #[serde(default)]
     pub chapter_ids: Vec<String>,
@@ -147,7 +153,7 @@ impl From<crate::db::models::UserSettings> for UserSettingsResponse {
             skip_intro: settings.skip_intro,
             skip_outro: settings.skip_outro,
             sleep_timer_default: 0, // Default value, will be filled if in settings_json
-            auto_preload: true,     // Default value, will be filled if in settings_json
+            auto_preload: false,    // Default value, will be filled if in settings_json
             auto_cache: false,      // Default value
             widget_css: None,       // Default value, will be filled if in settings_json
             settings_json: Some(settings_json),

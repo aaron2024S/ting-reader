@@ -186,16 +186,18 @@ impl TextCleaner {
         // Priority 1: "第xxx集" or "第xxx章"
         let re1 = Regex::new(r"第\s*(\d+)\s*[集回章话]").unwrap();
         if let Some(caps) = re1.captures(title)
-            && let Ok(num) = caps[1].parse::<i32>() {
-                return Some(num);
-            }
+            && let Ok(num) = caps[1].parse::<i32>()
+        {
+            return Some(num);
+        }
 
         // Priority 2: "xxx集" or "xxx章"
         let re2 = Regex::new(r"(\d+)\s*[集回章话]").unwrap();
         if let Some(caps) = re2.captures(title)
-            && let Ok(num) = caps[1].parse::<i32>() {
-                return Some(num);
-            }
+            && let Ok(num) = caps[1].parse::<i32>()
+        {
+            return Some(num);
+        }
 
         // Priority 3: Just numbers, but be careful not to pick up dates or other numbers
         // This is risky, so maybe only if it looks like a chapter number (at start or separated)

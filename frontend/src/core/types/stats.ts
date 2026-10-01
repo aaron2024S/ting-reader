@@ -5,6 +5,7 @@ export interface AdminStatisticsOverview {
   total_libraries: number;
   local_libraries: number;
   webdav_libraries: number;
+  rss_libraries: number;
   total_users: number;
   admin_users: number;
   active_users: number;

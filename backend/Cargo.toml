@@ -1,11 +1,12 @@
 [package]
 name = "ting_reader"
-version = "1.6.1"
+version = "2.0.0"
 edition = "2024"
-rust-version = "1.98"
+rust-version = "1.93"
 license = "AGPL-3.0-only"
 
 [dependencies]
+ting-plugin-contract = { git = "https://github.com/dqsq2e2/ting-reader-plugin-contract.git", tag = "v2.0.1" }
 reqwest = { version = "0.11", features = ["json", "rustls-tls", "stream"] }
 # HTTP Server
 axum = { version = "0.7", features = ["multipart", "ws"] }
@@ -46,10 +47,8 @@ toml = "0.8"
 clap = { version = "4.5", features = ["derive"] }
 
 # WASM Runtime
-wasmtime = "18.0"
-wasmtime-wasi = "18.0"
-wasmtime-wasi-http = "18.0"
-wasi-common = "18.0"
+wasmtime = { version = "45.0.3", default-features = false, features = ["anyhow", "async", "backtrace", "cranelift", "gc", "gc-drc", "parallel-compilation", "runtime", "std", "wat"] }
+wasmtime-wasi = "45.0.3"
 
 # JavaScript Runtime
 deno_core = "0.256"
@@ -72,7 +71,7 @@ lazy_static = "1.4.0"
 hostname = "0.4"
 
 # Configuration Validation
-jsonschema = "0.17"
+jsonschema = { version = "0.17", features = ["draft202012"] }
 
 # Encryption
 aes-gcm = "0.10"
@@ -88,6 +87,7 @@ mime_guess = "2.0"
 
 # XML Processing
 quick-xml = { version = "0.31", features = ["serialize"] }
+scraper = "0.20"
 
 # File System
 walkdir = "2.4"

@@ -581,6 +581,27 @@ ALTER TABLE tasks ADD COLUMN message_key TEXT;
 ALTER TABLE tasks ADD COLUMN message_params TEXT;
 "#;
 
+const MIGRATION_V29: &str = r#"
+CREATE TABLE bookmarks (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+    chapter_id TEXT NOT NULL REFERENCES chapters(id) ON DELETE CASCADE,
+    position REAL NOT NULL CHECK(position >= 0),
+    note TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX idx_bookmarks_user_book_updated ON bookmarks(user_id, book_id, updated_at DESC, id);
+CREATE TABLE book_read_marks (
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+    PRIMARY KEY(user_id, book_id)
+);
+CREATE INDEX idx_progress_user_book_visible_updated
+ON progress(user_id, book_id, history_hidden_at, updated_at DESC, id);
+"#;
+
 /// Run all pending database migrations
 ///
 /// This function applies database schema migrations in order.
@@ -785,6 +806,9 @@ pub fn run_migrations(conn: &mut Connection) -> Result<()> {
     if current_version < 28 {
         info!("Applying migration v28: Normalize listening activity counters");
         apply_migration(conn, 28, MIGRATION_V28)?;
+    }
+    if current_version < 29 {
+        apply_migration(conn, 29, MIGRATION_V29)?;
     }
 
     info!("Database migrations completed successfully");

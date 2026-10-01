@@ -12,6 +12,10 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 
+# Python tooling
+__pycache__/
+*.pyc
+
 # Database & Storage
 *.db
 *.db-shm
@@ -21,8 +25,10 @@ pnpm-debug.log*
 /storage/
 /plugins/*/
 /backend/data/
+/backend/temp/
 /backend/storage/
 /backend/plugins/
+/backend/preinstalled-plugins/
 
 # Environment
 .env

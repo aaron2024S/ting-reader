@@ -1,9 +1,9 @@
 use axum::{
+    Json,
     extract::Request,
     http::StatusCode,
     middleware::Next,
     response::{IntoResponse, Response},
-    Json,
 };
 use serde_json::json;
 
@@ -84,10 +84,7 @@ impl IntoResponse for AuthError {
                 StatusCode::UNAUTHORIZED,
                 "Missing or invalid Authorization header. Expected format: 'Authorization: Bearer <token>'",
             ),
-            AuthError::InvalidToken => (
-                StatusCode::UNAUTHORIZED,
-                "Invalid authentication token",
-            ),
+            AuthError::InvalidToken => (StatusCode::UNAUTHORIZED, "Invalid authentication token"),
             AuthError::ConfigurationError => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Authentication configuration error",
@@ -107,7 +104,7 @@ impl IntoResponse for AuthError {
 mod tests {
     use super::*;
     use axum::{
-        body::Body, http::StatusCode, middleware, response::IntoResponse, routing::get, Router,
+        Router, body::Body, http::StatusCode, middleware, response::IntoResponse, routing::get,
     };
     use tower::util::ServiceExt; // For oneshot method
 

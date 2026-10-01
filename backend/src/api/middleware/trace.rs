@@ -4,7 +4,7 @@ use axum::{
     middleware::Next,
     response::Response,
 };
-use tracing::{info_span, Instrument};
+use tracing::{Instrument, info_span};
 use uuid::Uuid;
 
 /// HTTP header name for trace ID
@@ -82,9 +82,10 @@ fn request_target_for_logs(uri: &Uri) -> String {
     if let Some(index) = segments
         .iter()
         .position(|segment| segment == "plugin-assets")
-        && let Some(grant) = segments.get_mut(index + 1) {
-            *grant = "<redacted-grant>".to_string();
-        }
+        && let Some(grant) = segments.get_mut(index + 1)
+    {
+        *grant = "<redacted-grant>".to_string();
+    }
     let path = segments.join("/");
     if uri.query().is_some() {
         format!("{path}?<redacted-query>")
@@ -114,12 +115,12 @@ impl std::fmt::Display for TraceId {
 mod tests {
     use super::*;
     use axum::{
+        Router,
         body::Body,
         http::{Request, StatusCode},
         middleware,
         response::IntoResponse,
         routing::get,
-        Router,
     };
     use tower::util::ServiceExt; // For oneshot method
 

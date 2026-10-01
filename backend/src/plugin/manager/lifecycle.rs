@@ -8,7 +8,7 @@ use super::{FailedPlugin, PluginEntry, PluginManager};
 use crate::core::error::{Result, TingError};
 use crate::plugin::installer::PluginInstaller;
 use crate::plugin::js::{JavaScriptPluginLoader, JavaScriptPluginWrapper};
-use crate::plugin::logger::{emit_plugin_event, PluginLogLevel};
+use crate::plugin::logger::{PluginLogLevel, emit_plugin_event};
 use crate::plugin::native::{NativeLoader, NativePlugin};
 use crate::plugin::tr_package::{self, TrPackageSignatureIdentity};
 use crate::plugin::types::metadata::has_plugin_manifest;
@@ -43,7 +43,15 @@ impl PluginManager {
         }
 
         let preflight_result = match Self::validate_core_compatibility(&metadata) {
-            Ok(()) => self.validate_plugin_dependencies(&metadata, None).await,
+            Ok(()) => {
+                let registry = self.registry.read().await;
+                let result = Self::validate_capability_registration(&registry, &metadata, None);
+                drop(registry);
+                match result {
+                    Ok(()) => self.validate_plugin_dependencies(&metadata, None).await,
+                    Err(error) => Err(error),
+                }
+            }
             Err(e) => Err(e),
         };
 
@@ -91,7 +99,22 @@ impl PluginManager {
             let mut entry = PluginEntry::new(metadata.clone(), instance);
             entry.state = state;
             entry.load_error = error;
+            if entry.state != PluginState::Failed
+                && let Err(error) =
+                    Self::validate_capability_registration(&registry, &metadata, None)
+            {
+                entry.state = PluginState::Failed;
+                entry.load_error = Some(error.to_string());
+            }
+            let registered_state = entry.state;
             registry.insert(plugin_id.clone(), entry);
+            drop(registry);
+
+            if registered_state == PluginState::Failed && state != PluginState::Failed {
+                return Err(TingError::PluginLoadError(
+                    "Capability registration changed during plugin loading".into(),
+                ));
+            }
         }
 
         // Update cache
@@ -136,11 +159,6 @@ impl PluginManager {
             let loader = JavaScriptPluginLoader::new(plugin_path.to_path_buf()).map_err(|e| {
                 TingError::PluginLoadError(format!("Failed to create JS loader: {}", e))
             })?;
-            loader
-                .install_npm_dependencies(&self.npm_manager)
-                .map_err(|e| {
-                    TingError::PluginLoadError(format!("Failed to install npm dependencies: {}", e))
-                })?;
             let wrapper = JavaScriptPluginWrapper::new_with_host_gateway(
                 loader,
                 Some(self.host_gateway_handle()),
@@ -180,6 +198,9 @@ impl PluginManager {
     /// Unload a plugin
     pub async fn unload_plugin(&self, plugin_id: &PluginId) -> Result<()> {
         info!("Unloading plugin: {}", plugin_id);
+        if let Some(entry) = self.registry.read().await.get(plugin_id) {
+            entry.cancel_resource_scopes();
+        }
         self.shutdown_plugin(plugin_id).await?;
 
         let mut registry = self.registry.write().await;
@@ -227,18 +248,19 @@ impl PluginManager {
         };
 
         if let Err(e) = self.unload_plugin(plugin_id).await
-            && !matches!(e, TingError::PluginNotFound(_)) {
-                tracing::warn!(
-                    plugin_id = %plugin_id,
-                    error = %e,
-                    message_key = "plugin.unload_during_uninstall_failed",
-                    message_params = %serde_json::json!({
-                        "plugin_id": plugin_id,
-                        "error": e.to_string(),
-                    }),
-                    "Failed to unload plugin during uninstall"
-                );
-            }
+            && !matches!(e, TingError::PluginNotFound(_))
+        {
+            tracing::warn!(
+                plugin_id = %plugin_id,
+                error = %e,
+                message_key = "plugin.unload_during_uninstall_failed",
+                message_params = %serde_json::json!({
+                    "plugin_id": plugin_id,
+                    "error": e.to_string(),
+                }),
+                "Failed to unload plugin during uninstall"
+            );
+        }
 
         // Clean up plugin configuration
         if let Some(cm) = self.config_manager.read().unwrap().as_ref() {
@@ -296,24 +318,26 @@ impl PluginManager {
             if !found {
                 while let Some(entry) = read_dir.next_entry().await.map_err(TingError::IoError)? {
                     let path = entry.path();
-                    if path.is_dir() && has_plugin_manifest(&path)
+                    if path.is_dir()
+                        && has_plugin_manifest(&path)
                         && let Ok(metadata) = self.read_plugin_metadata(&path)
-                            && &metadata.instance_id() == plugin_id {
-                                info!(
-                                    "Found plugin directory for {}: {}",
-                                    plugin_id,
-                                    path.display()
-                                );
-                                if let Err(e) = tokio::fs::remove_dir_all(&path).await {
-                                    error!(
-                                        "Failed to remove plugin directory {}: {}",
-                                        path.display(),
-                                        e
-                                    );
-                                }
-                                found = true;
-                                break;
-                            }
+                        && &metadata.instance_id() == plugin_id
+                    {
+                        info!(
+                            "Found plugin directory for {}: {}",
+                            plugin_id,
+                            path.display()
+                        );
+                        if let Err(e) = tokio::fs::remove_dir_all(&path).await {
+                            error!(
+                                "Failed to remove plugin directory {}: {}",
+                                path.display(),
+                                e
+                            );
+                        }
+                        found = true;
+                        break;
+                    }
                 }
             }
 
@@ -368,6 +392,10 @@ impl PluginManager {
 
         let new_metadata = self.read_plugin_metadata(&plugin_path)?;
         Self::validate_core_compatibility(&new_metadata)?;
+        {
+            let registry = self.registry.read().await;
+            Self::validate_capability_registration(&registry, &new_metadata, Some(id))?;
+        }
         self.validate_plugin_dependencies(&new_metadata, Some(id))
             .await?;
         let new_id = new_metadata.instance_id();
@@ -398,6 +426,7 @@ impl PluginManager {
 
                     {
                         let mut registry = self.registry.write().await;
+                        Self::validate_capability_registration(&registry, &new_metadata, None)?;
                         registry.insert(
                             new_metadata.instance_id(),
                             PluginEntry::new(new_metadata.clone(), instance),
@@ -453,32 +482,33 @@ impl PluginManager {
 
             // Migrate old config to new version before load so ensure_config finds it.
             if let Some(ref old_config) = preserved_old_config
-                && let Some(ref schema) = new_metadata.config_schema {
-                    let cm_lock = self.config_manager.read().unwrap();
-                    if let Some(cm) = cm_lock.as_ref() {
-                        let mut merged = extract_defaults_from_schema(schema);
-                        if let (Some(merged_obj), Some(old_obj)) =
-                            (merged.as_object_mut(), old_config.as_object())
-                        {
-                            let schema_keys: std::collections::HashSet<&String> = schema
-                                .get("properties")
-                                .and_then(|p| p.as_object())
-                                .map(|m| m.keys().collect())
-                                .unwrap_or_default();
-                            for (key, old_value) in old_obj {
-                                if schema_keys.contains(key) {
-                                    merged_obj.insert(key.clone(), old_value.clone());
-                                }
+                && let Some(ref schema) = new_metadata.config_schema
+            {
+                let cm_lock = self.config_manager.read().unwrap();
+                if let Some(cm) = cm_lock.as_ref() {
+                    let mut merged = extract_defaults_from_schema(schema);
+                    if let (Some(merged_obj), Some(old_obj)) =
+                        (merged.as_object_mut(), old_config.as_object())
+                    {
+                        let schema_keys: std::collections::HashSet<&String> = schema
+                            .get("properties")
+                            .and_then(|p| p.as_object())
+                            .map(|m| m.keys().collect())
+                            .unwrap_or_default();
+                        for (key, old_value) in old_obj {
+                            if schema_keys.contains(key) {
+                                merged_obj.insert(key.clone(), old_value.clone());
                             }
                         }
-                        let _ = cm.initialize_config(
-                            new_id.clone(),
-                            new_metadata.name.clone(),
-                            Some(schema.clone()),
-                            merged,
-                        );
                     }
+                    let _ = cm.initialize_config(
+                        new_id.clone(),
+                        new_metadata.name.clone(),
+                        Some(schema.clone()),
+                        merged,
+                    );
                 }
+            }
 
             match self.load_plugin(&plugin_path).await {
                 Ok(loaded_id) => {
@@ -495,20 +525,21 @@ impl PluginManager {
                         );
                     }
                     if let Some(gateway) = self.host_gateway_handle().get()
-                        && let Err(e) = gateway.migrate_plugin_cache(id, &loaded_id).await {
-                            tracing::warn!(
-                                old_plugin_id = %id,
-                                new_plugin_id = %loaded_id,
-                                error = %e,
-                                message_key = "plugin.cache.migration_failed",
-                                message_params = %serde_json::json!({
-                                    "old_plugin_id": id,
-                                    "new_plugin_id": &loaded_id,
-                                    "error": e.to_string(),
-                                }),
-                                "Failed to migrate plugin cache during reload upgrade"
-                            );
-                        }
+                        && let Err(e) = gateway.migrate_plugin_cache(id, &loaded_id).await
+                    {
+                        tracing::warn!(
+                            old_plugin_id = %id,
+                            new_plugin_id = %loaded_id,
+                            error = %e,
+                            message_key = "plugin.cache.migration_failed",
+                            message_params = %serde_json::json!({
+                                "old_plugin_id": id,
+                                "new_plugin_id": &loaded_id,
+                                "error": e.to_string(),
+                            }),
+                            "Failed to migrate plugin cache during reload upgrade"
+                        );
+                    }
                     tracing::info!(
                         old_id = %id,
                         new_id = %loaded_id,
@@ -564,18 +595,11 @@ impl PluginManager {
                 let is_same_plugin = entry.metadata.id == metadata.id;
 
                 if is_same_plugin && id != &target_plugin_id {
-                    to_remove.push((
-                        id.clone(),
-                        Version::parse(&entry.metadata.version).ok(),
-                    ));
+                    to_remove.push((id.clone(), Version::parse(&entry.metadata.version).ok()));
                 }
             }
-            to_remove.sort_by(|left, right| {
-                right
-                    .1
-                    .cmp(&left.1)
-                    .then_with(|| left.0.cmp(&right.0))
-            });
+            to_remove
+                .sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
             to_remove
                 .into_iter()
                 .map(|(id, _version)| id)
@@ -636,66 +660,68 @@ impl PluginManager {
         let plugin_id = installer.install_plugin(package_path, |_| Ok(())).await?;
 
         if let Some(gateway) = self.host_gateway_handle().get()
-            && let Some((old_id, stale_cache_ids)) = cache_ids_to_migrate.split_first() {
-                if let Err(e) = gateway.migrate_plugin_cache(old_id, &plugin_id).await {
+            && let Some((old_id, stale_cache_ids)) = cache_ids_to_migrate.split_first()
+        {
+            if let Err(e) = gateway.migrate_plugin_cache(old_id, &plugin_id).await {
+                tracing::warn!(
+                    old_plugin_id = %old_id,
+                    new_plugin_id = %plugin_id,
+                    error = %e,
+                    message_key = "plugin.cache.migration_failed",
+                    message_params = %serde_json::json!({
+                        "old_plugin_id": old_id,
+                        "new_plugin_id": &plugin_id,
+                        "error": e.to_string(),
+                    }),
+                    "Failed to migrate plugin cache during upgrade"
+                );
+            }
+
+            for stale_id in stale_cache_ids {
+                if let Err(e) = gateway.delete_plugin_cache(stale_id).await {
                     tracing::warn!(
-                        old_plugin_id = %old_id,
-                        new_plugin_id = %plugin_id,
+                        plugin_id = %stale_id,
                         error = %e,
-                        message_key = "plugin.cache.migration_failed",
+                        message_key = "plugin.cache.cleanup_failed",
                         message_params = %serde_json::json!({
-                            "old_plugin_id": old_id,
-                            "new_plugin_id": &plugin_id,
+                            "plugin_id": stale_id,
                             "error": e.to_string(),
                         }),
-                        "Failed to migrate plugin cache during upgrade"
+                        "Failed to delete obsolete plugin cache after upgrade"
                     );
                 }
-
-                for stale_id in stale_cache_ids {
-                    if let Err(e) = gateway.delete_plugin_cache(stale_id).await {
-                        tracing::warn!(
-                            plugin_id = %stale_id,
-                            error = %e,
-                            message_key = "plugin.cache.cleanup_failed",
-                            message_params = %serde_json::json!({
-                                "plugin_id": stale_id,
-                                "error": e.to_string(),
-                            }),
-                            "Failed to delete obsolete plugin cache after upgrade"
-                        );
-                    }
-                }
             }
+        }
 
         // Migrate old config to new version: merge old values over new schema defaults.
         if let Some(ref old_config) = preserved_old_config
-            && let Some(ref schema) = metadata.config_schema {
-                let cm_lock = self.config_manager.read().unwrap();
-                if let Some(cm) = cm_lock.as_ref() {
-                    let mut merged = extract_defaults_from_schema(schema);
-                    if let (Some(merged_obj), Some(old_obj)) =
-                        (merged.as_object_mut(), old_config.as_object())
-                    {
-                        let schema_keys: std::collections::HashSet<&String> = schema
-                            .get("properties")
-                            .and_then(|p| p.as_object())
-                            .map(|m| m.keys().collect())
-                            .unwrap_or_default();
-                        for (key, old_value) in old_obj {
-                            if schema_keys.contains(key) {
-                                merged_obj.insert(key.clone(), old_value.clone());
-                            }
+            && let Some(ref schema) = metadata.config_schema
+        {
+            let cm_lock = self.config_manager.read().unwrap();
+            if let Some(cm) = cm_lock.as_ref() {
+                let mut merged = extract_defaults_from_schema(schema);
+                if let (Some(merged_obj), Some(old_obj)) =
+                    (merged.as_object_mut(), old_config.as_object())
+                {
+                    let schema_keys: std::collections::HashSet<&String> = schema
+                        .get("properties")
+                        .and_then(|p| p.as_object())
+                        .map(|m| m.keys().collect())
+                        .unwrap_or_default();
+                    for (key, old_value) in old_obj {
+                        if schema_keys.contains(key) {
+                            merged_obj.insert(key.clone(), old_value.clone());
                         }
                     }
-                    let _ = cm.initialize_config(
-                        plugin_id.clone(),
-                        metadata.name.clone(),
-                        Some(schema.clone()),
-                        merged,
-                    );
                 }
+                let _ = cm.initialize_config(
+                    plugin_id.clone(),
+                    metadata.name.clone(),
+                    Some(schema.clone()),
+                    merged,
+                );
             }
+        }
 
         let plugin_path = self.config.plugin_dir.join(&plugin_id);
         if let Err(e) = self.load_plugin(&plugin_path).await {
@@ -868,9 +894,10 @@ impl PluginManager {
 
             if let (Some(candidate_path), Ok(installed_path)) =
                 (&candidate_path, std::fs::canonicalize(&path))
-                && &installed_path == candidate_path {
-                    continue;
-                }
+                && &installed_path == candidate_path
+            {
+                continue;
+            }
 
             let installed_metadata = match self.read_plugin_metadata(&path) {
                 Ok(installed_metadata) => installed_metadata,
@@ -942,17 +969,18 @@ impl PluginManager {
 
         // Initialize per-plugin config if plugin has a schema and no config exists yet
         if let Some(ref schema) = config_schema
-            && let Some(cm) = self.config_manager.read().unwrap().as_ref() {
-                let default_config = extract_defaults_from_schema(schema);
-                let _ = cm.ensure_config(
-                    plugin_id.clone(),
-                    metadata.name.clone(),
-                    Some(schema.clone()),
-                    default_config,
-                );
-            }
+            && let Some(cm) = self.config_manager.read().unwrap().as_ref()
+        {
+            let default_config = extract_defaults_from_schema(schema);
+            let _ = cm.ensure_config(
+                plugin_id.clone(),
+                metadata.name.clone(),
+                Some(schema.clone()),
+                default_config,
+            );
+        }
 
-        let context = self.create_plugin_context(&metadata)?;
+        let mut context = self.create_plugin_context(&metadata)?;
         let initializing_fields = serde_json::json!({
             "op": "plugin.lifecycle.initialize",
             "state": "initializing",
@@ -965,14 +993,23 @@ impl PluginManager {
             Some(&initializing_fields),
         );
 
-        let instance = {
+        let (instance, scope) = {
             let mut registry = self.registry.write().await;
             let entry = registry
                 .get_mut(plugin_id)
                 .ok_or_else(|| TingError::PluginNotFound(plugin_id.clone()))?;
             entry.set_state(PluginState::Initializing);
-            entry.instance.clone()
+            let scope = Arc::new(crate::plugin::resources::ResourceScope::new(
+                plugin_id.clone(),
+                entry.generation,
+                None,
+                self.config.plugin_dir.join("staging"),
+                crate::plugin::resources::ResourceLimits::default(),
+            ));
+            entry.track_resource_scope(&scope)?;
+            (entry.instance.clone(), scope)
         };
+        context.resources = Some(scope);
 
         if let Err(error) = instance.initialize(&context).await {
             let failed_fields = serde_json::json!({
@@ -1069,14 +1106,15 @@ impl PluginManager {
         Ok(PluginContext {
             config,
             data_dir: self.config.plugin_dir.join("data").join(&metadata.name),
+            resources: None,
             logger: Arc::new(crate::plugin::logger::DefaultPluginLogger::from_metadata(
                 metadata,
             )),
-            event_bus: Arc::new(crate::plugin::events::DefaultPluginEventBus::new()),
+            event_bus: self.event_bus.clone(),
         })
     }
 
-    fn validate_core_compatibility(metadata: &PluginMetadata) -> Result<()> {
+    pub(crate) fn validate_core_compatibility(metadata: &PluginMetadata) -> Result<()> {
         Self::validate_core_compatibility_for_version(metadata, env!("CARGO_PKG_VERSION"))
     }
 
@@ -1084,17 +1122,34 @@ impl PluginManager {
         metadata: &PluginMetadata,
         current_core_version: &str,
     ) -> Result<()> {
-        let Some(min_core_version) = metadata
+        let min_core_version = metadata
             .min_core_version
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
-        else {
-            return Ok(());
-        };
+            .ok_or_else(|| {
+                TingError::PluginLoadError(format!(
+                    "Plugin {} must declare min_core_version >= {} for the new plugin contract",
+                    metadata.instance_id(),
+                    ting_plugin_contract::MIN_PLUGIN_CORE_VERSION
+                ))
+            })?;
 
         let current = parse_core_version(current_core_version, "current core version")?;
         let required = parse_core_version(min_core_version, "min_core_version")?;
+        let contract_floor = parse_core_version(
+            ting_plugin_contract::MIN_PLUGIN_CORE_VERSION,
+            "minimum plugin contract core version",
+        )?;
+
+        if required < contract_floor {
+            return Err(TingError::PluginLoadError(format!(
+                "Plugin {} declares min_core_version {}, but the new plugin contract requires >= {}",
+                metadata.instance_id(),
+                min_core_version,
+                contract_floor
+            )));
+        }
 
         if current < required {
             return Err(TingError::PluginLoadError(format!(
@@ -1189,7 +1244,7 @@ impl PluginManager {
 }
 
 fn parse_core_version(version: &str, label: &str) -> Result<Version> {
-    Version::parse(version.trim().trim_start_matches('v'))
+    Version::parse(version)
         .map_err(|e| TingError::PluginLoadError(format!("Invalid {} '{}': {}", label, version, e)))
 }
 
@@ -1252,7 +1307,7 @@ mod tests {
     use super::*;
     use crate::plugin::config::PluginConfigManager;
     use crate::plugin::manager::PluginConfig;
-    use crate::plugin::types::{PluginDependency, PluginType};
+    use crate::plugin::types::PluginDependency;
     use serde_json::json;
     use std::sync::Arc;
     use std::time::Duration;
@@ -1274,14 +1329,6 @@ mod tests {
         async fn shutdown(&self) -> Result<()> {
             Ok(())
         }
-
-        fn plugin_type(&self) -> PluginType {
-            self.metadata.plugin_type
-        }
-
-        fn as_any(&self) -> &dyn std::any::Any {
-            self
-        }
     }
 
     fn test_metadata(id: &str, name: &str, version: &str) -> PluginMetadata {
@@ -1289,7 +1336,6 @@ mod tests {
             id.to_string(),
             name.to_string(),
             version.to_string(),
-            PluginType::Utility,
             "Ting Reader".to_string(),
             "Test plugin".to_string(),
             "plugin.js".to_string(),
@@ -1325,7 +1371,6 @@ mod tests {
             "config-plugin".to_string(),
             "Config Plugin".to_string(),
             "1.0.0".to_string(),
-            PluginType::Utility,
             "Ting Reader".to_string(),
             "Config plugin".to_string(),
             "plugin.js".to_string(),
@@ -1369,7 +1414,6 @@ mod tests {
             "future-plugin".to_string(),
             "Future Plugin".to_string(),
             "1.0.0".to_string(),
-            PluginType::Utility,
             "Ting Reader".to_string(),
             "Future plugin".to_string(),
             "plugin.js".to_string(),
@@ -1378,56 +1422,85 @@ mod tests {
 
         let error = PluginManager::validate_core_compatibility(&metadata).unwrap_err();
 
-        assert!(error
-            .to_string()
-            .contains("requires Ting Reader core >= 999.0.0"));
+        assert!(
+            error
+                .to_string()
+                .contains("requires Ting Reader core >= 999.0.0")
+        );
     }
 
     #[test]
-    fn validate_core_compatibility_accepts_v_prefixed_versions() {
+    fn validate_core_compatibility_accepts_exact_contract_floor() {
+        let mut metadata = PluginMetadata::new(
+            "format-plugin".into(),
+            "Format Plugin".into(),
+            "2.0.0".into(),
+            "Ting Reader".into(),
+            "Test plugin".into(),
+            "plugin.js".into(),
+        );
+        metadata.min_core_version = Some(ting_plugin_contract::MIN_PLUGIN_CORE_VERSION.to_string());
+        PluginManager::validate_core_compatibility(&metadata).unwrap();
+        assert_eq!(
+            env!("CARGO_PKG_VERSION"),
+            ting_plugin_contract::MIN_PLUGIN_CORE_VERSION
+        );
+    }
+
+    #[test]
+    fn validate_core_compatibility_rejects_v_prefixed_versions() {
         let mut metadata = PluginMetadata::new(
             "current-plugin".to_string(),
             "Current Plugin".to_string(),
             "1.0.0".to_string(),
-            PluginType::Utility,
             "Ting Reader".to_string(),
             "Current plugin".to_string(),
             "plugin.js".to_string(),
         );
-        metadata.min_core_version = Some("v1.4.8".to_string());
+        metadata.min_core_version = Some("v2.0.0".to_string());
 
-        PluginManager::validate_core_compatibility(&metadata).unwrap();
+        let error = PluginManager::validate_core_compatibility(&metadata).unwrap_err();
+        assert!(error.to_string().contains("Invalid min_core_version"));
     }
 
     #[test]
-    fn validate_core_compatibility_ignores_missing_core_requirement() {
+    fn validate_core_compatibility_rejects_missing_core_requirement() {
         let metadata = PluginMetadata::new(
             "missing-core-plugin".to_string(),
             "Missing Core Plugin".to_string(),
             "1.0.0".to_string(),
-            PluginType::Utility,
             "Ting Reader".to_string(),
             "Missing core requirement".to_string(),
             "plugin.js".to_string(),
         );
 
-        PluginManager::validate_core_compatibility(&metadata).unwrap();
+        let error = PluginManager::validate_core_compatibility(&metadata).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("must declare min_core_version >= 2.0.0")
+        );
     }
 
     #[test]
-    fn validate_core_compatibility_accepts_older_core_requirement_when_current_satisfies_it() {
+    fn validate_core_compatibility_rejects_old_contract_even_when_current_satisfies_it() {
         let mut metadata = PluginMetadata::new(
             "old-core-plugin".to_string(),
             "Old Core Plugin".to_string(),
             "1.0.0".to_string(),
-            PluginType::Utility,
             "Ting Reader".to_string(),
             "Old core requirement".to_string(),
             "plugin.js".to_string(),
         );
         metadata.min_core_version = Some("1.4.7".to_string());
 
-        PluginManager::validate_core_compatibility_for_version(&metadata, "1.4.8").unwrap();
+        let error =
+            PluginManager::validate_core_compatibility_for_version(&metadata, "2.0.0").unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("new plugin contract requires >= 2.0.0")
+        );
     }
 
     #[test]
@@ -1436,20 +1509,21 @@ mod tests {
             "new-core-plugin".to_string(),
             "New Core Plugin".to_string(),
             "1.0.0".to_string(),
-            PluginType::Utility,
             "Ting Reader".to_string(),
             "New core requirement".to_string(),
             "plugin.js".to_string(),
         );
-        metadata.min_core_version = Some("1.4.7".to_string());
+        metadata.min_core_version = Some("2.0.0".to_string());
 
         let error =
-            PluginManager::validate_core_compatibility_for_version(&metadata, "1.4.6").unwrap_err();
+            PluginManager::validate_core_compatibility_for_version(&metadata, "1.6.1").unwrap_err();
 
-        assert!(error
-            .to_string()
-            .contains("requires Ting Reader core >= 1.4.7"));
-        assert!(error.to_string().contains("current core version is 1.4.6"));
+        assert!(
+            error
+                .to_string()
+                .contains("requires Ting Reader core >= 2.0.0")
+        );
+        assert!(error.to_string().contains("current core version is 1.6.1"));
     }
 
     #[tokio::test]
@@ -1469,10 +1543,12 @@ mod tests {
             "^1.0.0".to_string(),
         ));
 
-        assert!(manager
-            .validate_plugin_dependencies(&dependent, None)
-            .await
-            .is_err());
+        assert!(
+            manager
+                .validate_plugin_dependencies(&dependent, None)
+                .await
+                .is_err()
+        );
 
         let base = test_metadata("base-plugin", "Base Plugin", "1.2.0");
         manager

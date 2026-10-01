@@ -2,13 +2,10 @@ import type {
   CapabilityRegistrationLike,
   ClientExtensionDescriptor,
   ClientExtensionRegistrySnapshot,
-  ClientExtensionRenderMode,
   ClientExtensionSlot,
   UiExtensionCapabilityExtra,
   UiExtensionRenderConfig,
 } from "./types";
-
-const defaultSlots: ClientExtensionSlot[] = ["global.panel"];
 
 const isJsonRecord = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === "object" && !Array.isArray(value);
@@ -17,64 +14,22 @@ const isCapabilityRegistration = (
   value: unknown,
 ): value is CapabilityRegistrationLike => {
   if (!isJsonRecord(value)) return false;
-  if (typeof value.plugin_id !== "string" || typeof value.plugin_name !== "string") {
-    return false;
-  }
+  if (typeof value.plugin_id !== "string" || typeof value.plugin_name !== "string") return false;
   const capability = value.capability;
-  return (
-    isJsonRecord(capability) &&
-    typeof capability.id === "string" &&
-    typeof capability.kind === "string"
-  );
+  return isJsonRecord(capability) && typeof capability.id === "string" && capability.kind === "ui_extension";
 };
 
 const isClientExtensionSlot = (value: unknown): value is ClientExtensionSlot =>
   typeof value === "string" &&
-  [
-    "app.sidebar_page",
-    "global.floating_action",
-    "global.panel",
-    "book.detail_action",
-  ].includes(value);
+  ["app.sidebar_page", "global.floating_action", "global.panel", "book.detail_action"].includes(value);
 
-const isRenderMode = (value: unknown): value is ClientExtensionRenderMode =>
-  typeof value === "string" &&
-  ["schema", "builtin", "web_container", "action"].includes(value);
-
-const capabilityExtra = (
-  registration: CapabilityRegistrationLike,
-): UiExtensionCapabilityExtra =>
+const capabilityExtra = (registration: CapabilityRegistrationLike): UiExtensionCapabilityExtra =>
   registration.capability as UiExtensionCapabilityExtra;
 
-const renderConfig = (
-  extra: UiExtensionCapabilityExtra,
-): UiExtensionRenderConfig | undefined =>
-  typeof extra.render === "object" && extra.render !== null
-    ? extra.render
-    : undefined;
+const renderConfig = (extra: UiExtensionCapabilityExtra): UiExtensionRenderConfig | undefined => extra.render;
 
-const normalizeSlots = (extra: UiExtensionCapabilityExtra) => {
-  const declaredSlots = [
-    ...(Array.isArray(extra.slots) ? extra.slots : []),
-    extra.slot,
-  ].filter((slot) => typeof slot === "string");
-  const slots = declaredSlots.filter(isClientExtensionSlot);
-  if (slots.length > 0) return slots;
-
-  // Explicit legacy or unknown declarations must not silently become global panels.
-  if (declaredSlots.length > 0) {
-    return [];
-  }
-
-  return defaultSlots;
-};
-
-const normalizeContexts = (extra: UiExtensionCapabilityExtra) =>
-  Array.isArray(extra.contexts || extra.context)
-    ? (extra.contexts || extra.context || []).filter(
-        (context): context is string => typeof context === "string",
-      )
-    : [];
+const normalizeSlots = (extra: UiExtensionCapabilityExtra) => extra.slots.filter(isClientExtensionSlot);
+const normalizeContexts = (extra: UiExtensionCapabilityExtra) => extra.contexts;
 
 const localizedText = (
   value: unknown,
@@ -113,13 +68,7 @@ export const createClientExtensionDescriptor = (
 ): ClientExtensionDescriptor => {
   const extra = capabilityExtra(registration);
   const render = renderConfig(extra);
-  const renderMode = isRenderMode(extra.render_mode)
-    ? extra.render_mode
-    : isRenderMode(extra.render)
-      ? extra.render
-      : isRenderMode(render?.mode)
-        ? render.mode
-        : "action";
+  const renderMode = render?.mode ?? "action";
 
   return {
     id: `${registration.plugin_id}:${registration.capability.id}:${slot}`,
@@ -130,7 +79,7 @@ export const createClientExtensionDescriptor = (
     renderMode,
     render,
     title:
-      localizedText(extra.title, locale) || localizedText(extra.label, locale),
+      localizedText(extra.title, locale),
     icon: extra.icon,
     capability: registration.capability,
     priority: typeof extra.priority === "number" ? extra.priority : 100,
@@ -146,8 +95,7 @@ export const buildClientExtensionRegistry = (
     .filter(isCapabilityRegistration)
     .filter(
       (registration) =>
-        registration.capability.kind === "ui_extension" ||
-        registration.capability.kind === "client_extension",
+        registration.capability.kind === "ui_extension",
     )
     .flatMap((registration) =>
       normalizeSlots(capabilityExtra(registration)).map((slot) =>

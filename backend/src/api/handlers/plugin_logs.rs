@@ -4,9 +4,9 @@ use crate::auth::middleware::AuthUser;
 use crate::core::error::{Result, TingError};
 use crate::core::logging::LogEntry;
 use axum::{
+    Json,
     extract::{Path, Query, State},
     response::IntoResponse,
-    Json,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

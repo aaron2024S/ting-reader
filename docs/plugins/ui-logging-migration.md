@@ -1,115 +1,360 @@
-# 插件入口与日志迁移规范
+# 插件界面与结构化日志
 
-本规范用于把旧插件迁移到新的侧边栏入口、受控 Web 桥接和结构化插件日志。迁移不改变插件商店的插件化设计，也不会新增面向外部插件作者的日志权限。
+本文说明插件如何声明客户端入口、在 Web 和 Flutter 中展示页面、调用宿主，以及记录和查看日志。项目创建、编译、签名和安装见[插件开发指南](./plugin-dev.md)，完整能力和权限见[能力声明](./capabilities.md)及 [HostGateway](./hostgateway.md)。
 
-## 1. UI 入口迁移
+## 1. 页面与业务代码的位置
 
-旧播放器入口已经停止渲染：
+插件业务入口在服务端的 JavaScript、WASM 或 Native 运行时执行；`ui/` 中的 HTML、CSS 和浏览器 JavaScript 在客户端容器中执行。页面通过客户端桥接调用插件业务能力或宿主方法。
 
-| 旧 slot | 迁移目标 |
+服务端 JavaScript 中的 `Ting.host`、`Ting.config`、`Ting.resources` 和 `Ting.log` 由运行时提供。客户端页面使用 `window.__TING_PLUGIN_BRIDGE__`，页面中的 `console.log` 只属于客户端调试输出，不会自动成为服务端插件日志。
+
+## 2. 声明界面入口
+
+| 字段 | 含义 |
 | --- | --- |
-| `reader.toolbar_action` | 简短动作迁移到 `global.floating_action` 或 `book.detail_action` |
-| `reader.side_panel` | 完整页面迁移到 `app.sidebar_page` |
-| `reader.document_viewer` | 按业务迁移到 `app.sidebar_page`，文档能力保留在插件后台 capability |
+| `id` | 当前插件内唯一的能力 ID |
+| `kind: ui_extension` | 客户端界面能力 |
+| `slots` | 入口位置：`app.sidebar_page`、`global.floating_action`、`global.panel`、`book.detail_action` |
+| `contexts` | 声明适用上下文：`global`、`book`、`reader` |
+| `title` | 入口名称，可使用 `zh` / `en` 多语言对象 |
+| `icon` | 可选图标名称，例如 `message-circle` |
+| `priority` | 可选排序优先级 |
+| `render.mode` | `web_container` 展示插件页面；`action` 调用插件操作并展示执行结果 |
+| `render.entry` | `web_container` 的包内 HTML 入口 |
+| `render.bridge.capabilities` | 页面可调用的同插件其他能力 ID |
+| `render.bridge.host_methods` | 页面可直接调用的宿主方法名称 |
 
-推荐让主要插件页面同时声明侧边栏和右下角快捷入口：
+UI 能力的固定操作为 `open`，业务入口必须实现该操作。`action` 点击时调用 `open`；`web_container` 打开时首先加载 HTML、初始化页面桥接，页面需要业务数据时主动发送请求。
+
+下面是一份可以用于联调的完整清单。插件自身版本与最低主程序版本分别填写。
 
 ```yaml
+id: example-panel
+name: Example Panel
+version: 1.0.0
+min_core_version: 2.0.0
+author: Example Author
+description: { zh: 插件面板示例, en: Plugin panel example }
+runtime: javascript
+entry_point: plugin.js
 capabilities:
-  - id: assistant.panel
+  - id: panel.view
     kind: ui_extension
-    invoke: openAssistant
-    slots:
-      - app.sidebar_page
-      - global.floating_action
-    title: { zh: 书单助手, en: Booklist Assistant }
+    slots: [app.sidebar_page, global.floating_action]
+    contexts: [global, book, reader]
+    title: { zh: 示例面板, en: Example Panel }
     icon: message-circle
-    priority: 20
     render:
       mode: web_container
-      entry: ui/assistant.html
+      entry: ui/panel.html
       bridge:
-        capabilities:
-          - assistant.tools
-        host_methods:
-          - user_settings.get
+        capabilities: [panel.tools]
+        host_methods: [user_settings.get]
+  - id: panel.tools
+    kind: tool_provider
+    invoke: invokeTool
+    tools:
+      - name: panel.echo
+        description: { zh: 返回输入文本, en: Return the input text }
+        input_schema:
+          type: object
+          properties:
+            message: { type: string, maxLength: 2000 }
+          required: [message]
+          additionalProperties: false
+        output_schema:
+          type: object
+          properties:
+            message: { type: string }
+          required: [message]
+          additionalProperties: false
+        side_effects: false
+permissions:
+  - type: user_settings_read
 ```
 
-`book.detail_action` 继续保留。右下角工具菜单仍由 `global.floating_action` / `global.panel` 声明，位置不变；用户可在个性化设置中关闭，默认开启。侧边栏页面不受该开关影响。
+`bridge` 是页面调用白名单，`permissions` 是插件申请的宿主权限，两者都需要满足。上例的页面只能直接读取用户设置；业务工具如需读取书籍，还应声明 `books_read`。请求最终仍受到当前用户的资源访问权限限制。
 
-## 2. Web 桥接迁移
+## 3. 服务端业务入口
 
-1. 删除未声明的跨 capability 调用。当前 UI capability 默认可调用；确需调用同插件其他 capability 时，逐项写入 `render.bridge.capabilities`。
-2. 收集 UI 实际使用的 HostGateway 方法，逐项写入 `render.bridge.host_methods`。
-3. 确保 manifest 的 `permissions` 同时包含这些方法要求的最小权限。
-4. 不依赖 iframe 同源、顶层跳转或逃离 sandbox 的弹窗。
-5. `render.entry` 使用插件包内相对路径，禁止绝对路径、反斜杠和 `..`。
-6. 仅从 `ting-plugin:init.bridgeToken` 取得当前文档令牌，通过只读的 `window.__TING_PLUGIN_BRIDGE__.postMessage()` 发送请求；不要再调用 `window.parent.postMessage()`。在每个 `ting-plugin:request` 中回传 `bridge_token`，并在处理响应前核对相同字段。宿主消息会投递到当前 `window`，监听器应校验 `event.source === window`。
-7. 客户端从 `GET /api/v1/plugin-capabilities` 获取 UI 注册项时保存其 `client_grant`，把它当作不透明秘密，并在 capability 与 HostGateway HTTP 调用中以 `ui_grant` 传回。该 grant 绑定用户、插件和 UI capability，且会过期；不要解析、记录或通过 bridge 初始化消息主动暴露，过期后重新获取。grant 也是资产 URL 的路径段，插件 UI 如观察到该值，同样不得持久化或外传。
+在 `plugin.js` 中实现清单声明的 `open` 和 `invokeTool` 操作：
 
-客户端和后端会同时校验来源 UI capability、服务端签名 grant 及 bridge 白名单。白名单只说明这个 UI 可以请求哪个方法，不会替代管理员上下文、用户数据范围和 manifest 权限校验。`POST /api/v1/plugin-host/invoke` 以及 UI 发起的 capability 调用现在都要求 `ui_capability_id` 和 `ui_grant`，旧客户端需要同步升级。插件资产路由也改为 `GET /api/v1/plugin-assets/:client_grant/:plugin_id/*path`，单文件最大 64 MiB。
+`plugin.js`：
 
-Web 与 Flutter 容器都移除了 `allow-same-origin` 和逃离 sandbox 的弹窗权限，并校验消息来源、文档代际令牌、随机 nonce、消息结构、大小和频率。bridge 能力绑定到宿主脚本在插件代码执行前创建的首个 `MessagePort`，页面后续跳转不能只凭旧 token 接管能力。Flutter 的受信外层页面会先用 `DOMParser` 解析入口 HTML，再通过 DOM 注入 CSP、`base` 和桥接启动脚本，避免伪造 `<head>` 或提前脚本绕过策略。容器 CSP 禁止插件 UI 直接联网，也不允许用远程图片或媒体请求外传数据；需要宿主数据时只能走已声明 bridge。Web 和 Flutter 的 HTTP(S) 外链都必须来自真实用户点击，并由宿主展示目标地址、等待用户明确确认后才能打开；程序化跳转会被拒绝。插件 HTML、脚本、样式、图片和图标请放在包内 `ui/` / `assets/`，不要嵌入秘密。
+```js
+import { success } from './sdk.mjs';
 
-## 3. 日志迁移
+export async function open(request) {
+  return success({ context: request?.context ?? null });
+}
 
-第一阶段继续写入现有 `system.json`，不要求插件单独管理日志文件。管理员可在系统日志中按插件、来源、等级和关键字筛选。
+export async function invokeTool(request) {
+  if (request.tool_name !== 'panel.echo') {
+    throw new Error('Unknown tool');
+  }
+  const message = request.params.message;
+  Ting.log.info('Echo completed', {
+    op: 'panel.echo',
+    message_length: message.length,
+  });
+  return success({ message });
+}
+```
 
-JavaScript 推荐写法：
+工具调用参数使用 `tool_name` 和 `params`；工具的输入、输出接受清单 JSON Schema 校验。SDK `success` 生成调用结果信封，客户端桥接的 `result` 是经过宿主处理后的业务结果。
 
-```javascript
-Ting.log.info("Booklist saved", {
-  op: "booklist.save",
-  playlist_id: playlistId,
-  item_count: items.length
+## 4. 页面桥接
+
+### 初始化与消息格式
+
+页面注册 `message` 监听器后，会收到 `ting-plugin:init`，包含：
+
+| 字段 | 含义 |
+| --- | --- |
+| `pluginId` / `pluginName` | 当前插件身份及显示名称 |
+| `capabilityId` | 当前 UI 能力 ID |
+| `slot` / `contexts` | 当前入口及声明的上下文类型 |
+| `context` | 客户端提供的当前页面上下文；具体字段取决于入口 |
+| `theme` | 当前主题、明暗模式和 CSS 变量 |
+| `bridgeToken` | 当前页面实例的桥接令牌 |
+
+页面收到的消息由容器转发到当前窗口，监听时检查 `event.source === window`。`context` 可用于展示和提出业务请求，服务端仍自行判断用户身份与资源权限。
+
+请求使用：
+
+```js
+window.__TING_PLUGIN_BRIDGE__.postMessage({
+  type: 'ting-plugin:request',
+  bridge_token: bridgeToken,
+  id: requestId,
+  method: 'capability.invoke',
+  params: {
+    capabilityId: 'panel.tools',
+    params: {
+      tool_name: 'panel.echo',
+      params: { message: 'Hello' },
+    },
+  },
 });
 ```
 
-宿主自动补充：
+直接调用宿主方法时，最外层 `method` 为 `host.invoke`：
 
-- `event_id`
-- `plugin_id`
-- `plugin_instance_id`
-- `plugin_version`
-- `runtime`
-- `source`
-- `op`（从插件 fields 中提升，同时保留原始 fields）
+```js
+request('host.invoke', {
+  method: 'user_settings.get',
+  params: {
+    key: 'language',
+  },
+});
+```
 
-禁止记录密钥、令牌、Cookie、Authorization 头、密码、完整请求/响应体和不必要的用户隐私。错误日志优先记录稳定错误码和必要上下文，不直接序列化未知异常对象。
+响应的 `type` 为 `ting-plugin:response`，携带对应 `id`、`bridge_token` 和 `ok`；成功读取 `result`，失败读取 `error`。页面应设置超时、释放已完成请求，并在关闭时清理未完成请求。页面超时只结束本地等待，不代表服务端操作已经取消；写操作重试需要业务层避免重复执行。
 
-## 4. 权限与可见性
+### 可运行页面示例
 
-- 插件日志只对当前实例管理员可见。
-- 普通用户不能访问系统日志接口和页面。
-- 外部插件作者没有远程查看实例日志的能力。
-- 系统不会因为插件声明作者、仓库地址或商店来源而授予日志权限。
+`ui/panel.html`：
 
-需要插件作者协助排查时，由实例管理员主动导出并脱敏后提供；未来如增加诊断包，也必须由管理员显式生成。
+```html
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>示例面板</title>
+  <link rel="stylesheet" href="./panel.css">
+</head>
+<body>
+  <main>
+    <h1>示例面板</h1>
+    <p id="status">等待宿主初始化…</p>
+    <input id="message" maxlength="2000" value="Hello">
+    <button id="send" disabled>发送</button>
+    <pre id="result"></pre>
+  </main>
+  <script src="./panel.js"></script>
+</body>
+</html>
+```
 
-## 5. 清单与插件包安全迁移
+`ui/panel.css`：
 
-升级旧插件时同时检查 manifest 和安装包：
+```css
+body {
+  margin: 0;
+  background: var(--bg, #f8fafc);
+  color: var(--text, #0f172a);
+  font: 14px/1.5 system-ui, sans-serif;
+}
+main { padding: 16px; }
+input, button { font: inherit; }
+pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+```
 
-- `id` 现在必填，最长 64 个字符；只能使用小写 ASCII 字母、数字、`-`、`_`、`.`，必须以字母或数字开头和结尾，不能包含 `..` 或使用 Windows 保留设备名。
-- `version` 必须是合法 SemVer，例如 `1.2.0` 或 `2.0.0-beta.1`。
-- `name` 不能包含控制字符、路径分隔符、Windows 保留设备名或危险的结尾字符。
-- `entry_point` 必须是插件包内的安全相对路径，最长 240 个字符；不能包含反斜杠、绝对路径、`.`、`..` 或危险路径片段。
-- JavaScript 依赖只接受标准小写 npm 包名（含 `@scope/package`）和精确 SemVer 版本；`^`、`~`、比较器、通配符、联合范围、`file:`、`link:`、Git、HTTP(S)、`workspace:`、npm alias、本地路径和 dist-tag 会被拒绝。旧 manifest 中的范围需先解析并固定到已验证版本，再重新打包。
-- JavaScript 依赖安装固定官方 registry，禁用 npm 生命周期脚本和 lockfile。插件包不能携带 `.npmrc`、`package-lock.json` 或 `npm-shrinkwrap.json`，也不能依赖 `preinstall`、`install`、`postinstall` 等脚本完成构建；应在发布 `.tr` 前生成所需产物。
-- 安装时不再从旧的顶层包缓存拼装 `node_modules`，而是始终让 npm 重建完整依赖图，避免遗漏被提升的传递依赖。旧缓存目录不会迁移复用，可由管理员清理；npm 自身的下载缓存不受影响。
-- `.tr` 最多包含 10,000 个条目，单文件展开后最大 128 MiB，总展开大小最大 256 MiB。超限包会在安装前被拒绝。
-- 商店安装包下载地址只接受 HTTPS，HTTP 和其他协议会被拒绝。下载会使用宿主生成的临时文件名并以流式方式写入，最大 50 MiB；不会再使用下载 URL 的末段作为本地路径。下载客户端禁用自动重定向，逐跳校验 HTTPS、DNS 和实际远端地址，拒绝本机、内网、链路本地及保留地址，并对连接和总请求设置超时；日志不记录查询参数或凭据。
+`ui/panel.js`：
 
-插件目录和卸载目标会经过路径 containment 与符号链接检查。不要依赖软链接访问插件目录外文件，也不要根据未经校验的输入拼接插件 ID、版本或入口路径。
+```js
+(() => {
+  let bridgeToken = null;
+  let sequence = 0;
+  const pending = new Map();
+  const status = document.getElementById('status');
+  const result = document.getElementById('result');
+  const send = document.getElementById('send');
 
-## 6. 发布前检查
+  function rejectPending(message) {
+    for (const item of pending.values()) {
+      clearTimeout(item.timer);
+      item.reject(new Error(message));
+    }
+    pending.clear();
+  }
 
-1. 删除所有 `reader.*` UI slot。
-2. 验证侧边栏折叠后自定义图标仍可识别。
-3. 验证右下角插件工具开关关闭后入口隐藏、重新开启后恢复。
-4. 验证书籍详情入口不受影响。
-5. 验证未声明的 capability 和 `host.invoke` 均被拒绝，已声明调用仍通过后端权限检查。
-6. 验证缺失、过期、其他用户、其他插件或其他 UI capability 的 `ui_grant` 均被拒绝，合法 grant 可以加载资产并转发 bridge 请求。
-7. 验证 Web 与 Flutter 都会在宿主界面展示外链目标，并且只有用户明确确认后才打开。
-8. 在系统日志中确认插件 ID、实例 ID、运行时、来源、操作和事件 ID 完整。
-9. 扫描日志内容，确认没有敏感信息，也没有 `client_grant`、`ui_grant` 或完整资产 URL。
+  function request(method, params) {
+    if (!bridgeToken) return Promise.reject(new Error('Host not ready'));
+    const id = String(++sequence);
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        pending.delete(id);
+        reject(new Error('Request timed out'));
+      }, 30000);
+      pending.set(id, { resolve, reject, timer });
+      try {
+        window.__TING_PLUGIN_BRIDGE__.postMessage({
+          type: 'ting-plugin:request',
+          bridge_token: bridgeToken,
+          id,
+          method,
+          params,
+        });
+      } catch (error) {
+        clearTimeout(timer);
+        pending.delete(id);
+        reject(error);
+      }
+    });
+  }
+
+  window.addEventListener('message', (event) => {
+    if (event.source !== window || !event.data) return;
+    const data = event.data;
+    if (data.type === 'ting-plugin:init') {
+      rejectPending('Host context changed');
+      bridgeToken = data.bridgeToken;
+      send.disabled = false;
+      status.textContent = data.pluginName;
+      request('host.invoke', {
+        method: 'user_settings.get',
+        params: { key: 'language' },
+      }).then((value) => {
+        status.textContent = `语言：${value?.value ?? '未设置'}`;
+      }).catch((error) => {
+        status.textContent = error.message;
+      });
+      return;
+    }
+    if (data.type !== 'ting-plugin:response' ||
+        data.bridge_token !== bridgeToken) return;
+    const item = pending.get(data.id);
+    if (!item) return;
+    clearTimeout(item.timer);
+    pending.delete(data.id);
+    if (data.ok) item.resolve(data.result);
+    else item.reject(new Error(data.error || 'Request failed'));
+  });
+
+  send.addEventListener('click', async () => {
+    send.disabled = true;
+    try {
+      const value = await request('capability.invoke', {
+        capabilityId: 'panel.tools',
+        params: {
+          tool_name: 'panel.echo',
+          params: { message: document.getElementById('message').value },
+        },
+      });
+      result.textContent = value.message;
+    } catch (error) {
+      result.textContent = error.message;
+    } finally {
+      send.disabled = !bridgeToken;
+    }
+  });
+
+  window.addEventListener('pagehide', () => {
+    bridgeToken = null;
+    send.disabled = true;
+    rejectPending('Page closed');
+  });
+})();
+```
+
+宿主会应用 `theme.cssVariables`、`data-ting-theme` 和 `color-scheme`，页面可直接使用这些 CSS 变量。需要重绘图表等组件时，再监听 `ting-plugin:theme` 处理主题变化。
+
+### 资产与授权
+
+- 将 HTML、浏览器脚本、样式和图片放在插件包内，使用相对地址。上例使用普通 `<script src>`，可以同时用于 Web 和 Flutter；前端框架源码应先构建成浏览器可执行的普通脚本，例如 IIFE。
+- Web 容器当前不支持 `<script type="module">`。宿主会应用 sandbox 和 CSP，页面网络请求受限；第三方 CDN、远程模块、CSS `@import` 和 CSS `url(...)` 不作为跨客户端页面的依赖方案。
+- 页面通过桥接取得业务数据。客户端持有登录凭据和 `client_grant`，并负责转发请求，页面无需拼装后端认证请求。
+- `bridgeToken` 只在当前页面实例内使用。`client_grant` 转发为 `ui_grant`，服务端核对当前用户、插件、来源 UI 能力和调用白名单。两类令牌、带授权的资产地址都不能写入日志或持久存储。
+- 外链使用用户实际点击的 HTTP/HTTPS `<a>`，由容器处理确认与打开；程序自动导航、`window.open`、表单跳转不属于页面桥接调用方式。
+- Web 桥接单条消息最大 256 KiB，每 10 秒最多 100 次请求。Flutter 同样校验消息大小、身份和白名单；页面应使用小型 JSON 请求、分页和按需加载。
+
+## 5. 结构化日志
+
+### JavaScript 业务日志
+
+服务端 JavaScript 支持：
+
+```js
+const eventId = Ting.log.info('Metadata search completed', {
+  op: 'metadata.search',
+  duration_ms: 184,
+  result_count: 12,
+});
+
+Ting.log.debug('Cache checked', { op: 'metadata.search', cache_hit: true });
+Ting.log.warn('Upstream rate limited', { op: 'metadata.search', status: 429 });
+Ting.log.error('Search failed', { op: 'metadata.search', error_code: 'UPSTREAM_ERROR' });
+```
+
+`debug/info/warn/error(message, fields)` 的 `fields` 为可选 JSON 对象，不能传数组。调用返回宿主生成的事件 ID，可用于定位单条日志；各日志事件有各自的 ID。
+
+| 字段 | 来源 |
+| --- | --- |
+| `event_id` | 宿主生成 |
+| `plugin_id`、`plugin_instance_id`、`plugin_version`、`plugin` | 宿主绑定的插件身份 |
+| `runtime` | 运行时类型 |
+| `source` | 宿主区分的日志来源 |
+| `op` | 插件传入的 `fields.op`，用于标识业务操作 |
+| `plugin_fields` | 插件传入的结构化业务字段 |
+
+`source` 为 `code`、`lifecycle`、`runtime`、`gateway` 或 `security`。插件只填写业务字段；身份、权限和来源由宿主确定。日志级别还受服务端日志过滤配置控制，未启用 `debug` 时不会保存调试级事件。
+
+记录耗时、数量、缓存命中、状态码和稳定错误码即可。密钥、Cookie、Authorization、授权令牌、带签名的 URL、完整请求体和用户文本不应作为日志字段。
+
+WASM 和 Native 的加载、调用异常及生命周期日志由宿主记录。业务调用返回稳定错误码和错误信息，配合宿主日志定位问题。
+
+### 查看与导出
+
+管理员可在插件管理页查看日志，或调用：
+
+| API | 用途 |
+| --- | --- |
+| `GET /api/v1/plugins/{id}/logs` | 查询指定插件日志 |
+| `GET /api/v1/plugins/{id}/logs/export` | 导出指定插件日志 |
+| `GET /api/v1/plugin-logs` | 查询全部插件日志 |
+| `GET /api/v1/plugin-logs/export` | 导出全部插件日志 |
+
+查询参数支持 `plugin_id`（全局查询）、`level`、`source`、`q`、`since`、`until`、`page`、`page_size`。时间使用 RFC 3339；默认每页 100 条，最大 500 条。`q` 可检索消息和结构化字段，便于通过 `op` 或 `event_id` 定位。
+
+## 6. 构建与联调
+
+1. 用 `trpack new example-panel --template ui --runtime javascript --version 1.0.0` 创建独立项目，按上例补充清单、业务入口和页面文件。
+2. 执行 `trpack validate example-panel`，再用稳定私钥运行 `trpack build`，最后 `trpack inspect` 和 `trpack verify`。具体命令见[开发流程](./plugin-dev.md)。
+3. 在测试服务端的插件管理页上传 `.tr` 包，完成发布者确认和配置，确认插件初始化成功。
+4. 分别从 Web 和 Flutter 打开入口，验证初始化、用户语言、主题、页面资产和业务请求；测试未列入白名单的方法被拒绝。
+5. 查看服务端插件日志，确认 `plugin_id`、`runtime`、`source`、`op` 和事件 ID 可定位本次调用，日志不含敏感信息。
+6. 测试切换用户、关闭再打开页面、重新加载插件和升级后重新打开。页面不沿用已关闭实例的桥接令牌；请求等待和资源随页面生命周期释放。
+
+`trpack verify` 验证包的结构、文件哈希和签名，并不能代替客户端桥接联调，也不能替宿主决定是否信任发行者。

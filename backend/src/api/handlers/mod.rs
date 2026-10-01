@@ -5,6 +5,7 @@ pub mod notifications;
 pub mod playlists;
 pub mod plugin_logs;
 pub mod plugins;
+pub mod reading;
 pub mod series;
 pub mod system;
 pub mod tools;
@@ -17,6 +18,7 @@ pub use notifications::*;
 pub use playlists::*;
 pub use plugin_logs::*;
 pub use plugins::*;
+pub use reading::*;
 pub use series::*;
 pub use system::*;
 pub use tools::*;
@@ -25,6 +27,7 @@ pub use users::*;
 use crate::api::handlers::media::stream::HlsSessionManager;
 use crate::api::ws::manager::WsSessionManager;
 use crate::cache::CacheManager;
+use crate::core::StorageService;
 use crate::core::audio_streamer::AudioStreamer;
 use crate::core::config::Config;
 use crate::core::library_watcher::LibraryWatcher;
@@ -32,7 +35,6 @@ use crate::core::merge_service::MergeService;
 use crate::core::nfo_manager::NfoManager;
 use crate::core::services::{BookService, ScraperService};
 use crate::core::task_queue::TaskQueue;
-use crate::core::StorageService;
 use crate::db::repository::{
     BookRepository, ChapterRepository, FavoriteRepository, LibraryRepository,
     NotificationWebhookRepository, PlaylistRepository, ProgressRepository, SeriesRepository,
@@ -62,6 +64,7 @@ pub struct AppState {
     pub plugin_manager: Arc<PluginManager>,
     pub plugin_cache: Arc<PluginCache>,
     pub plugin_host_gateway: Arc<PluginHostGateway>,
+    pub plugin_route_revocations: Arc<crate::core::signing::PluginRouteRevocations>,
     pub config_manager: Arc<PluginConfigManager>,
     pub task_queue: Arc<TaskQueue>,
     pub config: Arc<tokio::sync::RwLock<Config>>,
@@ -71,13 +74,16 @@ pub struct AppState {
     pub encryption_key: Arc<[u8; 32]>,
     pub storage_service: Arc<StorageService>,
     pub preload_cache: Arc<
-        tokio::sync::RwLock<std::collections::HashMap<String, (bytes::Bytes, std::time::Instant)>>,
+        tokio::sync::RwLock<
+            std::collections::HashMap<String, media::stream::preload::PreloadedChapter>,
+        >,
     >,
     pub audio_streamer: Arc<AudioStreamer>,
     pub merge_service: Arc<MergeService>,
     pub nfo_manager: Arc<NfoManager>,
-    pub active_preload_tasks:
-        Arc<tokio::sync::Mutex<std::collections::HashMap<String, tokio::task::JoinHandle<()>>>>,
+    pub active_preload_tasks: Arc<
+        tokio::sync::Mutex<std::collections::HashMap<String, (String, tokio::task::AbortHandle)>>,
+    >,
     pub library_watcher: Arc<LibraryWatcher>,
     pub ws_manager: Arc<WsSessionManager>,
     pub hls_session_manager: Arc<HlsSessionManager>,

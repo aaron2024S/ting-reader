@@ -1,27 +1,16 @@
+//! Native ABI v2 transport. Context is an explicit per-call borrowed pointer.
+
+use crate::plugin::resources::{ResourceError, ResourceScope};
 use crate::plugin::wasm::sandbox::Permission;
 use crate::plugin::{PluginHostGateway, PluginHostUser};
-use serde_json::Value;
-use std::cell::RefCell;
-use std::ffi::{CStr, CString};
-use std::os::raw::c_char;
+use std::ffi::c_void;
 use std::sync::Arc;
-
-pub const TING_NATIVE_HOST_API_VERSION: u32 = 1;
-
-#[repr(C)]
-pub struct TingNativeHostApi {
-    pub version: u32,
-    pub host_invoke: Option<
-        unsafe extern "C" fn(
-            method: *const c_char,
-            params_json: *const c_char,
-            result_json: *mut *mut c_char,
-        ) -> i32,
-    >,
-    pub host_free: Option<unsafe extern "C" fn(ptr: *mut c_char)>,
-}
-
-pub type SetHostApiFn = unsafe extern "C" fn(api: *const TingNativeHostApi) -> i32;
+use ting_plugin_contract::format_calls::{ChunkRef, MAX_MEDIA_CHUNK_BYTES, ResourceId};
+use ting_plugin_contract::native_abi::{
+    MAX_NATIVE_CONTROL_BYTES, NATIVE_ABI_REVISION, NativeAbiHeader, NativeHostApiV2, NativeStatus,
+    NativeTargetInfo,
+};
+use ting_plugin_contract::protocol::PluginErrorCode;
 
 #[derive(Clone)]
 pub(crate) struct NativeHostInvocationContext {
@@ -29,148 +18,259 @@ pub(crate) struct NativeHostInvocationContext {
     pub permissions: Vec<Permission>,
     pub user: Option<PluginHostUser>,
     pub host_gateway: Option<Arc<PluginHostGateway>>,
+    pub resources: Option<Arc<ResourceScope>>,
     pub runtime_handle: tokio::runtime::Handle,
 }
 
-thread_local! {
-    static CURRENT_CONTEXT: RefCell<Option<NativeHostInvocationContext>> = const { RefCell::new(None) };
-}
-
-pub(crate) fn with_invocation_context<F, R>(context: NativeHostInvocationContext, f: F) -> R
-where
-    F: FnOnce() -> R,
-{
-    let previous = CURRENT_CONTEXT.with(|slot| slot.replace(Some(context)));
-    let _guard = NativeHostContextGuard { previous };
-    f()
-}
-
-struct NativeHostContextGuard {
-    previous: Option<NativeHostInvocationContext>,
-}
-
-impl Drop for NativeHostContextGuard {
-    fn drop(&mut self) {
-        let previous = self.previous.take();
-        CURRENT_CONTEXT.with(|slot| {
-            slot.replace(previous);
-        });
+pub(crate) fn table(context: Option<&mut NativeHostInvocationContext>) -> NativeHostApiV2 {
+    NativeHostApiV2 {
+        header: NativeAbiHeader {
+            abi_revision: NATIVE_ABI_REVISION,
+            struct_size: std::mem::size_of::<NativeHostApiV2>() as u32,
+        },
+        target: NativeTargetInfo::CURRENT,
+        user_data: context
+            .map(|context| (context as *mut NativeHostInvocationContext).cast())
+            .unwrap_or(std::ptr::null_mut()),
+        invoke,
+        read_at,
+        write_at,
+        chunk_create,
+        chunk_copy,
     }
 }
 
-static HOST_API: TingNativeHostApi = TingNativeHostApi {
-    version: TING_NATIVE_HOST_API_VERSION,
-    host_invoke: Some(native_host_invoke),
-    host_free: Some(native_host_free),
-};
-
-pub fn native_host_api() -> *const TingNativeHostApi {
-    &HOST_API as *const TingNativeHostApi
-}
-
-unsafe extern "C" fn native_host_invoke(
-    method: *const c_char,
-    params_json: *const c_char,
-    result_json: *mut *mut c_char,
-) -> i32 {
-    if method.is_null() || params_json.is_null() || result_json.is_null() {
-        return -1;
-    }
-
-    let method = match c_string_to_string(method) {
-        Ok(value) => value,
-        Err(code) => return code,
-    };
-    let params = match c_string_to_json(params_json) {
-        Ok(value) => value,
-        Err(code) => {
-            write_error_result(result_json, "Invalid HostGateway params JSON");
-            return code;
-        }
-    };
-
-    let Some(context) = CURRENT_CONTEXT.with(|slot| slot.borrow().clone()) else {
-        write_error_result(result_json, "Native HostGateway context is not active");
-        return -2;
-    };
-    let Some(gateway) = context.host_gateway else {
-        write_error_result(
-            result_json,
-            "HostGateway is not configured for this native plugin",
-        );
-        return -3;
-    };
-    let Some(user) = context.user else {
-        write_error_result(
-            result_json,
-            "HostGateway requires an authenticated user context",
-        );
-        return -4;
-    };
-
-    let invoke_result = context.runtime_handle.block_on(async move {
-        gateway
-            .invoke_with_permissions(
-                &context.plugin_id,
-                &context.permissions,
-                &user,
-                &method,
-                params,
-            )
-            .await
-    });
-
-    match invoke_result {
-        Ok(value) => write_value_result(result_json, &value),
-        Err(error) => {
-            write_error_result(result_json, &error.to_string());
-            -6
-        }
+fn guarded(call: impl FnOnce() -> std::result::Result<(), NativeStatus>) -> i32 {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(call)) {
+        Ok(Ok(())) => NativeStatus::Ok as i32,
+        Ok(Err(status)) => status as i32,
+        Err(_) => NativeStatus::InternalError as i32,
     }
 }
 
-unsafe extern "C" fn native_host_free(ptr: *mut c_char) {
-    if !ptr.is_null() {
-        unsafe {
-            drop(CString::from_raw(ptr));
-        }
+fn resource_status(error: ResourceError) -> NativeStatus {
+    match error.code {
+        PluginErrorCode::InvalidInput => NativeStatus::InvalidInput,
+        PluginErrorCode::NotFound => NativeStatus::NotFound,
+        PluginErrorCode::PermissionDenied => NativeStatus::PermissionDenied,
+        PluginErrorCode::ResourceLimit => NativeStatus::ResourceLimit,
+        PluginErrorCode::Cancelled => NativeStatus::Cancelled,
+        PluginErrorCode::UnsupportedOperation => NativeStatus::UnsupportedOperation,
+        _ => NativeStatus::InternalError,
     }
 }
 
-fn c_string_to_string(ptr: *const c_char) -> std::result::Result<String, i32> {
-    let value = unsafe { CStr::from_ptr(ptr) };
-    value.to_str().map(ToOwned::to_owned).map_err(|_| -5)
-}
-
-fn c_string_to_json(ptr: *const c_char) -> std::result::Result<Value, i32> {
-    let value = c_string_to_string(ptr)?;
-    if value.trim().is_empty() {
-        return Ok(serde_json::json!({}));
+unsafe fn context<'a>(
+    pointer: *mut c_void,
+) -> std::result::Result<&'a NativeHostInvocationContext, NativeStatus> {
+    if pointer.is_null() {
+        return Err(NativeStatus::NoScope);
     }
-    serde_json::from_str(&value).map_err(|_| -5)
+    Ok(unsafe { &*pointer.cast::<NativeHostInvocationContext>() })
 }
 
-fn write_value_result(result_json: *mut *mut c_char, value: &Value) -> i32 {
-    let json = match serde_json::to_string(value) {
-        Ok(json) => json,
-        Err(_) => return -7,
-    };
-    write_result_string(result_json, json)
+unsafe fn bytes<'a>(
+    pointer: *const u8,
+    len: usize,
+    limit: usize,
+) -> std::result::Result<&'a [u8], NativeStatus> {
+    if pointer.is_null() || len > limit {
+        return Err(NativeStatus::InvalidInput);
+    }
+    Ok(unsafe { std::slice::from_raw_parts(pointer, len) })
 }
 
-fn write_error_result(result_json: *mut *mut c_char, message: &str) {
-    let _ = write_value_result(result_json, &serde_json::json!({ "error": message }));
+unsafe fn text<'a>(pointer: *const u8, len: usize) -> std::result::Result<&'a str, NativeStatus> {
+    std::str::from_utf8(unsafe { bytes(pointer, len, 128)? })
+        .map_err(|_| NativeStatus::InvalidInput)
 }
 
-fn write_result_string(result_json: *mut *mut c_char, value: String) -> i32 {
-    let c_string = match CString::new(value) {
-        Ok(value) => value,
-        Err(_) => return -7,
-    };
+unsafe fn copy_result(
+    bytes: &[u8],
+    output: *mut u8,
+    capacity: usize,
+    length: *mut usize,
+    limit: usize,
+) -> std::result::Result<(), NativeStatus> {
+    if output.is_null() || length.is_null() || capacity > limit {
+        return Err(NativeStatus::InvalidInput);
+    }
+    if capacity < bytes.len() {
+        return Err(NativeStatus::ResourceLimit);
+    }
     unsafe {
-        *result_json = c_string.into_raw();
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), output, bytes.len());
+        *length = bytes.len();
     }
-    0
+    Ok(())
+}
+
+unsafe extern "C" fn invoke(
+    pointer: *mut c_void,
+    method: *const u8,
+    method_len: usize,
+    input: *const u8,
+    input_len: usize,
+    output: *mut u8,
+    capacity: usize,
+    length: *mut usize,
+) -> i32 {
+    guarded(|| {
+        let context = unsafe { context(pointer)? };
+        let method = unsafe { text(method, method_len)? };
+        let input: serde_json::Value =
+            serde_json::from_slice(unsafe { bytes(input, input_len, MAX_NATIVE_CONTROL_BYTES)? })
+                .map_err(|_| NativeStatus::InvalidInput)?;
+        // Reject invalid output buffers before any Host mutation occurs.
+        if output.is_null() || length.is_null() || capacity > MAX_NATIVE_CONTROL_BYTES {
+            return Err(NativeStatus::InvalidInput);
+        }
+        let value = if method.starts_with("resources.") {
+            context
+                .resources
+                .as_ref()
+                .ok_or(NativeStatus::NoScope)?
+                .invoke(method, input)
+                .map_err(resource_status)?
+        } else {
+            let gateway = context.host_gateway.as_ref().ok_or(NativeStatus::NoScope)?;
+            context
+                .runtime_handle
+                .block_on(crate::plugin::host_api::invoke(
+                    &context.plugin_id,
+                    Some(&context.permissions),
+                    context.user.as_ref(),
+                    context.resources.as_ref(),
+                    Some(gateway),
+                    method,
+                    input,
+                ))
+                .map_err(|_| NativeStatus::InternalError)?
+        };
+        let encoded = serde_json::to_vec(&value).map_err(|_| NativeStatus::InternalError)?;
+        unsafe { copy_result(&encoded, output, capacity, length, MAX_NATIVE_CONTROL_BYTES) }
+    })
+}
+
+unsafe extern "C" fn read_at(
+    pointer: *mut c_void,
+    id: *const u8,
+    id_len: usize,
+    offset: u64,
+    output: *mut u8,
+    capacity: usize,
+    length: *mut usize,
+    eof: *mut bool,
+) -> i32 {
+    guarded(|| {
+        let context = unsafe { context(pointer)? };
+        let id = ResourceId(unsafe { text(id, id_len)? }.into());
+        if output.is_null()
+            || length.is_null()
+            || eof.is_null()
+            || capacity == 0
+            || capacity > MAX_MEDIA_CHUNK_BYTES as usize
+        {
+            return Err(NativeStatus::InvalidInput);
+        }
+        let scope = context.resources.as_ref().ok_or(NativeStatus::NoScope)?;
+        let (bytes, finished) = scope
+            .read_at(&id, offset, capacity)
+            .map_err(resource_status)?;
+        unsafe {
+            copy_result(
+                &bytes,
+                output,
+                capacity,
+                length,
+                MAX_MEDIA_CHUNK_BYTES as usize,
+            )?;
+            *eof = finished;
+        }
+        Ok(())
+    })
+}
+
+unsafe extern "C" fn write_at(
+    pointer: *mut c_void,
+    id: *const u8,
+    id_len: usize,
+    offset: u64,
+    input: *const u8,
+    input_len: usize,
+    written: *mut usize,
+) -> i32 {
+    guarded(|| {
+        let context = unsafe { context(pointer)? };
+        let id = ResourceId(unsafe { text(id, id_len)? }.into());
+        let input = unsafe { bytes(input, input_len, MAX_MEDIA_CHUNK_BYTES as usize)? };
+        if written.is_null() {
+            return Err(NativeStatus::InvalidInput);
+        }
+        let count = context
+            .resources
+            .as_ref()
+            .ok_or(NativeStatus::NoScope)?
+            .write_at(&id, offset, input)
+            .map_err(resource_status)?;
+        unsafe {
+            *written = count;
+        }
+        Ok(())
+    })
+}
+
+unsafe extern "C" fn chunk_create(
+    pointer: *mut c_void,
+    input: *const u8,
+    input_len: usize,
+    output: *mut u8,
+    capacity: usize,
+    length: *mut usize,
+) -> i32 {
+    guarded(|| {
+        let context = unsafe { context(pointer)? };
+        let input = unsafe { bytes(input, input_len, MAX_MEDIA_CHUNK_BYTES as usize)? };
+        if output.is_null() || length.is_null() || !(36..=128).contains(&capacity) {
+            return Err(NativeStatus::InvalidInput);
+        }
+        let id = context
+            .resources
+            .as_ref()
+            .ok_or(NativeStatus::NoScope)?
+            .create_chunk(input)
+            .map_err(resource_status)?;
+        unsafe { copy_result(id.0.as_bytes(), output, capacity, length, 128) }
+    })
+}
+
+unsafe extern "C" fn chunk_copy(
+    pointer: *mut c_void,
+    id: *const u8,
+    id_len: usize,
+    output: *mut u8,
+    capacity: usize,
+    length: *mut usize,
+) -> i32 {
+    guarded(|| {
+        let context = unsafe { context(pointer)? };
+        let id = ChunkRef(unsafe { text(id, id_len)? }.into());
+        let bytes = context
+            .resources
+            .as_ref()
+            .ok_or(NativeStatus::NoScope)?
+            .chunk(&id)
+            .map_err(resource_status)?;
+        unsafe {
+            copy_result(
+                &bytes,
+                output,
+                capacity,
+                length,
+                MAX_MEDIA_CHUNK_BYTES as usize,
+            )
+        }
+    })
 }
 
 #[cfg(test)]
@@ -178,34 +278,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn native_host_invoke_rejects_without_active_context() {
-        let method = CString::new("books.list").unwrap();
-        let params = CString::new("{}").unwrap();
-        let mut result: *mut c_char = std::ptr::null_mut();
-
-        let code = unsafe {
-            native_host_invoke(
+    fn native_host_callbacks_reject_without_borrowed_context() {
+        let api = table(None);
+        let mut output = [0u8; 128];
+        let mut length = 0;
+        let method = b"resources.stat";
+        let status = unsafe {
+            (api.invoke)(
+                api.user_data,
                 method.as_ptr(),
-                params.as_ptr(),
-                &mut result as *mut *mut c_char,
+                method.len(),
+                b"{}".as_ptr(),
+                2,
+                output.as_mut_ptr(),
+                output.len(),
+                &mut length,
             )
         };
-
-        assert_eq!(code, -2);
-        assert!(!result.is_null());
-        let body = unsafe { CStr::from_ptr(result).to_string_lossy().into_owned() };
-        assert!(body.contains("context is not active"));
-        unsafe {
-            native_host_free(result);
-        }
-    }
-
-    #[test]
-    fn native_host_api_exposes_versioned_callbacks() {
-        let api = unsafe { native_host_api().as_ref() }.unwrap();
-
-        assert_eq!(api.version, TING_NATIVE_HOST_API_VERSION);
-        assert!(api.host_invoke.is_some());
-        assert!(api.host_free.is_some());
+        assert_eq!(status, NativeStatus::NoScope as i32);
+        assert_eq!(length, 0);
+        assert_eq!(api.header.abi_revision, 2);
+        assert_eq!(api.target, NativeTargetInfo::CURRENT);
     }
 }

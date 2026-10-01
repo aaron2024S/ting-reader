@@ -436,52 +436,51 @@ export const useStuckDecodeDetector = (options: {
 };
 
 // ─── useNextChapterPreloader ────────────────────────────────────────────────
-// 当 autoPreload 或 autoCache 任一开启时：
-//  - autoPreload：本地建一个隐藏 <audio> 提前请求下一章 URL（命中浏览器 HTTP 缓存）
-//  - autoCache：调用后端 /api/cache/:id 触发 WebDAV 服务器端缓存
+// autoPreload 只预读下一章普通媒体元信息；.strm 不预取。
+// autoCache 由后端播放请求统一调度，避免前后端并发下载同一文件。
 // 调用方负责传 getNextStreamUrl，因为 URL 构建依赖 shouldTranscode / token 等本地状态。
 export const useNextChapterPreloader = (options: {
   autoPreload: boolean;
-  autoCache: boolean;
   bookId: string | undefined;
   chapterId: string | undefined;
+  sourceKey: string;
   getNextStreamUrl: (chapterId: string) => string;
 }) => {
-  const { autoPreload, autoCache, bookId, chapterId, getNextStreamUrl } = options;
-  const preloadAudioRef = useRef<HTMLAudioElement | null>(null);
-
+  const { autoPreload, bookId, chapterId, sourceKey, getNextStreamUrl } = options;
   useEffect(() => {
-    if ((!autoPreload && !autoCache) || !chapterId || !bookId) return;
+    if (!autoPreload || !chapterId || !bookId) return;
+    const controller = new AbortController();
+    let preloadAudio: HTMLAudioElement | null = null;
 
-    apiClient.get(`/api/books/${bookId}/chapters`).then(res => {
-      const list = res.data as Array<{ id: string; title?: string }>;
+    apiClient.get(`/api/books/${bookId}/chapters`, { signal: controller.signal }).then(res => {
+      if (controller.signal.aborted) return;
+      const list = res.data as Array<{ id: string; title?: string; path?: string }>;
       const currentIndex = list.findIndex((c) => c.id === chapterId);
       if (currentIndex === -1 || currentIndex >= list.length - 1) return;
-      const nextChapterId = list[currentIndex + 1].id;
+      const next = list[currentIndex + 1];
+      const nextChapterId = next.id;
+      if (next.path?.toLowerCase().split('?')[0].endsWith('.strm')) return;
 
-      if (autoPreload) {
-        if (!preloadAudioRef.current) {
-          preloadAudioRef.current = new Audio();
-          preloadAudioRef.current.preload = 'auto';
-        }
-        const nextSrc = getNextStreamUrl(nextChapterId);
-        if (preloadAudioRef.current.src !== nextSrc) {
-          console.log('正在预加载下一章:', list[currentIndex + 1].title);
-          preloadAudioRef.current.src = nextSrc;
-          preloadAudioRef.current.load();
-        }
+      preloadAudio = new Audio();
+      preloadAudio.preload = 'metadata';
+      const nextSrc = getNextStreamUrl(nextChapterId);
+      preloadAudio.src = nextSrc;
+      preloadAudio.load();
+    }).catch(err => {
+      if (!controller.signal.aborted) console.error('预加载失败', err);
+    });
+    return () => {
+      controller.abort();
+      if (preloadAudio) {
+        preloadAudio.pause();
+        preloadAudio.removeAttribute('src');
+        preloadAudio.load();
+        preloadAudio = null;
       }
-
-      if (autoCache) {
-        console.log('触发服务器端缓存:', list[currentIndex + 1].title);
-        apiClient.post(`/api/cache/${nextChapterId}`).catch(err => {
-          console.error('触发服务器端缓存失败', err);
-        });
-      }
-    }).catch(err => console.error('预加载失败', err));
+    };
     // getNextStreamUrl 是组件内闭包，每次渲染都新建，故意不进依赖避免抖动。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [chapterId, autoPreload, autoCache, bookId]);
+  }, [chapterId, autoPreload, bookId, sourceKey]);
 };
 
 // ─── useProgressSync ────────────────────────────────────────────────────────

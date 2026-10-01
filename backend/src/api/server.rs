@@ -9,27 +9,27 @@
 
 use crate::api::handlers::AppState;
 use crate::api::middleware::{
-    auth_middleware, security_headers_middleware, trace_id_middleware, ApiKey,
-    SecurityHeadersConfig,
+    ApiKey, SecurityHeadersConfig, auth_middleware, security_headers_middleware,
+    trace_id_middleware,
 };
 use crate::api::routes::build_api_routes;
-use crate::core::config::ServerConfig;
 use crate::core::Config;
+use crate::core::config::ServerConfig;
 use crate::db::manager::DatabaseManager;
 use crate::db::repository::BookRepository;
 use axum::{
-    body::{to_bytes, Body},
+    Router,
+    body::{Body, to_bytes},
     extract::{ConnectInfo, Request, State},
-    http::{header, uri::PathAndQuery, HeaderValue, StatusCode, Uri},
+    http::{HeaderValue, StatusCode, Uri, header, uri::PathAndQuery},
     middleware,
     middleware::Next,
     response::{IntoResponse, Json, Response},
     routing::{any, get},
-    Router,
 };
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use rand::{rngs::OsRng, RngCore};
-use serde_json::{json, Value};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use rand::{RngCore, rngs::OsRng};
+use serde_json::{Value, json};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
@@ -218,6 +218,21 @@ impl ApiServer {
 
         // Create Preload Cache
         let preload_cache = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
+        let preload_cache_for_expiration = Arc::downgrade(&preload_cache);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+            loop {
+                interval.tick().await;
+                let Some(cache_lock) = preload_cache_for_expiration.upgrade() else {
+                    break;
+                };
+                let mut cache = cache_lock.write().await;
+                crate::api::handlers::media::stream::preload::evict_expired_cache(
+                    &mut cache,
+                    std::time::Instant::now(),
+                );
+            }
+        });
 
         // Create task queue
         let task_queue = Arc::new(
@@ -273,6 +288,15 @@ impl ApiServer {
             crate::plugin::PluginCache::new(config.storage.data_dir.join("plugin-cache"))
                 .map_err(|e| anyhow::anyhow!("Failed to create plugin cache: {}", e))?,
         );
+        let plugin_route_revocations = Arc::new(
+            crate::core::signing::PluginRouteRevocations::new(
+                config
+                    .storage
+                    .data_dir
+                    .join("plugin-route-revocations.json"),
+            )
+            .map_err(|e| anyhow::anyhow!("Failed to create plugin route revocations: {}", e))?,
+        );
         let plugin_host_gateway = Arc::new(crate::plugin::PluginHostGateway::new(
             crate::plugin::PluginHostGatewayDependencies {
                 book_repo: book_repo.clone(),
@@ -285,6 +309,12 @@ impl ApiServer {
                 task_queue: task_queue.clone(),
                 plugin_manager: plugin_manager.clone(),
                 plugin_cache: plugin_cache.clone(),
+                plugin_storage: Arc::new(
+                    crate::plugin::PluginCache::new(config.storage.data_dir.join("plugin-storage"))
+                        .map_err(|e| anyhow::anyhow!("Failed to create plugin storage: {}", e))?,
+                ),
+                config_manager: config_manager.clone(),
+                plugin_route_revocations: plugin_route_revocations.clone(),
                 encryption_key: Arc::new(encryption_key),
                 config: config.clone(),
             },
@@ -353,6 +383,7 @@ impl ApiServer {
             plugin_manager,
             plugin_cache,
             plugin_host_gateway,
+            plugin_route_revocations,
             config_manager,
             task_queue,
             config: config_arc,
@@ -712,13 +743,13 @@ async fn gateway_proxy(State(state): State<GatewayProxyState>, mut request: Requ
     parts.path_and_query = match PathAndQuery::try_from(path_and_query) {
         Ok(path_and_query) => Some(path_and_query),
         Err(_) => {
-            return (axum::http::StatusCode::BAD_REQUEST, "Invalid gateway path").into_response()
+            return (axum::http::StatusCode::BAD_REQUEST, "Invalid gateway path").into_response();
         }
     };
     let rewritten_uri = match Uri::from_parts(parts) {
         Ok(uri) => uri,
         Err(_) => {
-            return (axum::http::StatusCode::BAD_REQUEST, "Invalid gateway URI").into_response()
+            return (axum::http::StatusCode::BAD_REQUEST, "Invalid gateway URI").into_response();
         }
     };
     *request.uri_mut() = rewritten_uri;
@@ -778,9 +809,22 @@ fn rewrite_root_relative_attribute(html: &str, attribute: &str, prefix: &str) ->
     output
 }
 
-async fn ensure_manifest_link(request: Request, next: Next) -> Response {
+async fn ensure_manifest_link(mut request: Request, next: Next) -> Response {
     if is_plugin_asset_path(request.uri().path()) {
         return next.run(request).await;
+    }
+
+    // HTML receives a fresh CSP nonce and rewritten body for every navigation.
+    // A 304 would reuse the cached body while the security layer supplies a
+    // nonce-free CSP, preventing the sandboxed plugin scripts from executing.
+    if request
+        .headers()
+        .get(header::ACCEPT)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|accept| accept.contains("text/html"))
+    {
+        request.headers_mut().remove(header::IF_NONE_MATCH);
+        request.headers_mut().remove(header::IF_MODIFIED_SINCE);
     }
 
     let is_manifest_request = request.uri().path().ends_with("/manifest.webmanifest");
@@ -823,12 +867,18 @@ async fn ensure_manifest_link(request: Request, next: Next) -> Response {
         return Response::from_parts(parts, Body::from(bytes));
     };
     let nonce = create_document_script_nonce();
+    let html = ensure_spa_asset_base(&html);
     let rewritten = inject_document_script_nonce(&ensure_manifest_link_in_html(&html), &nonce);
     let csp = document_content_security_policy(&nonce);
     parts.headers.insert(
         header::CONTENT_SECURITY_POLICY,
         HeaderValue::from_str(&csp).expect("document CSP is valid"),
     );
+    parts
+        .headers
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    parts.headers.remove(header::ETAG);
+    parts.headers.remove(header::LAST_MODIFIED);
 
     parts.headers.remove(header::CONTENT_LENGTH);
     Response::from_parts(parts, Body::from(rewritten))
@@ -840,9 +890,19 @@ fn create_document_script_nonce() -> String {
     URL_SAFE_NO_PAD.encode(bytes)
 }
 
+fn ensure_spa_asset_base(html: &str) -> String {
+    // Relative Vite assets must resolve from the application root when a user
+    // opens or reloads a nested route such as /book/:id.
+    if html.contains("id=\"root\"") && !html.contains("<base ") {
+        html.replacen("<head>", "<head><base href=\"/\">", 1)
+    } else {
+        html.to_string()
+    }
+}
+
 fn document_content_security_policy(nonce: &str) -> String {
     format!(
-        "default-src 'self'; script-src 'self' 'nonce-{nonce}'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self'; connect-src 'self'; media-src 'self'; object-src 'none'; frame-ancestors 'none';"
+        "default-src 'self'; script-src 'self' 'nonce-{nonce}'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self'; connect-src 'self'; media-src 'self' https: http:; object-src 'none'; frame-ancestors 'none';"
     )
 }
 
@@ -929,7 +989,13 @@ async fn rewrite_gateway_html(response: Response, prefix: &str) -> Response {
     html = ensure_manifest_link_in_html(&html);
     html = rewrite_root_relative_attribute(&html, "src", &asset_prefix);
     html = rewrite_root_relative_attribute(&html, "href", &asset_prefix);
-    html = html.replace("<head>", &format!("<head><base href=\"{asset_prefix}\">"));
+    if !html.contains("<base ") {
+        html = html.replacen(
+            "<head>",
+            &format!("<head><base href=\"{asset_prefix}\">"),
+            1,
+        );
+    }
 
     parts.headers.remove(header::CONTENT_LENGTH);
     Response::from_parts(parts, Body::from(html))
@@ -1134,6 +1200,7 @@ mod tests {
             .unwrap()
             .to_str()
             .unwrap();
+        assert!(csp.contains("media-src 'self' https: http:"));
         let nonce = csp
             .split("'nonce-")
             .nth(1)
@@ -1147,6 +1214,136 @@ mod tests {
         assert!(body.contains(&format!(
             r#"<meta name="ting-csp-nonce" content="{nonce}">"#
         )));
+    }
+
+    #[tokio::test]
+    async fn html_navigation_ignores_cached_validators() {
+        async fn page(request: Request) -> Response {
+            if request.headers().contains_key(header::IF_NONE_MATCH)
+                || request.headers().contains_key(header::IF_MODIFIED_SINCE)
+            {
+                return StatusCode::NOT_MODIFIED.into_response();
+            }
+            Response::builder()
+                .header(header::CONTENT_TYPE, "text/html")
+                .header(header::ETAG, "\"static-index\"")
+                .header(header::LAST_MODIFIED, "Wed, 30 Sep 2026 00:00:00 GMT")
+                .body(Body::from("<html><head></head><body></body></html>"))
+                .unwrap()
+        }
+
+        let app = Router::new()
+            .fallback(page)
+            .layer(middleware::from_fn(ensure_manifest_link))
+            .layer(middleware::from_fn(security_headers_middleware));
+        let mut nonces = Vec::new();
+        for _ in 0..2 {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/plugin-pages/example/panel.view")
+                        .header(header::ACCEPT, "text/html,application/xhtml+xml")
+                        .header(header::IF_NONE_MATCH, "\"static-index\"")
+                        .header(header::IF_MODIFIED_SINCE, "Wed, 30 Sep 2026 00:00:00 GMT")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+            assert!(!response.headers().contains_key(header::ETAG));
+            assert!(!response.headers().contains_key(header::LAST_MODIFIED));
+            let nonce = response.headers()[header::CONTENT_SECURITY_POLICY]
+                .to_str()
+                .unwrap()
+                .split("'nonce-")
+                .nth(1)
+                .unwrap()
+                .split('\'')
+                .next()
+                .unwrap()
+                .to_owned();
+            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let body = String::from_utf8(body.to_vec()).unwrap();
+            assert!(body.contains(&format!(
+                r#"<meta name="ting-csp-nonce" content="{nonce}">"#
+            )));
+            nonces.push(nonce);
+        }
+        assert_ne!(nonces[0], nonces[1]);
+    }
+
+    #[tokio::test]
+    async fn static_asset_preserves_conditional_requests() {
+        async fn asset(request: Request) -> Response {
+            assert_eq!(request.headers()[header::IF_NONE_MATCH], "\"asset\"");
+            assert!(request.headers().contains_key(header::IF_MODIFIED_SINCE));
+            StatusCode::NOT_MODIFIED.into_response()
+        }
+
+        let app = Router::new()
+            .route("/assets/app.js", get(asset))
+            .layer(middleware::from_fn(ensure_manifest_link));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/assets/app.js")
+                    .header(header::ACCEPT, "*/*")
+                    .header(header::IF_NONE_MATCH, "\"asset\"")
+                    .header(header::IF_MODIFIED_SINCE, "Wed, 30 Sep 2026 00:00:00 GMT")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
+    }
+
+    #[tokio::test]
+    async fn nested_spa_routes_resolve_assets_from_direct_and_gateway_roots() {
+        async fn page() -> Response {
+            Response::builder()
+                .header(header::CONTENT_TYPE, "text/html")
+                .body(Body::from(
+                    r#"<html><head><script src="./assets/app.js"></script></head><body><div id="root"></div></body></html>"#,
+                ))
+                .unwrap()
+        }
+        let app = Router::new()
+            .fallback(page)
+            .layer(middleware::from_fn(ensure_manifest_link));
+        let direct = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/book/example")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let direct_html = to_bytes(direct.into_body(), usize::MAX).await.unwrap();
+        let direct_html = String::from_utf8(direct_html.to_vec()).unwrap();
+        assert!(direct_html.contains(r#"<base href="/">"#));
+        assert_eq!(direct_html.matches("<base ").count(), 1);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/book/example")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let gateway = rewrite_gateway_html(response, "/app/ting-reader").await;
+        let gateway_html = to_bytes(gateway.into_body(), usize::MAX).await.unwrap();
+        let gateway_html = String::from_utf8(gateway_html.to_vec()).unwrap();
+        assert!(gateway_html.contains(r#"<base href="/app/ting-reader/">"#));
+        assert_eq!(gateway_html.matches("<base ").count(), 1);
+        assert!(gateway_html.contains(r#"src="./assets/app.js""#));
     }
 
     #[tokio::test]
