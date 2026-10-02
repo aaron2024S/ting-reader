@@ -4,7 +4,6 @@ use crate::api::handlers::media::stream::{
     get_hls_playlist, get_hls_segment, seek_hls_stream, stream_signed_chapter,
 };
 use crate::api::handlers::{
-    AppState,
     COVER_BODY_LIMIT,
     add_bookmark,
     add_favorite,
@@ -132,6 +131,7 @@ use crate::api::handlers::{
     upload_book_cover,
     write_book_metadata_to_files,
 };
+use crate::api::state::AppState;
 use crate::auth::handlers::{get_me, update_me};
 use crate::auth::middleware::authenticate;
 use axum::{

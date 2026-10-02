@@ -31,6 +31,10 @@ pub struct PluginInvocationContext {
 #[async_trait::async_trait]
 pub trait Plugin: Send + Sync {
     fn metadata(&self) -> &PluginMetadata;
+    /// Whether this runtime can still accept calls after a fatal execution error.
+    fn is_available(&self) -> bool {
+        true
+    }
     async fn initialize(&self, context: &PluginContext) -> Result<()>;
     async fn shutdown(&self) -> Result<()>;
     /// Runtime adapter entry point. Capability validation happens in Manager.
@@ -218,42 +222,6 @@ impl PluginMetadata {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn effective_capabilities_uses_declared_capabilities_only() {
-        let metadata = PluginMetadata::new(
-            "assistant".to_string(),
-            "Assistant".to_string(),
-            "1.0.0".to_string(),
-            "Ting Reader".to_string(),
-            "Assistant".to_string(),
-            "plugin.js".to_string(),
-        );
-
-        assert!(metadata.effective_capabilities().is_empty());
-
-        let mut metadata = metadata;
-        metadata.capabilities.push(
-            serde_json::from_value(serde_json::json!({
-                "id":"assistant.ui", "kind":"ui_extension", "slots":["global.panel"],
-                "contexts":["global"], "title":{"en":"Assistant"},
-                "render":{"mode":"action","bridge":{"capabilities":[],"host_methods":[]}}
-            }))
-            .unwrap(),
-        );
-
-        let capabilities = metadata.effective_capabilities();
-
-        assert_eq!(capabilities.len(), 1);
-        assert_eq!(capabilities[0].id(), "assistant.ui");
-        assert_eq!(capabilities[0].kind(), "ui_extension");
-        assert!(capabilities[0].supports("open"));
-    }
-}
-
 /// Plugin dependency specification
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -394,3 +362,7 @@ pub struct PluginStateEvent {
     pub new_state: PluginState,
     pub timestamp: i64,
 }
+
+#[cfg(test)]
+#[path = "../../../tests/unit/plugin/types.rs"]
+mod tests;

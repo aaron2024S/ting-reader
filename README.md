@@ -230,7 +230,7 @@ docker-compose up -d
 
 ### 环境要求
 - Node.js 20+
-- Rust 1.75+
+- Rust 1.93+
 - SQLite3
 
 ### 项目结构
@@ -241,6 +241,8 @@ ting-reader/
 ├── plugins/    # 官方插件源码
 └── .github/    # GitHub 工作流与 FPK 配置
 ```
+
+后端模块职责、目录布局和验证命令见 [后端目录说明](backend/README.md)。
 
 ### 本地开发
 

@@ -1,10 +1,12 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { isAxiosError } from 'axios';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router';
 import apiClient from '../../core/api/client';
-import type { Plugin, StorePlugin } from '../../core/types';
+import type { Plugin, StorePlugin, UnverifiedPluginInstallConfirmation } from '../../core/types';
 import { refreshClientExtensions } from '../../core/stores/pluginExtensionsStore';
 import PluginConfigDialog from '../../shared/modals/PluginConfigDialog';
+import UnverifiedPluginDialog from './UnverifiedPluginDialog';
 import {
   Puzzle,
   RefreshCw,
@@ -36,6 +38,19 @@ const PluginsPage: React.FC = () => {
   const [category, setCategory] = useState<string>('all');
   const [expandedDescriptions, setExpandedDescriptions] = useState<Set<string>>(new Set());
   const [configPlugin, setConfigPlugin] = useState<Plugin | null>(null);
+  const [confirmation, setConfirmation] = useState<UnverifiedPluginInstallConfirmation | null>(null);
+  const confirmationResolver = useRef<((accepted: boolean) => void) | null>(null);
+
+  const decideConfirmation = useCallback((accepted: boolean) => {
+    confirmationResolver.current?.(accepted);
+    confirmationResolver.current = null;
+    setConfirmation(null);
+  }, []);
+
+  useEffect(() => () => {
+    confirmationResolver.current?.(false);
+    confirmationResolver.current = null;
+  }, []);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const hasPluginStoreProvider = plugins.some((plugin) =>
@@ -115,15 +130,45 @@ const PluginsPage: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab, hasPluginStoreProvider]);
 
+  const installWithConfirmation = async (
+    install: (confirmedDigest?: string) => Promise<unknown>,
+    fallbackName: string,
+  ) => {
+    let confirmedDigest: string | undefined;
+    for (;;) {
+      try {
+        await install(confirmedDigest);
+        return true;
+      } catch (error) {
+        if (!isAxiosError<UnverifiedPluginInstallConfirmation>(error)
+          || error.response?.status !== 428 || !error.response.data.requires_confirmation) {
+          throw error;
+        }
+        const data = error.response.data;
+        const accepted = await new Promise<boolean>((resolve) => {
+          confirmationResolver.current?.(false);
+          confirmationResolver.current = resolve;
+          setConfirmation({ ...data, plugin_name: data.plugin_name || fallbackName });
+        });
+        if (!accepted) return false;
+        if (!/^[a-f0-9]{64}$/.test(data.package_sha256 || '')) {
+          throw new Error(t('adminPlugins.confirmationUnavailable'), { cause: error });
+        }
+        confirmedDigest = data.package_sha256;
+      }
+    }
+  };
+
   const handleUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
 
-    const uploadPluginPackage = async (acceptUnverified: boolean) => {
+    const uploadPluginPackage = async (confirmedDigest?: string) => {
       const formData = new FormData();
       formData.append('file', file);
-      if (acceptUnverified) {
+      if (confirmedDigest) {
         formData.append('accept_unverified', 'true');
+        formData.append('confirmed_package_sha256', confirmedDigest);
       }
       return apiClient.post('/api/v1/plugins/install', formData, {
         headers: {
@@ -134,30 +179,12 @@ const PluginsPage: React.FC = () => {
 
     setUploading(true);
     try {
-      await uploadPluginPackage(false);
+      if (!await installWithConfirmation(uploadPluginPackage, file.name)) return;
       await Promise.all([fetchPlugins(), refreshClientExtensions()]);
       alert(t('adminPlugins.installSuccess'));
     } catch (err: unknown) {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const response = (err as any)?.response;
-      if (response?.status === 428 && response?.data?.requires_confirmation) {
-        const warning = response.data.warning || `${file.name}由未知发布者提供，未经Ting Reader验证。单击同意，即表示你同意全权负责因使用该插件而可能导致的任何设备损坏或数据丢失。`;
-        if (confirm(warning)) {
-          try {
-            await uploadPluginPackage(true);
-            await Promise.all([fetchPlugins(), refreshClientExtensions()]);
-            alert(t('adminPlugins.installSuccess'));
-            return;
-          } catch (retryErr: unknown) {
-            console.error('Failed to install unverified plugin', retryErr);
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            const retryMsg = (retryErr as any)?.response?.data?.error || (retryErr as Error)?.message || t('adminPlugins.unknownError');
-            alert(t('adminPlugins.installFailed', { message: retryMsg }));
-            return;
-          }
-        }
-        return;
-      }
       console.error('Failed to install plugin', err);
       const msg = response?.data?.error || (err as Error)?.message || t('adminPlugins.unknownError');
       alert(t('adminPlugins.installFailed', { message: msg }));
@@ -184,26 +211,16 @@ const PluginsPage: React.FC = () => {
   };
 
   const installStorePlugin = async (pluginId: string, fallbackName: string) => {
-    const install = (acceptUnverified: boolean) =>
+    const install = (confirmedDigest?: string) =>
       apiClient.post('/api/v1/store/install', {
         plugin_id: pluginId,
-        ...(acceptUnverified ? { accept_unverified: true } : {}),
+        ...(confirmedDigest ? {
+          accept_unverified: true,
+          confirmed_package_sha256: confirmedDigest,
+        } : {}),
       });
 
-    try {
-      await install(false);
-      return true;
-    } catch (err: unknown) {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const response = (err as any)?.response;
-      if (response?.status === 428 && response?.data?.requires_confirmation) {
-        const warning = response.data.warning || `${fallbackName}由未知发布者提供，未经Ting Reader验证。单击同意，即表示你同意全权负责因使用该插件而可能导致的任何设备损坏或数据丢失。`;
-        if (!confirm(warning)) return false;
-        await install(true);
-        return true;
-      }
-      throw err;
-    }
+    return installWithConfirmation(install, fallbackName);
   };
 
   const handleInstallFromStore = async (pluginId: string) => {
@@ -539,6 +556,7 @@ const PluginsPage: React.FC = () => {
         )
       )}
 
+      {confirmation && <UnverifiedPluginDialog confirmation={confirmation} onDecision={decideConfirmation} />}
       {configPlugin && configPlugin.config_schema ? (
         <PluginConfigDialog
           pluginId={configPlugin.id}

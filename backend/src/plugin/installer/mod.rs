@@ -5,9 +5,9 @@
 //!
 //! **Validates: Requirements 26.2, 26.3, 26.4, 26.8**
 
+pub(crate) mod confirmation;
 mod rollback;
-#[cfg(test)]
-mod tests;
+
 pub mod tr_package;
 
 use crate::core::app::error::{Result, TingError};
@@ -288,3 +288,7 @@ impl PluginInstaller {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "../../../tests/unit/plugin/installer/install.rs"]
+mod tests;

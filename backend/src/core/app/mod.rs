@@ -9,3 +9,7 @@ pub mod time;
 pub use config::Config;
 pub use error::{ErrorContext, ErrorResponse, Result, TingError};
 pub use logging::Logger;
+
+#[cfg(test)]
+#[path = "../../../tests/unit/core/app/validation.rs"]
+mod tests;

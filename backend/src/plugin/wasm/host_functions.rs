@@ -94,7 +94,10 @@ pub fn add_host_functions(linker: &mut Linker<PluginState>) -> anyhow::Result<()
     Ok(())
 }
 
-fn guarded_host_callback(operation: &'static str, callback: impl FnOnce() -> i32) -> i32 {
+pub(super) fn guarded_host_callback(
+    operation: &'static str,
+    callback: impl FnOnce() -> i32,
+) -> i32 {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(callback)) {
         Ok(value) => value,
         Err(_) => {
@@ -287,15 +290,4 @@ fn store_host_response(caller: &mut Caller<'_, PluginState>, body: Vec<u8>) -> i
         .saturating_add(1);
     caller.data_mut().host_responses.insert(handle, body);
     handle as i32
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn host_callback_panics_become_internal_status() {
-        let status = guarded_host_callback("test", || panic!("test panic"));
-        assert_eq!(status, ERR_HOST_PANIC);
-    }
 }

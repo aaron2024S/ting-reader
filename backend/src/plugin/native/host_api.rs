@@ -1,7 +1,7 @@
 //! Native ABI v2 transport. Context is an explicit per-call borrowed pointer.
 
 use crate::plugin::host_api::resources::{ResourceError, ResourceScope};
-use crate::plugin::wasm::sandbox::Permission;
+use crate::plugin::sandbox::Permission;
 use crate::plugin::{PluginHostGateway, PluginHostUser};
 use std::ffi::c_void;
 use std::sync::Arc;
@@ -271,33 +271,4 @@ unsafe extern "C" fn chunk_copy(
             )
         }
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn native_host_callbacks_reject_without_borrowed_context() {
-        let api = table(None);
-        let mut output = [0u8; 128];
-        let mut length = 0;
-        let method = b"resources.stat";
-        let status = unsafe {
-            (api.invoke)(
-                api.user_data,
-                method.as_ptr(),
-                method.len(),
-                b"{}".as_ptr(),
-                2,
-                output.as_mut_ptr(),
-                output.len(),
-                &mut length,
-            )
-        };
-        assert_eq!(status, NativeStatus::NoScope as i32);
-        assert_eq!(length, 0);
-        assert_eq!(api.header.abi_revision, 2);
-        assert_eq!(api.target, NativeTargetInfo::CURRENT);
-    }
 }

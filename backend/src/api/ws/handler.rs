@@ -1,6 +1,6 @@
 //! WebSocket handler for real-time progress sync
 
-use crate::api::handlers::AppState;
+use crate::api::state::AppState;
 use crate::api::ws::manager::WsSessionManager;
 use crate::auth::jwt;
 use crate::core::app::error::TingError;

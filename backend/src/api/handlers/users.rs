@@ -1,10 +1,10 @@
-use super::AppState;
 use crate::api::models::{
     CreateUserRequest, DeleteProgressHistoryRequest, DeleteProgressHistoryResponse,
     FavoriteActionResponse, ProgressResponse, UpdateProgressRequest, UpdateUserRequest,
     UpdateUserSettingsRequest, UserActionResponse, UserInfoResponse, UserSettingsResponse,
 };
 use crate::api::require_admin;
+use crate::api::state::AppState;
 use crate::core::app::error::{Result, TingError};
 use crate::db::repository::Repository;
 use axum::{

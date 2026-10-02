@@ -305,7 +305,8 @@ const getPluginPermissionLabels = (
     });
     const scope = "domain" in permission ? permission.domain
       : "path" in permission ? permission.path
-        : "event" in permission ? permission.event : undefined;
+        : "event" in permission ? permission.event
+          : "plugin_id" in permission ? `${permission.plugin_id} / ${permission.capability_id}` : undefined;
     return scope ? `${label} (${scope})` : label;
   });
 };
@@ -751,6 +752,9 @@ export default PluginCard;
 export {
   getBasePluginId,
   getPluginCategory,
+  getPluginCapabilityKinds,
+  getPluginPermissionLabels,
+  capabilityLabels,
   getInstalledStoreMeta,
   getLocalizedPluginDescription,
   toInstalledCardData,

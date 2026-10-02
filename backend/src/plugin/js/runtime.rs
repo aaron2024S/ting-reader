@@ -9,16 +9,19 @@ use deno_core::{JsRuntime, ModuleSpecifier, v8};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tracing::{debug, info};
 
 use super::super::types::PluginMetadata;
-use super::super::wasm::sandbox::{ResourceLimits, Sandbox};
 use super::bindings::{JsHostInvocationContext, create_js_runtime_with_bindings};
+use super::limits::{ExecutionMonitor, JsBudget};
 use crate::plugin::PluginHostGatewayHandle;
+use crate::plugin::sandbox::{ResourceLimits, Sandbox};
 
 /// JavaScript Runtime wrapper for executing JavaScript plugins
 pub struct JsRuntimeWrapper {
+    // Stop and join the watchdog before dropping V8 and its allocator.
+    monitor: ExecutionMonitor,
     /// The Deno Core runtime instance
     runtime: JsRuntime,
     /// Path to the plugin file
@@ -26,7 +29,8 @@ pub struct JsRuntimeWrapper {
     /// Plugin metadata
     metadata: PluginMetadata,
     /// Security sandbox
-    sandbox: Option<Sandbox>,
+    sandbox: Sandbox,
+    budget: JsBudget,
     /// Execution start time (for CPU time tracking)
     execution_start: Option<Instant>,
 }
@@ -55,35 +59,52 @@ impl JsRuntimeWrapper {
         config: Option<Value>,
         host_gateway: Option<PluginHostGatewayHandle>,
     ) -> Result<Self> {
+        Self::new_with_limits(
+            plugin_path,
+            metadata,
+            config,
+            host_gateway,
+            ResourceLimits::default(),
+        )
+    }
+
+    pub(super) fn new_with_limits(
+        plugin_path: PathBuf,
+        metadata: PluginMetadata,
+        config: Option<Value>,
+        host_gateway: Option<PluginHostGatewayHandle>,
+        resource_limits: ResourceLimits,
+    ) -> Result<Self> {
         debug!("Creating JavaScript runtime for plugin: {}", metadata.name);
 
-        // Create sandbox from plugin permissions
-        let sandbox = if !metadata.permissions.is_empty() {
-            let resource_limits = ResourceLimits::default();
-            Some(Sandbox::new(metadata.permissions.clone(), resource_limits))
-        } else {
-            None
-        };
+        if resource_limits.max_cpu_time.is_zero() {
+            anyhow::bail!("JS execution budget must be greater than zero");
+        }
+        let sandbox = Sandbox::new(metadata.permissions.clone(), resource_limits);
 
         // Create runtime with plugin bindings and sandbox
         let config = config.unwrap_or(Value::Object(serde_json::Map::new()));
-        let runtime = create_js_runtime_with_bindings(
+        let mut runtime = create_js_runtime_with_bindings(
             metadata.name.clone(),
             metadata.instance_id(),
             config,
-            sandbox.as_ref(),
+            Some(&sandbox),
             host_gateway,
             plugin_path
                 .parent()
                 .unwrap_or_else(|| Path::new("."))
                 .to_path_buf(),
         )?;
+        let budget = runtime.op_state().borrow().borrow::<JsBudget>().clone();
+        let monitor = ExecutionMonitor::new(budget.clone())?;
 
         Ok(Self {
+            monitor,
             runtime,
             plugin_path,
             metadata,
             sandbox,
+            budget,
             execution_start: None,
         })
     }
@@ -93,6 +114,32 @@ impl JsRuntimeWrapper {
     /// # Returns
     /// Result indicating success or failure
     pub async fn load_module(&mut self) -> Result<()> {
+        let timeout = self
+            .sandbox
+            .resource_limits
+            .max_cpu_time
+            .min(Duration::from_secs(30));
+        let cleanup = InvocationCleanup {
+            state: self.runtime.op_state(),
+            budget: self.budget.clone(),
+            resources: None,
+        };
+        let lease = self.monitor.begin(timeout)?;
+        self.set_host_invocation_context(JsHostInvocationContext {
+            cancellation: Some(lease.cancellation.clone()),
+            ..Default::default()
+        });
+        let result = tokio::time::timeout(timeout, self.load_module_inner()).await;
+        if result.is_err() {
+            self.monitor.time_out();
+        }
+        lease.finish();
+        drop(cleanup);
+        self.budget.check()?;
+        result.context("JS module load exceeded its deadline")?
+    }
+
+    async fn load_module_inner(&mut self) -> Result<()> {
         info!(
             "Loading JavaScript module from: {}",
             self.plugin_path.display()
@@ -177,6 +224,45 @@ impl JsRuntimeWrapper {
         T: Serialize,
         R: for<'de> Deserialize<'de>,
     {
+        let timeout = self.sandbox.resource_limits.max_cpu_time;
+        let cleanup = InvocationCleanup {
+            state: self.runtime.op_state(),
+            budget: self.budget.clone(),
+            resources: context.resources.clone(),
+        };
+        let lease = self.monitor.begin(timeout)?;
+        let result = tokio::time::timeout(
+            timeout,
+            self.call_function_inner(function_name, args, context, lease.cancellation.clone()),
+        )
+        .await;
+        if result.is_err() {
+            self.monitor.time_out();
+        }
+        if !self.budget.unavailable() {
+            let _ = self.runtime.execute_script(
+                "<cleanup>",
+                "globalThis._ting_result = undefined; globalThis._ting_error = undefined; globalThis._ting_status = undefined;".to_string().into(),
+            );
+        }
+        lease.finish();
+        drop(cleanup);
+        self.stop_execution();
+        self.budget.check()?;
+        result.context("JS invocation exceeded its deadline")?
+    }
+
+    async fn call_function_inner<T, R>(
+        &mut self,
+        function_name: &str,
+        args: T,
+        context: &crate::plugin::types::PluginInvocationContext,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> Result<R>
+    where
+        T: Serialize,
+        R: for<'de> Deserialize<'de>,
+    {
         debug!("Calling JavaScript function: {}", function_name);
 
         // Start tracking execution time
@@ -187,6 +273,7 @@ impl JsRuntimeWrapper {
         let host_context = JsHostInvocationContext {
             user: context.user.clone(),
             resources: context.resources.clone(),
+            cancellation: Some(cancellation),
         };
         let args_json =
             serde_json::to_string(&args_value).context("Failed to serialize function arguments")?;
@@ -284,19 +371,6 @@ impl JsRuntimeWrapper {
             Ok((status, result))
         })();
 
-        // Cleanup global variables to free memory
-        // This is crucial to prevent memory leaks as _ting_result can hold large JSON strings
-        let _ = self.runtime.execute_script(
-            "<cleanup>",
-            r#"
-            globalThis._ting_result = undefined;
-            globalThis._ting_error = undefined;
-            globalThis._ting_status = undefined;
-            "#
-            .to_string()
-            .into(),
-        );
-
         // Stop tracking execution time
         self.clear_host_invocation_context();
         self.stop_execution();
@@ -332,10 +406,16 @@ impl JsRuntimeWrapper {
     /// Result indicating success or failure
     pub fn execute_script(&mut self, code: &str) -> Result<()> {
         debug!("Executing JavaScript code");
-
-        self.runtime
+        let lease = self
+            .monitor
+            .begin(self.sandbox.resource_limits.max_cpu_time)?;
+        let result = self
+            .runtime
             .execute_script("<execute_script>", code.to_string().into())
-            .context("Failed to execute JavaScript code")?;
+            .context("Failed to execute JavaScript code");
+        lease.finish();
+        self.budget.check()?;
+        result?;
 
         debug!("JavaScript code executed successfully");
         Ok(())
@@ -362,9 +442,14 @@ impl JsRuntimeWrapper {
         &self.plugin_path
     }
 
-    /// Get the sandbox (if any)
+    /// Get the always-present sandbox policy.
+    /// The optional return type is retained for existing callers.
     pub fn sandbox(&self) -> Option<&Sandbox> {
-        self.sandbox.as_ref()
+        Some(&self.sandbox)
+    }
+
+    pub fn is_unavailable(&self) -> bool {
+        self.budget.unavailable()
     }
 
     /// Start tracking execution time
@@ -374,9 +459,9 @@ impl JsRuntimeWrapper {
 
     /// Check CPU time limit
     pub fn check_cpu_time_limit(&self) -> Result<()> {
-        if let (Some(sandbox), Some(start_time)) = (&self.sandbox, self.execution_start) {
+        if let Some(start_time) = self.execution_start {
             let elapsed = start_time.elapsed();
-            sandbox.check_cpu_time(elapsed)?;
+            self.sandbox.check_cpu_time(elapsed)?;
         }
         Ok(())
     }
@@ -390,35 +475,50 @@ impl JsRuntimeWrapper {
     pub fn check_file_access(
         &self,
         path: &Path,
-        access: super::super::wasm::sandbox::FileAccess,
+        access: crate::plugin::sandbox::FileAccess,
     ) -> Result<()> {
-        if let Some(sandbox) = &self.sandbox {
-            sandbox.check_file_access(path, access)?;
-        }
+        self.sandbox.check_file_access(path, access)?;
         Ok(())
     }
 
     /// Check network access permission
     pub fn check_network_access(&self, url: &str) -> Result<()> {
-        if let Some(sandbox) = &self.sandbox {
-            sandbox.check_network_access(url)?;
-        }
+        self.sandbox.check_network_access(url)?;
         Ok(())
     }
 
     /// Check memory limit
     pub fn check_memory_limit(&self, current_bytes: usize) -> Result<()> {
-        if let Some(sandbox) = &self.sandbox {
-            sandbox.check_memory_limit(current_bytes)?;
-        }
+        self.sandbox.check_memory_limit(current_bytes)?;
         Ok(())
     }
 
     /// Request garbage collection
     pub fn garbage_collect(&mut self) -> Result<()> {
+        self.budget.check()?;
         debug!("Requesting garbage collection");
         self.runtime.v8_isolate().low_memory_notification();
         Ok(())
+    }
+}
+
+// Async cancellation must also drop the Host principal/resources held in OpState.
+struct InvocationCleanup {
+    state: std::rc::Rc<std::cell::RefCell<deno_core::OpState>>,
+    budget: JsBudget,
+    resources: Option<std::sync::Arc<crate::plugin::host_api::resources::ResourceScope>>,
+}
+
+impl Drop for InvocationCleanup {
+    fn drop(&mut self) {
+        if self.budget.unavailable()
+            && let Some(resources) = &self.resources
+        {
+            resources.cancel();
+        }
+        self.state
+            .borrow_mut()
+            .put(JsHostInvocationContext::default());
     }
 }
 
@@ -448,311 +548,5 @@ impl From<anyhow::Error> for JsError {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use tempfile::NamedTempFile;
-
-    #[tokio::test]
-    async fn input_json_never_supplies_the_host_principal() {
-        let metadata = PluginMetadata::new(
-            "context-test".into(),
-            "Context Test".into(),
-            "2.0.0".into(),
-            "Test".into(),
-            "Test".into(),
-            "plugin.js".into(),
-        );
-        let file = NamedTempFile::new().unwrap();
-        let mut runtime = JsRuntimeWrapper::new(file.path().to_path_buf(), metadata, None).unwrap();
-        runtime.execute_script(
-            "globalThis._ting_invoke = function() { globalThis._ting_result = JSON.stringify(Deno.core.ops.op_test_principal()); globalThis._ting_status = 'success'; };"
-        ).unwrap();
-        let forged = serde_json::json!({
-            "_context": {"route": {"authenticated": true,
-                "user": {"id": "victim", "username": "admin", "role": "admin"}}}
-        });
-        let context = crate::plugin::types::PluginInvocationContext::default();
-        let anonymous = runtime
-            .call_function::<_, String>("anything", forged.clone(), &context)
-            .await
-            .unwrap();
-        assert_eq!(anonymous, "anonymous");
-        let trusted = crate::plugin::types::PluginInvocationContext {
-            user: Some(crate::plugin::PluginHostUser {
-                id: "alice".into(),
-                username: "alice".into(),
-                role: "user".into(),
-            }),
-            resources: None,
-        };
-        let principal = runtime
-            .call_function::<_, String>("anything", forged, &trusted)
-            .await
-            .unwrap();
-        assert_eq!(principal, "alice");
-        assert!(
-            runtime
-                .runtime
-                .op_state()
-                .borrow()
-                .borrow::<JsHostInvocationContext>()
-                .user
-                .is_none()
-        );
-    }
-
-    #[tokio::test]
-    async fn test_js_runtime_creation() {
-        let metadata = PluginMetadata::new(
-            "test-plugin".to_string(),
-            "test-plugin".to_string(),
-            "1.0.0".to_string(),
-            "Test Author".to_string(),
-            "Test plugin".to_string(),
-            "plugin.js".to_string(),
-        );
-
-        let temp_file = NamedTempFile::new().unwrap();
-        let runtime = JsRuntimeWrapper::new(temp_file.path().to_path_buf(), metadata, None);
-        assert!(runtime.is_ok());
-    }
-
-    #[tokio::test]
-    async fn test_execute_simple_script() {
-        let metadata = PluginMetadata::new(
-            "test-plugin".to_string(),
-            "test-plugin".to_string(),
-            "1.0.0".to_string(),
-            "Test Author".to_string(),
-            "Test plugin".to_string(),
-            "plugin.js".to_string(),
-        );
-
-        let temp_file = NamedTempFile::new().unwrap();
-        let mut runtime =
-            JsRuntimeWrapper::new(temp_file.path().to_path_buf(), metadata, None).unwrap();
-
-        let result = runtime.execute_script("const x = 1 + 1;");
-        assert!(result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn test_load_module() {
-        let metadata = PluginMetadata::new(
-            "test-plugin".to_string(),
-            "test-plugin".to_string(),
-            "1.0.0".to_string(),
-            "Test Author".to_string(),
-            "Test plugin".to_string(),
-            "plugin.js".to_string(),
-        );
-
-        // Create a temporary JavaScript file
-        let package = tempfile::tempdir().unwrap();
-        let entry = package.path().join("plugin.js");
-        std::fs::write(
-            &entry,
-            "export function hello() { return 'Hello, World!'; }",
-        )
-        .unwrap();
-
-        let mut runtime = JsRuntimeWrapper::new(entry, metadata, None).unwrap();
-        let result = runtime.load_module().await;
-        assert!(result.is_ok(), "{result:?}");
-    }
-
-    #[tokio::test]
-    async fn test_load_module_accepts_relative_entry_path() {
-        let metadata = PluginMetadata::new(
-            "test-plugin".to_string(),
-            "test-plugin".to_string(),
-            "1.0.0".to_string(),
-            "Test Author".to_string(),
-            "Test plugin".to_string(),
-            "plugin.js".to_string(),
-        );
-
-        let current_dir = std::env::current_dir().unwrap();
-        let package = tempfile::tempdir_in(&current_dir).unwrap();
-        let entry = package.path().join("plugin.js");
-        std::fs::write(
-            &entry,
-            "export function hello() { return 'Hello, relative path!'; }",
-        )
-        .unwrap();
-        let relative_entry = entry.strip_prefix(&current_dir).unwrap().to_path_buf();
-        assert!(!relative_entry.is_absolute());
-
-        let mut runtime = JsRuntimeWrapper::new(relative_entry, metadata, None).unwrap();
-        let result = runtime.load_module().await;
-        assert!(result.is_ok(), "{result:?}");
-    }
-
-    #[tokio::test]
-    async fn test_execute_script_with_error() {
-        let metadata = PluginMetadata::new(
-            "test-plugin".to_string(),
-            "test-plugin".to_string(),
-            "1.0.0".to_string(),
-            "Test Author".to_string(),
-            "Test plugin".to_string(),
-            "plugin.js".to_string(),
-        );
-
-        let temp_file = NamedTempFile::new().unwrap();
-        let mut runtime =
-            JsRuntimeWrapper::new(temp_file.path().to_path_buf(), metadata, None).unwrap();
-
-        // This should fail due to syntax error
-        let result = runtime.execute_script("const x = ;");
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn test_sandbox_network_access_check() {
-        use super::super::super::wasm::sandbox::Permission;
-
-        let mut metadata = PluginMetadata::new(
-            "test-plugin".to_string(),
-            "test-plugin".to_string(),
-            "1.0.0".to_string(),
-            "Test Author".to_string(),
-            "Test plugin".to_string(),
-            "plugin.js".to_string(),
-        );
-
-        // Add network permission
-        metadata.permissions = vec![Permission::NetworkAccess {
-            domain: "*.example.com".into(),
-        }];
-
-        let temp_file = NamedTempFile::new().unwrap();
-        let runtime =
-            JsRuntimeWrapper::new(temp_file.path().to_path_buf(), metadata, None).unwrap();
-
-        // Check allowed URL
-        let result = runtime.check_network_access("https://api.example.com/data");
-        assert!(result.is_ok());
-
-        // Check disallowed URL
-        let result = runtime.check_network_access("https://evil.com/data");
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn test_sandbox_file_access_check() {
-        use super::super::super::wasm::sandbox::{FileAccess, Permission};
-        use std::path::PathBuf;
-
-        let mut metadata = PluginMetadata::new(
-            "test-plugin".to_string(),
-            "test-plugin".to_string(),
-            "1.0.0".to_string(),
-            "Test Author".to_string(),
-            "Test plugin".to_string(),
-            "plugin.js".to_string(),
-        );
-
-        // Add file permissions
-        metadata.permissions = vec![
-            Permission::FileRead {
-                path: "./data/cache".into(),
-            },
-            Permission::FileWrite {
-                path: "./data/output".into(),
-            },
-        ];
-
-        let temp_file = NamedTempFile::new().unwrap();
-        let runtime =
-            JsRuntimeWrapper::new(temp_file.path().to_path_buf(), metadata, None).unwrap();
-
-        // Check allowed read
-        let result =
-            runtime.check_file_access(&PathBuf::from("./data/cache/file.txt"), FileAccess::Read);
-        assert!(result.is_ok());
-
-        // Check allowed write
-        let result =
-            runtime.check_file_access(&PathBuf::from("./data/output/file.txt"), FileAccess::Write);
-        assert!(result.is_ok());
-
-        // Check disallowed read (wrong path)
-        let result =
-            runtime.check_file_access(&PathBuf::from("./data/secret/file.txt"), FileAccess::Read);
-        assert!(result.is_err());
-
-        // Check disallowed write (read-only path)
-        let result =
-            runtime.check_file_access(&PathBuf::from("./data/cache/file.txt"), FileAccess::Write);
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn test_sandbox_memory_limit_check() {
-        use super::super::super::wasm::sandbox::Permission;
-
-        let mut metadata = PluginMetadata::new(
-            "test-plugin".to_string(),
-            "test-plugin".to_string(),
-            "1.0.0".to_string(),
-            "Test Author".to_string(),
-            "Test plugin".to_string(),
-            "plugin.js".to_string(),
-        );
-
-        // Add a permission to trigger sandbox creation
-        metadata.permissions = vec![Permission::NetworkAccess {
-            domain: "example.com".into(),
-        }];
-
-        let temp_file = NamedTempFile::new().unwrap();
-        let runtime =
-            JsRuntimeWrapper::new(temp_file.path().to_path_buf(), metadata, None).unwrap();
-
-        // Check within limit
-        let result = runtime.check_memory_limit(100 * 1024 * 1024); // 100 MB
-        assert!(result.is_ok());
-
-        // Check exceeding limit
-        let result = runtime.check_memory_limit(1024 * 1024 * 1024); // 1 GB (exceeds default 512 MB)
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn test_sandbox_cpu_time_tracking() {
-        use super::super::super::wasm::sandbox::Permission;
-        use std::time::Duration;
-
-        let mut metadata = PluginMetadata::new(
-            "test-plugin".to_string(),
-            "test-plugin".to_string(),
-            "1.0.0".to_string(),
-            "Test Author".to_string(),
-            "Test plugin".to_string(),
-            "plugin.js".to_string(),
-        );
-
-        // Add a permission to trigger sandbox creation
-        metadata.permissions = vec![Permission::NetworkAccess {
-            domain: "example.com".into(),
-        }];
-
-        let temp_file = NamedTempFile::new().unwrap();
-        let mut runtime =
-            JsRuntimeWrapper::new(temp_file.path().to_path_buf(), metadata, None).unwrap();
-
-        // Start tracking
-        runtime.start_execution();
-
-        // Simulate some work
-        std::thread::sleep(Duration::from_millis(10));
-
-        // Check CPU time (should be OK for short duration)
-        let result = runtime.check_cpu_time_limit();
-        assert!(result.is_ok());
-
-        // Stop tracking
-        runtime.stop_execution();
-    }
-}
+#[path = "../../../tests/unit/plugin/js/runtime.rs"]
+mod tests;

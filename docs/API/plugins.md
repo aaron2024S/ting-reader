@@ -89,6 +89,7 @@
 | --- | --- | --- |
 | `file` | 文件 | `trpack build` 生成并签名的 `.tr` 包 |
 | `accept_unverified` | boolean 文本 | 默认 false；确认安装未受信任发布者的已签名包时设为 true |
+| `confirmed_package_sha256` | string | 确认时提供 `428` 响应中实际插件包的 SHA-256，与 `accept_unverified=true` 一起提交 |
 
 上传上限 50 MiB。宿主校验清单、最低版本、能力、入口、包结构、文件哈希和签名。最多 10,000 个条目，单文件展开后最大 128 MiB，总展开大小最大 256 MiB。JavaScript 依赖须在开发机完成构建，并作为相对模块纳入包。
 
@@ -111,11 +112,18 @@
   "plugin_name": "Example Metadata",
   "plugin_version": "1.0.0",
   "publisher": "未知发布者",
-  "warning": "服务端提供的安装确认提示"
+  "warning": "服务端提供的安装确认提示",
+  "runtime": "javascript",
+  "permissions": [{ "type": "network_access", "domain": "example.com" }],
+  "capabilities": [],
+  "package_sha256": "64位小写十六进制SHA-256",
+  "package_changed": false
 }
 ```
 
-客户端展示服务端提供的提示，确认后上传同一个包并设置 `accept_unverified=true`。未签名或签名无效的包会被拒绝，确认标志不能绕过签名校验。升级保持同一发布者签名身份；发布者身份不同的包不能覆盖已安装实例。
+客户端展示包内实际请求的 `permissions` 及域名、路径、目标插件等范围，`capabilities` 作为功能摘要；无权限时明确显示未申请宿主权限。原生插件需说明声明权限无法约束其全部系统操作。确认后上传同一个包并同时提交 `accept_unverified=true` 和 `confirmed_package_sha256`。单独提交确认布尔值不能跳过确认。
+
+重新提交的包摘要不一致或缺失时，返回当前包的 `428` 响应及 `package_changed: true`，客户端重新展示权限并确认。未签名或签名无效的包会被拒绝，确认不能绕过签名校验。升级保持同一发布者签名身份；发布者身份不同的包不能覆盖已安装实例。
 
 ### DELETE /api/v1/plugins/:id
 
@@ -201,7 +209,7 @@ Native 包的 `download_url` 可以是平台映射：
 { "plugin_id": "example-metadata", "accept_unverified": false }
 ```
 
-成功返回 `201 Created`，结构与上传安装相同。发布者确认使用相同的 `428` 响应，确认后重新提交 `accept_unverified: true`。
+成功返回 `201 Created`，结构与上传安装相同。发布者确认使用相同的 `428` 响应，确认后重新提交 `accept_unverified: true` 和响应中的 `confirmed_package_sha256`。商店重新下载后校验实际包摘要；包变化则重新要求确认。
 
 仅下载 HTTPS 地址，最多跟随 5 次重定向，每跳检查地址；单包最大 50 MiB。下载结束后执行与上传相同的安装校验。
 

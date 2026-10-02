@@ -1,9 +1,9 @@
-use super::AppState;
 use crate::api::models::{
     CreateLibraryRequest, FolderInfo, LibraryResponse, LibraryScanRequest, LibraryScanResponse,
     StorageRootInfo, TestWebDavRequest, TestWebDavResponse, UpdateLibraryRequest,
 };
 use crate::api::require_admin;
+use crate::api::state::AppState;
 use crate::core::app::error::{Result, TingError};
 use crate::core::storage::local_paths::{
     discover_authorized_roots, ensure_path_inside_root, path_to_display_string,
@@ -860,36 +860,5 @@ pub async fn test_webdav_connection(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::normalize_rss_sync_config;
-    use serde_json::json;
-
-    #[test]
-    fn rss_config_keeps_only_scheduled_sync_settings() {
-        let normalized = normalize_rss_sync_config(json!({
-            "default_sources": ["scraper"],
-            "metadata_writing_enabled": true,
-            "scheduled_sync_enabled": true,
-            "scheduled_sync_interval": "weekly",
-        }))
-        .expect("scheduled sync settings should be retained");
-
-        assert_eq!(
-            normalized,
-            json!({
-                "scheduled_sync_enabled": true,
-                "scheduled_sync_interval": "weekly",
-            })
-        );
-    }
-
-    #[test]
-    fn rss_config_without_schedule_is_omitted() {
-        assert!(
-            normalize_rss_sync_config(json!({
-                "default_sources": ["scraper"],
-            }))
-            .is_none()
-        );
-    }
-}
+#[path = "../../../tests/unit/api/handlers/libraries.rs"]
+mod tests;

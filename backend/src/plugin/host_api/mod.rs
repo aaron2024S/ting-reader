@@ -26,7 +26,7 @@ use crate::db::repository::{
 };
 use crate::plugin::PluginCache;
 use crate::plugin::manager::PluginManager;
-use crate::plugin::wasm::sandbox::Permission;
+use crate::plugin::sandbox::Permission;
 use serde_json::Value;
 use std::sync::{Arc, RwLock, Weak};
 
@@ -644,4 +644,5 @@ fn plugin_task_priority(params: &Value) -> Priority {
 }
 
 #[cfg(test)]
+#[path = "../../../tests/unit/plugin/host_api.rs"]
 mod tests;

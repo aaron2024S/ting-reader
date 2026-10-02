@@ -50,6 +50,14 @@ impl JavaScriptPluginWrapper {
         loader: JavaScriptPluginLoader,
         host_gateway: Option<PluginHostGatewayHandle>,
     ) -> Result<Self> {
+        Self::new_with_limits(loader, host_gateway, Default::default())
+    }
+
+    pub(crate) fn new_with_limits(
+        loader: JavaScriptPluginLoader,
+        host_gateway: Option<PluginHostGatewayHandle>,
+        limits: crate::plugin::sandbox::ResourceLimits,
+    ) -> Result<Self> {
         let metadata = loader.metadata().clone();
         let plugin_id = format!("{}@{}", metadata.name, metadata.version);
         let plugin_dir = loader.plugin_dir().to_path_buf();
@@ -104,7 +112,7 @@ impl JavaScriptPluginWrapper {
 
                         // Create executor
                         let mut executor = match loader
-                            .create_executor_with_host_gateway(host_gateway_for_thread.clone())
+                            .create_executor_with_limits(host_gateway_for_thread.clone(), limits)
                         {
                             Ok(e) => e,
                             Err(e) => {
@@ -145,17 +153,21 @@ impl JavaScriptPluginWrapper {
                                     let config = context.config.clone();
                                     let data_dir = context.data_dir.clone();
 
-                                    let result =
-                                        executor.initialize(config, data_dir).await.map_err(|e| {
-                                            TingError::PluginExecutionError(e.to_string())
-                                        });
+                                    let result = executor
+                                        .initialize(config, data_dir)
+                                        .await
+                                        .map_err(js_execution_error);
 
+                                    if executor.is_unavailable() {
+                                        rx.close();
+                                        let _ = resp.send(result);
+                                        break;
+                                    }
                                     let _ = resp.send(result);
                                 }
                                 JsCommand::Shutdown { resp } => {
-                                    let result = executor.shutdown().map_err(|e| {
-                                        TingError::PluginExecutionError(e.to_string())
-                                    });
+                                    let result =
+                                        executor.shutdown().await.map_err(js_execution_error);
 
                                     let _ = resp.send(result);
                                     break;
@@ -171,10 +183,13 @@ impl JavaScriptPluginWrapper {
                                             &name, args, &context,
                                         )
                                         .await
-                                        .map_err(|e| {
-                                            TingError::PluginExecutionError(e.to_string())
-                                        });
+                                        .map_err(js_execution_error);
 
+                                    if executor.is_unavailable() {
+                                        rx.close();
+                                        let _ = resp.send(result);
+                                        break;
+                                    }
                                     let _ = resp.send(result);
                                 }
                                 JsCommand::GarbageCollect { resp } => {
@@ -267,6 +282,13 @@ impl JavaScriptPluginWrapper {
     }
 }
 
+fn js_execution_error(error: anyhow::Error) -> TingError {
+    match error.downcast::<TingError>() {
+        Ok(error) => error,
+        Err(error) => TingError::PluginExecutionError(error.to_string()),
+    }
+}
+
 #[async_trait::async_trait]
 impl Plugin for JavaScriptPluginWrapper {
     async fn invoke(
@@ -280,6 +302,10 @@ impl Plugin for JavaScriptPluginWrapper {
 
     fn metadata(&self) -> &PluginMetadata {
         &self.metadata
+    }
+
+    fn is_available(&self) -> bool {
+        !self.tx.is_closed()
     }
 
     async fn initialize(&self, context: &PluginContext) -> Result<()> {

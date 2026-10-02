@@ -1,4 +1,3 @@
-use super::AppState;
 use crate::api::models::{
     AdminStatisticsOverview, AdminStatisticsResponse, ApplicationTimeZoneResponse,
     BatchDeleteTasksRequest, BatchDeleteTasksResponse, BookActivityStatistics, CancelTaskResponse,
@@ -11,6 +10,7 @@ use crate::api::models::{
     UpdateConfigRequest, UpdateConfigResponse, UserActivityStatistics,
 };
 use crate::api::require_admin;
+use crate::api::state::AppState;
 use crate::auth::middleware::AuthUser;
 use crate::core::app::error::{Result, TingError};
 use crate::db::repository::{Repository, progress::LISTENING_EVENTS_RETENTION_DAYS};
@@ -1169,29 +1169,5 @@ pub async fn update_config(
 }
 
 #[cfg(test)]
-mod update_check_tests {
-    use super::build_update_check_request;
-
-    #[test]
-    fn update_request_forces_fresh_no_cache_fetch() {
-        let request = build_update_check_request(&reqwest::Client::new())
-            .build()
-            .expect("update request should build");
-
-        assert_eq!(request.url().query(), Some("fresh=1"));
-        assert_eq!(
-            request
-                .headers()
-                .get("Cache-Control")
-                .and_then(|value| value.to_str().ok()),
-            Some("no-cache")
-        );
-        assert_eq!(
-            request
-                .headers()
-                .get("Pragma")
-                .and_then(|value| value.to_str().ok()),
-            Some("no-cache")
-        );
-    }
-}
+#[path = "../../../../tests/unit/api/handlers/system.rs"]
+mod tests;

@@ -1,6 +1,6 @@
 //! Playback-start logging and notification dispatch.
 
-use crate::api::handlers::AppState;
+use crate::api::state::AppState;
 use crate::db::repository::Repository;
 use std::{
     collections::HashMap,

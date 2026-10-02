@@ -11,10 +11,12 @@ pub mod middleware;
 pub mod models;
 pub mod routes;
 pub mod server;
+pub mod state;
 pub mod utils;
 pub mod ws;
 
 pub use middleware::{TRACE_ID_HEADER, TraceId, trace_id_middleware};
 pub use models::{ErrorResponse, SearchQuery, SearchResponse};
 pub use server::ApiServer;
+pub use state::AppState;
 pub use utils::require_admin;

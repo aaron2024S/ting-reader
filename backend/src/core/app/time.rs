@@ -46,23 +46,3 @@ pub fn initial_time_zone_from_os() -> Option<String> {
         .filter_map(|candidate| parse_time_zone(&candidate).ok())
         .next()
 }
-
-#[cfg(test)]
-mod tests {
-    use super::{DEFAULT_TIME_ZONE, parse_time_zone};
-
-    #[test]
-    fn accepts_iana_time_zones() {
-        assert_eq!(parse_time_zone("Asia/Shanghai").unwrap(), "Asia/Shanghai");
-    }
-
-    #[test]
-    fn rejects_unknown_time_zones() {
-        assert!(parse_time_zone("Mars/Olympus").is_err());
-    }
-
-    #[test]
-    fn default_is_utc() {
-        assert_eq!(DEFAULT_TIME_ZONE, "UTC");
-    }
-}

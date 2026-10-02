@@ -3,8 +3,6 @@
 //! Provides configuration storage, validation, encryption, and hot reload for plugins.
 
 mod encryption;
-#[cfg(test)]
-mod tests;
 
 use super::types::PluginId;
 use crate::core::app::error::{Result, TingError};
@@ -677,3 +675,23 @@ fn merge_missing_defaults(config: &mut Value, defaults: &Value) {
         config.entry(key.clone()).or_insert_with(|| value.clone());
     }
 }
+
+/// Collect explicitly declared top-level defaults for plugin configuration.
+pub(crate) fn schema_defaults(schema: &Value) -> Value {
+    let defaults = schema
+        .get("properties")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+        .filter_map(|(key, property)| {
+            property
+                .get("default")
+                .map(|value| (key.clone(), value.clone()))
+        })
+        .collect::<serde_json::Map<_, _>>();
+    Value::Object(defaults)
+}
+
+#[cfg(test)]
+#[path = "../../../tests/unit/plugin/config.rs"]
+mod tests;

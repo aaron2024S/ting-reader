@@ -1,5 +1,5 @@
-use super::AppState;
 use crate::api::models::{BookResponse, ScrapeApplyRequest, ScrapeDiffRequest, ScrapeDiffResponse};
+use crate::api::state::AppState;
 use crate::core::app::error::{Result, TingError};
 use crate::core::books::nfo_manager::BookMetadata;
 use crate::db::models::ScraperConfig;

@@ -4,8 +4,6 @@
 //! their metadata, and dependency relationships.
 
 mod graph;
-#[cfg(test)]
-mod tests;
 
 use super::types::{Plugin, PluginId, PluginMetadata, PluginState, PluginStats};
 use crate::core::app::error::{Result, TingError};
@@ -276,3 +274,7 @@ impl PluginEntry {
         self.active_task_count() > 0
     }
 }
+
+#[cfg(test)]
+#[path = "../../../tests/unit/plugin/registry.rs"]
+mod tests;

@@ -5,7 +5,7 @@ mod hls_session;
 pub(crate) mod preload;
 mod strm;
 
-use crate::api::handlers::AppState;
+use crate::api::state::AppState;
 use crate::auth::middleware::AuthUser;
 use crate::core::app::error::{Result, TingError};
 use crate::core::security::signing::{

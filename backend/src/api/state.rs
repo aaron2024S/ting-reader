@@ -1,0 +1,75 @@
+//! Shared services and repositories used by the HTTP API and authentication.
+
+use crate::api::handlers::media::stream::{HlsSessionManager, preload::PreloadedChapter};
+use crate::api::ws::manager::WsSessionManager;
+use crate::auth::JwtKeyManager;
+use crate::cache::CacheManager;
+use crate::core::StorageService;
+use crate::core::app::config::Config;
+use crate::core::audio::AudioStreamer;
+use crate::core::books::merge_service::MergeService;
+use crate::core::books::nfo_manager::NfoManager;
+use crate::core::books::{BookService, ScraperService};
+use crate::core::library_scanner::watcher::LibraryWatcher;
+use crate::core::security::signing::PluginRouteRevocations;
+use crate::core::task_queue::TaskQueue;
+use crate::db::repository::{
+    BookRepository, ChapterRepository, FavoriteRepository, LibraryRepository,
+    NotificationWebhookRepository, PlaylistRepository, ProgressRepository, SeriesRepository,
+    SystemSettingsRepository, UserRepository, UserSettingsRepository,
+};
+use crate::plugin::config::PluginConfigManager;
+use crate::plugin::manager::PluginManager;
+use crate::plugin::{PluginCache, PluginHostGateway};
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::{Mutex, RwLock};
+use tokio::task::AbortHandle;
+
+/// Shared application state for handlers
+#[derive(Clone)]
+pub struct AppState {
+    // Persistent data access.
+    pub book_repo: Arc<BookRepository>,
+    pub user_repo: Arc<UserRepository>,
+    pub progress_repo: Arc<ProgressRepository>,
+    pub favorite_repo: Arc<FavoriteRepository>,
+    pub settings_repo: Arc<UserSettingsRepository>,
+    pub system_settings_repo: Arc<SystemSettingsRepository>,
+    pub library_repo: Arc<LibraryRepository>,
+    pub chapter_repo: Arc<ChapterRepository>,
+    pub series_repo: Arc<SeriesRepository>,
+    pub playlist_repo: Arc<PlaylistRepository>,
+    pub notification_repo: Arc<NotificationWebhookRepository>,
+
+    // Application services.
+    pub book_service: Arc<BookService>,
+    pub scraper_service: Arc<ScraperService>,
+    pub cache_manager: Arc<CacheManager>,
+    pub storage_service: Arc<StorageService>,
+    pub audio_streamer: Arc<AudioStreamer>,
+    pub merge_service: Arc<MergeService>,
+    pub nfo_manager: Arc<NfoManager>,
+
+    // Plugin execution, configuration and access policy.
+    pub plugin_manager: Arc<PluginManager>,
+    pub plugin_cache: Arc<PluginCache>,
+    pub plugin_host_gateway: Arc<PluginHostGateway>,
+    pub plugin_route_revocations: Arc<PluginRouteRevocations>,
+    pub config_manager: Arc<PluginConfigManager>,
+
+    // Background work and streaming sessions.
+    pub task_queue: Arc<TaskQueue>,
+    pub preload_cache: Arc<RwLock<HashMap<String, PreloadedChapter>>>,
+    pub active_preload_tasks: Arc<Mutex<HashMap<String, (String, AbortHandle)>>>,
+    pub library_watcher: Arc<LibraryWatcher>,
+    pub ws_manager: Arc<WsSessionManager>,
+    pub hls_session_manager: Arc<HlsSessionManager>,
+
+    // Server configuration and authentication.
+    pub config: Arc<RwLock<Config>>,
+    /// Fallback secret for instances without a key manager.
+    pub jwt_secret: Arc<String>,
+    pub jwt_key_manager: Option<Arc<JwtKeyManager>>,
+    pub encryption_key: Arc<[u8; 32]>,
+}

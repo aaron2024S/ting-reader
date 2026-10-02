@@ -1,5 +1,6 @@
 use crate::plugin::types::schema::validate_payload;
 use serde_json::Value;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::PluginManager;
@@ -150,6 +151,18 @@ impl PluginManager {
 
         let started_at = Instant::now();
         let result = instance.invoke(method, params, context).await;
+
+        if result.is_err() && !instance.is_available() {
+            let mut registry = self.registry.write().await;
+            if let Some(entry) = registry.get_mut(id) {
+                // A reload may have installed a different generation in flight.
+                if Arc::ptr_eq(&entry.instance, &instance) {
+                    entry.set_state(PluginState::Failed);
+                    entry.load_error = result.as_ref().err().map(ToString::to_string);
+                    entry.cancel_resource_scopes();
+                }
+            }
+        }
 
         self.record_plugin_call(
             id,
@@ -578,208 +591,5 @@ fn validate_capability_output(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::plugin::manager::{FailedPlugin, PluginConfig, PluginEntry};
-    use crate::plugin::types::{Plugin, PluginMetadata};
-    use std::sync::Arc;
-
-    #[test]
-    fn metadata_search_requires_the_formal_request_and_result() {
-        let capability: PluginCapability = serde_json::from_value(serde_json::json!({
-            "kind": "metadata_provider", "id": "metadata.search", "operations": ["search"],
-            "auto_scrape": false, "search_fields": [{
-                "key": "title", "label": {"en": "Title"}, "required": false, "type": "text"
-            }], "result_fields": [{"key": "title", "label": {"en": "Title"}}]
-        }))
-        .unwrap();
-        let request = serde_json::json!({
-            "title": "Book", "author": null, "narrator": null,
-            "page": 1, "page_size": 20, "filters": {},
-            "chapter_candidates": [], "context": null
-        });
-        assert!(validate_capability_input(&capability, "search", &request).is_ok());
-        assert!(
-            validate_capability_input(
-                &capability,
-                "search",
-                &serde_json::json!({
-                    "query": "Book", "page": 1, "page_size": 20, "filters": {}
-                })
-            )
-            .is_err()
-        );
-        let mut output = serde_json::to_value(ting_plugin_contract::scraper::SearchPage {
-            items: vec![ting_plugin_contract::scraper::ScraperResult {
-                id: None,
-                source_url: None,
-                title: "Book".into(),
-                author: None,
-                narrator: None,
-                cover_url: None,
-                intro: None,
-                subtitle: None,
-                publisher: None,
-                language: None,
-                genre: None,
-                published_year: None,
-                published_date: None,
-                isbn: None,
-                asin: None,
-                explicit: None,
-                abridged: None,
-                tags: Vec::new(),
-                duration: None,
-                score: None,
-                chapter_title_template: None,
-                chapter_titles: Vec::new(),
-            }],
-            page: 1,
-            page_size: 20,
-            total: None,
-            has_more: None,
-        })
-        .unwrap();
-        assert!(validate_capability_output(&capability, "search", &request, &output).is_ok());
-        output["items"][0]["artist"] = serde_json::json!("old alias");
-        assert!(validate_capability_output(&capability, "search", &request, &output).is_err());
-    }
-
-    #[test]
-    fn format_call_validates_declared_operation_request_and_response() {
-        let capability: PluginCapability = serde_json::from_value(serde_json::json!({
-            "kind": "format_handler",
-            "id": "special.audio",
-            "extensions": ["special"],
-            "operations": ["probe", "get_metadata_read_size", "extract_metadata"]
-        }))
-        .unwrap();
-        let input = serde_json::json!({
-            "input": "host:opaque",
-            "extension_hint": "special",
-            "mime_hint": null,
-            "prefix_bytes": 4096
-        });
-        assert!(validate_capability_input(&capability, "probe", &input).is_ok());
-        let more = serde_json::json!({"kind": "need_more", "total_bytes": 8192});
-        assert!(validate_capability_output(&capability, "probe", &input, &more).is_ok());
-        let repeated = serde_json::json!({"kind": "need_more", "total_bytes": 4096});
-        assert!(validate_capability_output(&capability, "probe", &input, &repeated).is_err());
-        assert!(validate_capability_input(
-            &capability,
-            "probe",
-            &serde_json::json!({"input": "host:opaque", "prefix_bytes": 4096, "file_path": "C:/secret"})
-        )
-        .is_err());
-        assert!(validate_capability_input(&capability, "open_decrypt", &input).is_err());
-    }
-
-    #[tokio::test]
-    async fn record_plugin_call_updates_listed_stats() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let manager = PluginManager::new(PluginConfig {
-            plugin_dir: temp_dir.path().join("plugins"),
-            enable_hot_reload: false,
-            max_memory_per_plugin: 128 * 1024 * 1024,
-            max_execution_time: Duration::from_secs(30),
-        })
-        .unwrap();
-
-        let metadata = PluginMetadata::new(
-            "stats-plugin".to_string(),
-            "Stats Plugin".to_string(),
-            "1.0.0".to_string(),
-            "Ting Reader".to_string(),
-            "Stats plugin".to_string(),
-            "plugin.js".to_string(),
-        );
-        let plugin_id = metadata.instance_id();
-        let instance =
-            Arc::new(FailedPlugin::new(metadata.clone(), "unused".to_string())) as Arc<dyn Plugin>;
-
-        manager
-            .registry
-            .write()
-            .await
-            .insert(plugin_id.clone(), PluginEntry::new(metadata, instance));
-
-        manager
-            .record_plugin_call(
-                &plugin_id,
-                "search",
-                Duration::from_millis(25),
-                None,
-                PluginLogLevel::Info,
-            )
-            .await;
-        manager
-            .record_plugin_call(
-                &plugin_id,
-                "search",
-                Duration::from_millis(5),
-                Some(&TingError::PluginExecutionError("boom".to_string())),
-                PluginLogLevel::Info,
-            )
-            .await;
-
-        let plugins = manager.list_plugins().await;
-        let stats_plugin = plugins
-            .iter()
-            .find(|plugin| plugin.id == plugin_id)
-            .expect("stats plugin should be listed");
-
-        assert_eq!(stats_plugin.total_calls, 2);
-        assert_eq!(stats_plugin.successful_calls, 1);
-        assert_eq!(stats_plugin.failed_calls, 1);
-    }
-
-    #[tokio::test]
-    async fn invoke_plugin_records_failure_for_unsupported_runtime() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let manager = PluginManager::new(PluginConfig {
-            plugin_dir: temp_dir.path().join("plugins"),
-            enable_hot_reload: false,
-            max_memory_per_plugin: 128 * 1024 * 1024,
-            max_execution_time: Duration::from_secs(30),
-        })
-        .unwrap();
-
-        let metadata = PluginMetadata::new(
-            "unsupported-plugin".to_string(),
-            "Unsupported Plugin".to_string(),
-            "1.0.0".to_string(),
-            "Ting Reader".to_string(),
-            "Unsupported plugin".to_string(),
-            "plugin.js".to_string(),
-        );
-        let plugin_id = metadata.instance_id();
-        let instance =
-            Arc::new(FailedPlugin::new(metadata.clone(), "unused".to_string())) as Arc<dyn Plugin>;
-
-        manager
-            .registry
-            .write()
-            .await
-            .insert(plugin_id.clone(), PluginEntry::new(metadata, instance));
-
-        let result = manager
-            .invoke_plugin(
-                &plugin_id,
-                "anything",
-                serde_json::json!({}),
-                &PluginInvocationContext::default(),
-            )
-            .await;
-
-        assert!(result.is_err());
-
-        let plugins = manager.list_plugins().await;
-        let plugin = plugins
-            .iter()
-            .find(|plugin| plugin.id == plugin_id)
-            .expect("plugin should be listed");
-
-        assert_eq!(plugin.total_calls, 1);
-        assert_eq!(plugin.failed_calls, 1);
-    }
-}
+#[path = "../../../tests/unit/plugin/manager/dispatch.rs"]
+mod tests;

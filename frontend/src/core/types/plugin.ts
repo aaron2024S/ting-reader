@@ -14,6 +14,7 @@ export type PluginPermission =
   | { type: "network_access"; domain: string }
   | { type: "file_read" | "file_write"; path: string }
   | { type: "event_subscribe"; event: string }
+  | { type: "capability_invoke"; plugin_id: string; capability_id: string }
   | {
       type:
         | "books_read"
@@ -35,8 +36,31 @@ export type PluginPermission =
         | "favorites_write"
         | "user_settings_read"
         | "user_settings_write"
+        | "config_read"
+        | "storage_read"
+        | "storage_write"
+        | "task_read"
+        | "task_manage"
+        | "task_progress"
+        | "html_parse"
+        | "plugin_route_revoke"
         | "event_publish";
     };
+
+export interface UnverifiedPluginInstallConfirmation {
+  requires_confirmation: boolean;
+  verification_status: string;
+  plugin_id: string;
+  plugin_name: string;
+  plugin_version: string;
+  publisher: string;
+  warning: string;
+  runtime: string | null;
+  permissions: PluginPermission[];
+  capabilities: PluginCapability[];
+  package_sha256: string;
+  package_changed: boolean;
+}
 
 export type PluginCapability =
   | { id: string; kind: "metadata_provider"; operations: string[]; auto_scrape: boolean; aggregate_auto_scrape: boolean; search_fields: ScraperSearchField[]; filters_schema?: Record<string, unknown>; result_fields: Array<{ key: string; label: LocalizedText }> }

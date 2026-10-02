@@ -166,6 +166,9 @@ pub struct InstallStorePluginRequest {
     /// Whether the user has accepted the risk warning for unsigned/untrusted packages.
     #[serde(default)]
     pub accept_unverified: bool,
+    /// Digest of the actual package whose permissions the user reviewed.
+    #[serde(default)]
+    pub confirmed_package_sha256: Option<String>,
 }
 
 /// Response for plugin installation
@@ -187,6 +190,11 @@ pub struct UnverifiedPluginInstallResponse {
     pub plugin_version: String,
     pub publisher: String,
     pub warning: String,
+    pub runtime: Option<String>,
+    pub permissions: Vec<Permission>,
+    pub capabilities: Vec<PluginCapability>,
+    pub package_sha256: String,
+    pub package_changed: bool,
 }
 
 /// Response for plugin reload

@@ -1,6 +1,6 @@
 //! Cover image proxy handler
 
-use crate::api::handlers::AppState;
+use crate::api::state::AppState;
 use crate::core::app::error::{Result, TingError};
 use crate::db::repository::Repository;
 use axum::{

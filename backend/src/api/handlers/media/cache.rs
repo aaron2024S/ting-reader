@@ -1,10 +1,10 @@
 //! Chapter cache management handlers (admin-only)
 
-use crate::api::handlers::AppState;
 use crate::api::models::{
     CacheInfoResponse, CacheListResponse, CacheOperationResponse, ClearCacheResponse,
 };
 use crate::api::require_admin;
+use crate::api::state::AppState;
 use crate::core::app::error::{Result, TingError};
 use crate::db::repository::Repository;
 use axum::{

@@ -1,3 +1,5 @@
+//! HTTP endpoint modules. Shared application state is defined in `api::state`.
+
 pub mod books;
 pub mod libraries;
 pub mod media;
@@ -24,67 +26,5 @@ pub use system::*;
 pub use tools::*;
 pub use users::*;
 
-use crate::api::handlers::media::stream::HlsSessionManager;
-use crate::api::ws::manager::WsSessionManager;
-use crate::cache::CacheManager;
-use crate::core::StorageService;
-use crate::core::app::config::Config;
-use crate::core::audio::AudioStreamer;
-use crate::core::books::merge_service::MergeService;
-use crate::core::books::nfo_manager::NfoManager;
-use crate::core::books::{BookService, ScraperService};
-use crate::core::library_scanner::watcher::LibraryWatcher;
-use crate::core::task_queue::TaskQueue;
-use crate::db::repository::{
-    BookRepository, ChapterRepository, FavoriteRepository, LibraryRepository,
-    NotificationWebhookRepository, PlaylistRepository, ProgressRepository, SeriesRepository,
-    SystemSettingsRepository, UserRepository, UserSettingsRepository,
-};
-use crate::plugin::config::PluginConfigManager;
-use crate::plugin::manager::PluginManager;
-use crate::plugin::{PluginCache, PluginHostGateway};
-use std::sync::Arc;
-
-/// Shared application state for handlers
-#[derive(Clone)]
-pub struct AppState {
-    pub book_repo: Arc<BookRepository>,
-    pub user_repo: Arc<UserRepository>,
-    pub progress_repo: Arc<ProgressRepository>,
-    pub favorite_repo: Arc<FavoriteRepository>,
-    pub settings_repo: Arc<UserSettingsRepository>,
-    pub system_settings_repo: Arc<SystemSettingsRepository>,
-    pub library_repo: Arc<LibraryRepository>,
-    pub chapter_repo: Arc<ChapterRepository>,
-    pub series_repo: Arc<SeriesRepository>,
-    pub playlist_repo: Arc<PlaylistRepository>,
-    pub notification_repo: Arc<NotificationWebhookRepository>,
-    pub book_service: Arc<BookService>,
-    pub scraper_service: Arc<ScraperService>,
-    pub plugin_manager: Arc<PluginManager>,
-    pub plugin_cache: Arc<PluginCache>,
-    pub plugin_host_gateway: Arc<PluginHostGateway>,
-    pub plugin_route_revocations: Arc<crate::core::security::signing::PluginRouteRevocations>,
-    pub config_manager: Arc<PluginConfigManager>,
-    pub task_queue: Arc<TaskQueue>,
-    pub config: Arc<tokio::sync::RwLock<Config>>,
-    pub jwt_secret: Arc<String>, // 保留用于向后兼容
-    pub jwt_key_manager: Option<Arc<crate::auth::JwtKeyManager>>, // 新的密钥管理器
-    pub cache_manager: Arc<CacheManager>,
-    pub encryption_key: Arc<[u8; 32]>,
-    pub storage_service: Arc<StorageService>,
-    pub preload_cache: Arc<
-        tokio::sync::RwLock<
-            std::collections::HashMap<String, media::stream::preload::PreloadedChapter>,
-        >,
-    >,
-    pub audio_streamer: Arc<AudioStreamer>,
-    pub merge_service: Arc<MergeService>,
-    pub nfo_manager: Arc<NfoManager>,
-    pub active_preload_tasks: Arc<
-        tokio::sync::Mutex<std::collections::HashMap<String, (String, tokio::task::AbortHandle)>>,
-    >,
-    pub library_watcher: Arc<LibraryWatcher>,
-    pub ws_manager: Arc<WsSessionManager>,
-    pub hls_session_manager: Arc<HlsSessionManager>,
-}
+/// Compatibility re-export; new consumers should use `api::state::AppState`.
+pub use crate::api::state::AppState;

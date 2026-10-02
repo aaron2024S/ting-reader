@@ -44,3 +44,13 @@ export async function search(request) {
 可用的宿主入口包括 `Ting.host.invoke(method, params)`、`Ting.resources`、内置的 `fetch` 和 `Ting.log.debug/info/warn/error(message, fields)`。Host 方法按声明权限和当前用户授权执行；资源 ID 带插件实例、用户及调用作用域，不应缓存供另一个用户使用。网络请求仅允许授权域名，重定向仍复核权限；HTTP 响应和二进制媒体资源使用宿主限额。`Ting.config` 包含当前插件的有效配置，不要在日志中记录密钥或完整请求体。权限及参数见[HostGateway](./hostgateway.md)，能力声明见[capabilities](./capabilities.md)。
 
 运行 `trpack validate my-plugin`、`trpack build my-plugin --sign-key keys/private.json` 和 `trpack verify <package.tr>`；加载时还会检查具名导出，调用时检查请求和结果。
+
+## 执行和内存预算
+
+所有 JS 插件都使用宿主设置的预算，`permissions: []` 同样创建沙箱并应用限制。管理员的 `plugins.max_memory_per_plugin` 和 `plugins.max_execution_time` 配置同时用于 JS、WASM；默认分别为 512 MiB 和 300 秒，JS 模块加载最多 30 秒。插件清单不能取消或扩大这些限制。
+
+JS 内存预算的四分之三用于 V8 堆，四分之一用于 ArrayBuffer、TypedArray 和宿主 chunk 副本的底层缓冲。接近堆上限时终止实例，并保留最多 16 MiB 的紧急退出空间；这不是整个进程 RSS 的硬上限。Deno 内部编码、序列化等操作不向插件开放，JS 中也不提供第二个 WebAssembly 运行时。WASM 插件应声明 `runtime: wasm`，由 Wasmtime 执行。
+
+模块求值、同步死循环、异步调用、初始化及关闭钩子都受执行预算约束。生命周期钩子返回 Promise 时，宿主等待其完成。超时或内存超限会取消关联 Host 请求及资源，使实例不可再调用并销毁运行时；管理页显示失败原因，需要重新加载恢复。
+
+执行结束撤销监控计时并清空 Host 调用上下文和结果引用。垃圾回收释放缓冲配额；实例销毁时回收 V8 堆、缓冲、回调和监控线程。不要将每次调用的资源或大型返回值长期保留在插件全局变量中。

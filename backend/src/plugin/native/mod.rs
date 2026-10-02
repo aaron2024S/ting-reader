@@ -6,3 +6,7 @@ pub mod plugin;
 
 pub use loader::NativeLoader;
 pub use plugin::NativePlugin;
+
+#[cfg(test)]
+#[path = "../../../tests/unit/plugin/native/abi.rs"]
+mod tests;

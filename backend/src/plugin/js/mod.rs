@@ -2,6 +2,7 @@
 
 pub mod bindings;
 pub mod init_code;
+mod limits;
 pub mod module_loader;
 pub mod plugin;
 pub mod runtime;

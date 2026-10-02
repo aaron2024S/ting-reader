@@ -7,6 +7,7 @@
 //! - Async function support (Promise ↔ Future)
 
 use anyhow::{Context, Result};
+use deno_core::v8;
 use serde_json::Value;
 use tracing::{debug, error, info, warn};
 
@@ -63,6 +64,23 @@ struct JsPluginLogState {
 pub struct JsHostInvocationContext {
     pub user: Option<PluginHostUser>,
     pub resources: Option<std::sync::Arc<crate::plugin::host_api::resources::ResourceScope>>,
+    pub cancellation: Option<tokio_util::sync::CancellationToken>,
+}
+
+// Throw with V8's native API. deno_core 0.256's Rust Result converter calls a
+// JavaScript error constructor, which cannot execute during isolate termination.
+fn native_op_error<'a>(
+    scope: &mut v8::HandleScope<'a>,
+    error: anyhow::Error,
+) -> v8::Local<'a, v8::Value> {
+    if scope.is_execution_terminating() {
+        return v8::undefined(scope).into();
+    }
+    let Some(message) = v8::String::new(scope, &error.to_string()) else {
+        return v8::undefined(scope).into();
+    };
+    let exception = v8::Exception::error(scope, message);
+    scope.throw_exception(exception)
 }
 
 /// Helper to create a JavaScript runtime with plugin bindings
@@ -78,7 +96,7 @@ pub fn create_js_runtime_with_bindings(
     plugin_name: String,
     plugin_id: String,
     config: Value,
-    sandbox: Option<&crate::plugin::wasm::sandbox::Sandbox>,
+    sandbox: Option<&crate::plugin::sandbox::Sandbox>,
     host_gateway: Option<PluginHostGatewayHandle>,
     plugin_dir: std::path::PathBuf,
 ) -> Result<deno_core::JsRuntime> {
@@ -100,31 +118,39 @@ pub fn create_js_runtime_with_bindings(
         .unwrap_or_default();
 
     #[op2]
-    #[string]
-    pub fn op_plugin_log(
+    pub fn op_plugin_log<'a>(
+        v8_scope: &mut v8::HandleScope<'a>,
         state: Rc<RefCell<OpState>>,
         #[string] level: String,
         #[string] message: String,
         #[serde] fields: Option<Value>,
-    ) -> Result<String, anyhow::Error> {
-        let level = PluginLogLevel::parse(&level)
-            .ok_or_else(|| anyhow::anyhow!("Unsupported plugin log level"))?;
-        let fields = match fields {
-            None | Some(Value::Null) => None,
-            Some(Value::Object(fields)) => Some(Value::Object(fields)),
-            Some(_) => {
-                return Err(anyhow::anyhow!("Plugin log fields must be a JSON object"));
-            }
-        };
-        let logger = {
-            let state = state.borrow();
-            state
-                .try_borrow::<JsPluginLogState>()
-                .map(|log_state| log_state.logger.clone())
-                .ok_or_else(|| anyhow::anyhow!("Plugin logger is not configured"))?
-        };
+    ) -> v8::Local<'a, v8::Value> {
+        let result = (|| -> Result<String> {
+            let level = PluginLogLevel::parse(&level)
+                .ok_or_else(|| anyhow::anyhow!("Unsupported plugin log level"))?;
+            let fields = match fields {
+                None | Some(Value::Null) => None,
+                Some(Value::Object(fields)) => Some(Value::Object(fields)),
+                Some(_) => {
+                    return Err(anyhow::anyhow!("Plugin log fields must be a JSON object"));
+                }
+            };
+            let logger = {
+                let state = state.borrow();
+                state
+                    .try_borrow::<JsPluginLogState>()
+                    .map(|log_state| log_state.logger.clone())
+                    .ok_or_else(|| anyhow::anyhow!("Plugin logger is not configured"))?
+            };
 
-        Ok(logger.log(level, &message, fields.as_ref()))
+            Ok(logger.log(level, &message, fields.as_ref()))
+        })();
+        match result {
+            Ok(id) => v8::String::new(v8_scope, &id)
+                .map(Into::into)
+                .unwrap_or_else(|| v8::undefined(v8_scope).into()),
+            Err(error) => native_op_error(v8_scope, error),
+        }
     }
 
     #[op2(async)]
@@ -134,7 +160,7 @@ pub fn create_js_runtime_with_bindings(
         #[string] method: String,
         #[serde] params: serde_json::Value,
     ) -> Result<serde_json::Value, anyhow::Error> {
-        let (plugin_id, host_gateway, user, resources) = {
+        let (plugin_id, host_gateway, user, resources, cancellation) = {
             let state = state.borrow();
             let host_state = state.try_borrow::<JsHostGatewayState>().cloned();
             let invocation_context = state
@@ -148,38 +174,51 @@ pub fn create_js_runtime_with_bindings(
                     host_state.host_gateway.and_then(|handle| handle.get()),
                     invocation_context.user,
                     invocation_context.resources,
+                    invocation_context.cancellation,
                 ),
                 None => (
                     String::new(),
                     None,
                     invocation_context.user,
                     invocation_context.resources,
+                    invocation_context.cancellation,
                 ),
             }
         };
 
-        if method.starts_with("resources.") {
-            let scope =
-                resources.ok_or_else(|| anyhow::anyhow!("No resource scope for this call"))?;
-            return tokio::task::spawn_blocking(move || scope.invoke(&method, params))
-                .await?
-                .map_err(anyhow::Error::from);
-        }
+        let invoke = async {
+            if method.starts_with("resources.") {
+                let scope =
+                    resources.ok_or_else(|| anyhow::anyhow!("No resource scope for this call"))?;
+                return tokio::task::spawn_blocking(move || scope.invoke(&method, params))
+                    .await?
+                    .map_err(anyhow::Error::from);
+            }
 
-        let gateway = host_gateway.ok_or_else(|| {
-            anyhow::anyhow!("Ting.host.invoke is not configured for this plugin runtime")
-        })?;
-        crate::plugin::host_api::invoke(
-            &plugin_id,
-            None,
-            user.as_ref(),
-            resources.as_ref(),
-            Some(&gateway),
-            &method,
-            params,
-        )
-        .await
-        .map_err(|error| anyhow::anyhow!(error.to_string()))
+            let gateway = host_gateway.ok_or_else(|| {
+                anyhow::anyhow!("Ting.host.invoke is not configured for this plugin runtime")
+            })?;
+            crate::plugin::host_api::invoke(
+                &plugin_id,
+                None,
+                user.as_ref(),
+                resources.as_ref(),
+                Some(&gateway),
+                &method,
+                params,
+            )
+            .await
+            .map_err(|error| anyhow::anyhow!(error.to_string()))
+        };
+        if let Some(cancellation) = cancellation {
+            tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => anyhow::bail!("JS invocation cancelled"),
+                result = invoke => result,
+            }
+        } else {
+            invoke.await
+        }
     }
 
     #[op2]
@@ -189,68 +228,81 @@ pub fn create_js_runtime_with_bindings(
     }
 
     #[op2]
-    #[string]
-    fn op_chunk_create(
+    fn op_chunk_create<'a>(
+        v8_scope: &mut v8::HandleScope<'a>,
         state: &mut OpState,
         #[buffer] bytes: &[u8],
-    ) -> Result<String, anyhow::Error> {
-        let scope = state
-            .borrow::<JsHostInvocationContext>()
-            .resources
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("No resource scope for this call"))?;
-        Ok(scope.create_chunk(bytes)?.0)
+    ) -> v8::Local<'a, v8::Value> {
+        let result = (|| -> Result<String> {
+            let scope = state
+                .borrow::<JsHostInvocationContext>()
+                .resources
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("No resource scope for this call"))?;
+            Ok(scope.create_chunk(bytes)?.0)
+        })();
+        match result {
+            Ok(id) => v8::String::new(v8_scope, &id)
+                .map(Into::into)
+                .unwrap_or_else(|| v8::undefined(v8_scope).into()),
+            Err(error) => native_op_error(v8_scope, error),
+        }
     }
 
     #[op2]
-    #[buffer]
-    fn op_chunk_copy(state: &mut OpState, #[string] id: String) -> Result<Vec<u8>, anyhow::Error> {
-        let scope = state
-            .borrow::<JsHostInvocationContext>()
-            .resources
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("No resource scope for this call"))?;
-        Ok(scope
-            .chunk(&ting_plugin_contract::format_calls::ChunkRef(id))?
-            .to_vec())
+    fn op_chunk_copy<'a>(
+        v8_scope: &mut v8::HandleScope<'a>,
+        state: &mut OpState,
+        #[string] id: String,
+    ) -> v8::Local<'a, v8::Value> {
+        let result = (|| -> Result<v8::Local<'a, v8::Uint8Array>> {
+            let scope = state
+                .borrow::<JsHostInvocationContext>()
+                .resources
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("No resource scope for this call"))?;
+            let chunk = scope.chunk(&ting_plugin_contract::format_calls::ChunkRef(id))?;
+            state
+                .borrow::<super::limits::JsBudget>()
+                .copy_chunk(v8_scope, &chunk)
+        })();
+        match result {
+            Ok(view) => view.into(),
+            Err(error) => native_op_error(v8_scope, error),
+        }
     }
 
-    #[op2(fast)]
-    fn op_resource_write(
+    #[op2]
+    fn op_resource_write<'a>(
+        v8_scope: &mut v8::HandleScope<'a>,
         state: &mut OpState,
         #[string] id: String,
         offset: f64,
         #[buffer] bytes: &[u8],
-    ) -> Result<u32, anyhow::Error> {
-        if !offset.is_finite()
-            || offset < 0.0
-            || offset.fract() != 0.0
-            || offset > ting_plugin_contract::format_calls::MAX_SAFE_INTEGER as f64
-        {
-            anyhow::bail!("Invalid resource offset");
+    ) -> v8::Local<'a, v8::Value> {
+        let result = (|| -> Result<u32> {
+            if !offset.is_finite()
+                || offset < 0.0
+                || offset.fract() != 0.0
+                || offset > ting_plugin_contract::format_calls::MAX_SAFE_INTEGER as f64
+            {
+                anyhow::bail!("Invalid resource offset");
+            }
+            let scope = state
+                .borrow::<JsHostInvocationContext>()
+                .resources
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("No resource scope for this call"))?;
+            Ok(scope.write_at(
+                &ting_plugin_contract::format_calls::ResourceId(id),
+                offset as u64,
+                bytes,
+            )? as u32)
+        })();
+        match result {
+            Ok(bytes) => v8::Integer::new_from_unsigned(v8_scope, bytes).into(),
+            Err(error) => native_op_error(v8_scope, error),
         }
-        let scope = state
-            .borrow::<JsHostInvocationContext>()
-            .resources
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("No resource scope for this call"))?;
-        Ok(scope.write_at(
-            &ting_plugin_contract::format_calls::ResourceId(id),
-            offset as u64,
-            bytes,
-        )? as u32)
-    }
-
-    #[cfg(test)]
-    #[op2]
-    #[string]
-    fn op_test_principal(state: &mut OpState) -> String {
-        state
-            .borrow::<JsHostInvocationContext>()
-            .user
-            .as_ref()
-            .map(|user| user.id.clone())
-            .unwrap_or_else(|| "anonymous".into())
     }
 
     let ext = Extension {
@@ -263,18 +315,25 @@ pub fn create_js_runtime_with_bindings(
             op_chunk_copy::DECL,
             op_resource_write::DECL,
             #[cfg(test)]
-            op_test_principal::DECL,
+            tests::op_test_principal::DECL,
         ]),
         ..Default::default()
     };
 
+    let memory_limit = sandbox
+        .map(|sandbox| sandbox.resource_limits.max_memory_bytes)
+        .unwrap_or_else(|| crate::plugin::sandbox::ResourceLimits::default().max_memory_bytes);
+    let budget = super::limits::JsBudget::new(memory_limit)?;
     let mut runtime = JsRuntime::new(RuntimeOptions {
+        create_params: Some(budget.create_params(memory_limit)),
         extensions: vec![ext],
         module_loader: Some(Rc::new(super::module_loader::PackageModuleLoader::new(
             &plugin_dir,
         )?)),
         ..Default::default()
     });
+    budget.attach(&mut runtime);
+    runtime.op_state().borrow_mut().put(budget);
     let (stable_plugin_id, plugin_version) = split_plugin_instance_id(&plugin_id);
     runtime.op_state().borrow_mut().put(JsPluginLogState {
         logger: DefaultPluginLogger::from_context(PluginLogContext {
@@ -306,6 +365,45 @@ pub fn create_js_runtime_with_bindings(
         .execute_script("<init_bindings>", init_code.into())
         .context("Failed to initialize JavaScript bindings")?;
 
+    // deno_core also installs built-in ops (including Vec-backed encoding and
+    // serialization). They are runtime internals, not plugin Host APIs. Expose
+    // only the bounded transport ops; core's event loop retains its own closure
+    // references to the original internal object.
+    #[allow(unused_mut)]
+    let mut allowed_ops = vec![
+        "op_plugin_log",
+        "op_decode_utf8",
+        "op_host_invoke",
+        "op_chunk_create",
+        "op_chunk_copy",
+        "op_resource_write",
+    ];
+    #[cfg(test)]
+    allowed_ops.push("op_test_principal");
+    runtime.execute_script(
+        "<restrict_plugin_globals>",
+        format!(
+            r#"
+        (() => {{
+            const ops = Object.create(null);
+            for (const name of {allowed}) ops[name] = Deno.core.ops[name];
+            Object.defineProperty(globalThis, "Deno", {{
+                value: Object.freeze({{core: Object.freeze({{ops: Object.freeze(ops)}})}}),
+                writable: false, configurable: false,
+            }});
+            // JS plugins cannot create an unbudgeted second WASM runtime.
+            // WASM plugins use the separate, limited Wasmtime adapter.
+            Object.defineProperty(globalThis, "WebAssembly", {{
+                value: undefined, writable: false, configurable: false,
+            }});
+            delete globalThis.__bootstrap;
+        }})();
+    "#,
+            allowed = serde_json::to_string(&allowed_ops)?
+        )
+        .into(),
+    )?;
+
     Ok(runtime)
 }
 
@@ -319,141 +417,5 @@ fn split_plugin_instance_id(instance_id: &str) -> (String, String) {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_js_plugin_logger() {
-        let logger = JsPluginLogger::new("test-plugin".to_string());
-        logger.debug("Debug message");
-        logger.info("Info message");
-        logger.warn("Warning message");
-        logger.error("Error message");
-    }
-
-    #[test]
-    fn test_create_js_runtime_with_bindings() {
-        let config = serde_json::json!({"api_key": "test_key", "cache_enabled": true});
-        let temp_dir = tempfile::tempdir().unwrap();
-        let result = create_js_runtime_with_bindings(
-            "test-plugin".to_string(),
-            "test-plugin@1.0.0".to_string(),
-            config,
-            None,
-            None,
-            temp_dir.path().to_path_buf(),
-        );
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn js_plugin_logs_keep_legacy_signature_and_accept_fields() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let mut runtime = create_js_runtime_with_bindings(
-            "test-plugin".to_string(),
-            "stable-plugin@1.0.0".to_string(),
-            serde_json::json!({}),
-            None,
-            None,
-            temp_dir.path().to_path_buf(),
-        )
-        .unwrap();
-
-        let result = runtime.execute_script(
-            "<plugin_log_compatibility>",
-            r#"
-            Ting.log.info("legacy message");
-            Ting.log.warn("structured message", { code: 42 });
-            console.error("console message", { retryable: false });
-            "#
-            .to_string()
-            .into(),
-        );
-
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn plugin_instance_id_is_split_into_stable_id_and_version() {
-        assert_eq!(
-            split_plugin_instance_id("demo-plugin@1.2.3"),
-            ("demo-plugin".to_string(), "1.2.3".to_string())
-        );
-        assert_eq!(
-            split_plugin_instance_id("demo-plugin"),
-            ("demo-plugin".to_string(), "unknown".to_string())
-        );
-    }
-
-    #[tokio::test]
-    async fn ting_host_invoke_rejects_when_gateway_missing() {
-        let config = serde_json::json!({});
-        let temp_dir = tempfile::tempdir().unwrap();
-        let mut runtime = create_js_runtime_with_bindings(
-            "test-plugin".to_string(),
-            "test-plugin@1.0.0".to_string(),
-            config,
-            None,
-            None,
-            temp_dir.path().to_path_buf(),
-        )
-        .unwrap();
-
-        let result = runtime.execute_script(
-            "<host_invoke_without_gateway>",
-            r#"
-            globalThis.__hostInvokeStatus = "pending";
-            Ting.host.invoke("books.list", {})
-                .then(() => { globalThis.__hostInvokeStatus = "success"; })
-                .catch((error) => { globalThis.__hostInvokeStatus = String(error); });
-            "#
-            .to_string()
-            .into(),
-        );
-        assert!(result.is_ok());
-
-        runtime.run_event_loop(Default::default()).await.unwrap();
-
-        let scope = &mut runtime.handle_scope();
-        let context = scope.get_current_context();
-        let global = context.global(scope);
-        let key = deno_core::v8::String::new(scope, "__hostInvokeStatus").unwrap();
-        let value = global.get(scope, key.into()).unwrap();
-        let status = value.to_string(scope).unwrap().to_rust_string_lossy(scope);
-
-        assert!(status.contains("Ting.host.invoke is not configured"));
-    }
-
-    #[test]
-    fn test_js_runtime_sandbox_file_paths() {
-        use crate::plugin::wasm::sandbox::{Permission, ResourceLimits, Sandbox};
-
-        let config = serde_json::json!({});
-        let permissions = vec![
-            Permission::FileRead {
-                path: "./data/cache".into(),
-            },
-            Permission::FileWrite {
-                path: "./data/output".into(),
-            },
-        ];
-        let sandbox = Sandbox::new(permissions, ResourceLimits::default());
-
-        let mut runtime = create_js_runtime_with_bindings(
-            "test-plugin".to_string(),
-            "test-plugin@1.0.0".to_string(),
-            config,
-            Some(&sandbox),
-            None,
-            tempfile::tempdir().unwrap().path().to_path_buf(),
-        )
-        .unwrap();
-
-        let test_code = r#"
-            const allowedPaths = Ting.sandbox.allowedPaths;
-            JSON.stringify({ allowedPaths })
-        "#;
-        let result = runtime.execute_script("<test_sandbox>", test_code.to_string().into());
-        assert!(result.is_ok());
-    }
-}
+#[path = "../../../tests/unit/plugin/js/bindings.rs"]
+mod tests;

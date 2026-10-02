@@ -1,5 +1,5 @@
-use super::AppState;
 use crate::api::models::{BookResponse, CreateSeriesRequest, SeriesResponse, UpdateSeriesRequest};
+use crate::api::state::AppState;
 use crate::core::app::error::{Result, TingError};
 use crate::db::models::{Series, SeriesBook};
 use crate::db::repository::Repository;

@@ -1,7 +1,7 @@
 use super::{PluginHostGateway, PluginHostUser, required_string_param};
 use crate::core::app::error::{Result, TingError};
+use crate::plugin::sandbox::Permission;
 use crate::plugin::types::PluginInvocationContext;
-use crate::plugin::wasm::sandbox::Permission;
 use serde_json::Value;
 use std::sync::Arc;
 

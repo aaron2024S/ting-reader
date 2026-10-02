@@ -216,31 +216,3 @@ impl Plugin for NativePlugin {
 // Ensure NativePlugin is thread-safe
 unsafe impl Send for NativePlugin {}
 unsafe impl Sync for NativePlugin {}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_native_plugin_creation() {
-        let metadata = PluginMetadata::new(
-            "test-plugin@1.0.0".to_string(),
-            "test-plugin".to_string(),
-            "1.0.0".to_string(),
-            "Test Author".to_string(),
-            "Test plugin".to_string(),
-            "plugin.dll".to_string(),
-        );
-
-        let loader = Arc::new(NativeLoader::new());
-        let plugin = NativePlugin::new(
-            "test-plugin@1.0.0".to_string(),
-            metadata,
-            loader,
-            std::path::PathBuf::from("/tmp/test-plugin"),
-            None,
-        );
-
-        assert_eq!(plugin.metadata().name, "test-plugin");
-    }
-}

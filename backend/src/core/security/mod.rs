@@ -6,3 +6,7 @@ pub mod master_key;
 pub mod signing;
 
 pub use decryption_cache::{CacheStats, DecryptionCacheConfig, DecryptionCacheService};
+
+#[cfg(test)]
+#[path = "../../../tests/unit/core/security/protocols.rs"]
+mod tests;

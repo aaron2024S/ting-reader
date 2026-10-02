@@ -1,8 +1,8 @@
-use super::AppState;
 use crate::api::models::{
     BookResponse, CreatePlaylistRequest, PlaylistItemRequest, PlaylistItemResponse,
     PlaylistResponse, SeriesResponse, UpdatePlaylistRequest,
 };
+use crate::api::state::AppState;
 use crate::auth::middleware::AuthUser;
 use crate::core::app::error::{Result, TingError};
 use crate::db::models::{Playlist, PlaylistItem};

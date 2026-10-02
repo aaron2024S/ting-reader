@@ -210,7 +210,7 @@ pub(super) fn add(linker: &mut Linker<PluginState>) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn guarded_resource_callback(
+pub(super) fn guarded_resource_callback(
     operation: &'static str,
     callback: impl FnOnce() -> std::result::Result<i32, i32>,
 ) -> i32 {
@@ -220,16 +220,5 @@ fn guarded_resource_callback(
             tracing::error!(operation, "WASM resource callback panicked");
             NativeStatus::InternalError as i32
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn resource_callback_panics_become_internal_status() {
-        let status = guarded_resource_callback("test", || panic!("test panic"));
-        assert_eq!(status, NativeStatus::InternalError as i32);
     }
 }

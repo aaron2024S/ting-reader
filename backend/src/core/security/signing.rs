@@ -212,18 +212,3 @@ pub fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
         .fold(0_u8, |diff, (left, right)| diff | (*left ^ *right))
         == 0
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn zero_signature_expiry_never_expires() {
-        assert!(!signature_has_expired(0));
-    }
-
-    #[test]
-    fn past_positive_signature_expiry_expires() {
-        assert!(signature_has_expired(chrono::Utc::now().timestamp() - 60));
-    }
-}

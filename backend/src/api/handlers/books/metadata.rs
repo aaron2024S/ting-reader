@@ -1,4 +1,4 @@
-use super::AppState;
+use crate::api::state::AppState;
 use crate::core::app::error::Result;
 use crate::core::books::metadata_writer::{
     build_audiobookshelf_chapters, read_metadata_json, remote_metadata_dir,

@@ -254,21 +254,6 @@ fn default_scheduled_sync_interval() -> String {
     "daily".to_string()
 }
 
-#[cfg(test)]
-mod scraper_config_tests {
-    use super::ScraperConfig;
-
-    #[test]
-    fn extract_extra_chapters_defaults_to_true_and_accepts_false() {
-        let legacy: ScraperConfig = serde_json::from_str("{}").unwrap();
-        let disabled: ScraperConfig =
-            serde_json::from_str(r#"{"extract_extra_chapters":false}"#).unwrap();
-
-        assert!(legacy.extract_extra_chapters);
-        assert!(!disabled.extract_extra_chapters);
-    }
-}
-
 /// Series record in the database
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Series {

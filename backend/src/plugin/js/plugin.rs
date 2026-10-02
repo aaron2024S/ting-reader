@@ -105,6 +105,19 @@ impl JavaScriptPluginLoader {
         )
     }
 
+    pub(super) fn create_executor_with_limits(
+        &self,
+        host_gateway: Option<PluginHostGatewayHandle>,
+        limits: crate::plugin::sandbox::ResourceLimits,
+    ) -> Result<JavaScriptPluginExecutor> {
+        JavaScriptPluginExecutor::new_with_limits(
+            self.plugin_dir.clone(),
+            self.metadata.clone(),
+            host_gateway,
+            limits,
+        )
+    }
+
     /// Verify that the plugin metadata specifies JavaScript runtime
     fn verify_runtime(metadata: &PluginMetadata, _plugin_dir: &Path) -> Result<()> {
         if let Some(runtime) = metadata.runtime.as_deref() {
@@ -154,12 +167,22 @@ impl JavaScriptPluginExecutor {
         metadata: PluginMetadata,
         host_gateway: Option<PluginHostGatewayHandle>,
     ) -> Result<Self> {
+        Self::new_with_limits(plugin_dir, metadata, host_gateway, Default::default())
+    }
+
+    fn new_with_limits(
+        plugin_dir: PathBuf,
+        metadata: PluginMetadata,
+        host_gateway: Option<PluginHostGatewayHandle>,
+        limits: crate::plugin::sandbox::ResourceLimits,
+    ) -> Result<Self> {
         let entry_point = plugin_dir.join(&metadata.entry_point);
-        let runtime = JsRuntimeWrapper::new_with_host_gateway(
+        let runtime = JsRuntimeWrapper::new_with_limits(
             entry_point,
             metadata.clone(),
             None,
             host_gateway,
+            limits,
         )?;
 
         Ok(Self {
@@ -184,25 +207,30 @@ impl JavaScriptPluginExecutor {
 
         info!("Initializing JavaScript plugin: {}", self.metadata.name);
 
-        // Call the initialize function if it exists
-        let init_code = format!(
+        // Await lifecycle promises through the same bounded invocation path.
+        self.runtime.execute_script(
             r#"
-            const context = {context_json};
-            globalThis.Ting = globalThis.Ting || {{}};
-            globalThis.Ting.config = context.config || {{}};
+            globalThis.__ting_initialize = async function(context) {
+            globalThis.Ting = globalThis.Ting || {};
+            globalThis.Ting.config = context.config || {};
             globalThis.Ting.dataDir = context.data_dir || null;
-            if (typeof initialize === 'function') {{
-                initialize(context);
-            }}
+            if (typeof initialize === 'function') {
+                await initialize(context);
+            }
+            return null;
+            };
             "#,
-            context_json = serde_json::to_string(&serde_json::json!({
-                "config": config,
-                "data_dir": data_dir.to_string_lossy(),
-            }))
-            .unwrap_or_else(|_| "{}".to_string())
-        );
-
-        self.runtime.execute_script(&init_code)?;
+        )?;
+        self.runtime
+            .call_function::<_, Value>(
+                "__ting_initialize",
+                serde_json::json!({
+                    "config": config,
+                    "data_dir": data_dir.to_string_lossy(),
+                }),
+                &Default::default(),
+            )
+            .await?;
         self.initialized = true;
 
         info!("JavaScript plugin initialized: {}", self.metadata.name);
@@ -210,21 +238,26 @@ impl JavaScriptPluginExecutor {
     }
 
     /// Shutdown the plugin
-    pub fn shutdown(&mut self) -> Result<()> {
+    pub async fn shutdown(&mut self) -> Result<()> {
         if !self.initialized {
             return Ok(());
         }
 
         info!("Shutting down JavaScript plugin: {}", self.metadata.name);
 
-        // Call the shutdown function if it exists
-        let shutdown_code = r#"
-            if (typeof shutdown === 'function') {
-                shutdown();
-            }
-        "#;
-
-        self.runtime.execute_script(shutdown_code)?;
+        self.runtime.execute_script(
+            r#"
+            globalThis.__ting_shutdown = async function() {
+                if (typeof shutdown === 'function') {
+                    await shutdown();
+                }
+                return null;
+            };
+        "#,
+        )?;
+        self.runtime
+            .call_function::<_, Value>("__ting_shutdown", Value::Null, &Default::default())
+            .await?;
         self.initialized = false;
 
         info!("JavaScript plugin shut down: {}", self.metadata.name);
@@ -234,6 +267,10 @@ impl JavaScriptPluginExecutor {
     /// Garbage collect
     pub fn garbage_collect(&mut self) -> Result<()> {
         self.runtime.garbage_collect()
+    }
+
+    pub fn is_unavailable(&self) -> bool {
+        self.runtime.is_unavailable()
     }
 
     /// Call a JavaScript function
@@ -278,250 +315,5 @@ impl JavaScriptPluginExecutor {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::plugin::types::metadata::read_plugin_metadata;
-    use std::fs;
-    use tempfile::TempDir;
-
-    fn create_test_plugin_dir(name: &str, runtime: &str) -> TempDir {
-        let temp_dir = TempDir::new().unwrap();
-        let plugin_dir = temp_dir.path().join(name);
-        fs::create_dir(&plugin_dir).unwrap();
-
-        // Create plugin.yml
-        let metadata = serde_json::json!({
-            "id": name,
-            "name": name,
-            "version": "1.0.0",
-            "min_core_version": "2.0.0",
-            "author": "Test Author",
-            "description": {"en": "Test JavaScript plugin"},
-            "runtime": runtime,
-            "entry_point": "plugin.js",
-            "dependencies": [],
-            "permissions": [],
-            "capabilities": [
-                {
-                    "id": "test.tools",
-                    "kind": "plugin_store",
-                    "operations": ["list_plugins"]
-                }
-            ]
-        });
-
-        fs::write(
-            plugin_dir.join("plugin.yml"),
-            serde_yaml::to_string(&metadata).unwrap(),
-        )
-        .unwrap();
-
-        // Create a simple JavaScript file
-        fs::write(
-            plugin_dir.join("plugin.js"),
-            r#"
-            function initialize(context) {
-                console.log("Plugin initialized");
-            }
-
-            function shutdown() {
-                console.log("Plugin shut down");
-            }
-
-            function hello(args) {
-                return { message: "Hello, " + args.name + "!" };
-            }
-            export function list_plugins() { return { plugins: [] }; }
-            "#,
-        )
-        .unwrap();
-
-        temp_dir
-    }
-
-    #[test]
-    fn test_read_metadata() {
-        let temp_dir = create_test_plugin_dir("test-plugin", "javascript");
-        let plugin_dir = temp_dir.path().join("test-plugin");
-
-        let metadata = read_plugin_metadata(&plugin_dir).unwrap();
-
-        assert_eq!(metadata.name, "test-plugin");
-        assert_eq!(metadata.version, "1.0.0");
-        assert_eq!(metadata.author, "Test Author");
-        assert_eq!(metadata.entry_point, "plugin.js");
-    }
-
-    #[test]
-    fn test_verify_runtime_javascript() {
-        let temp_dir = create_test_plugin_dir("test-plugin", "javascript");
-        let plugin_dir = temp_dir.path().join("test-plugin");
-
-        let metadata = read_plugin_metadata(&plugin_dir).unwrap();
-        let result = JavaScriptPluginLoader::verify_runtime(&metadata, &plugin_dir);
-
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_verify_runtime_wrong_runtime() {
-        let temp_dir = create_test_plugin_dir("test-plugin", "wasm");
-        let plugin_dir = temp_dir.path().join("test-plugin");
-
-        let error = read_plugin_metadata(&plugin_dir).unwrap_err();
-        assert!(error.to_string().contains("runtime must match"));
-    }
-
-    #[test]
-    fn test_new_javascript_plugin_loader() {
-        let temp_dir = create_test_plugin_dir("test-plugin", "javascript");
-        let plugin_dir = temp_dir.path().join("test-plugin");
-
-        let loader = JavaScriptPluginLoader::new(plugin_dir);
-
-        assert!(loader.is_ok());
-        let loader = loader.unwrap();
-        assert_eq!(loader.metadata().name, "test-plugin");
-    }
-
-    #[test]
-    fn test_new_missing_entry_point() {
-        let temp_dir = TempDir::new().unwrap();
-        let plugin_dir = temp_dir.path().join("test-plugin");
-        fs::create_dir(&plugin_dir).unwrap();
-
-        // Create plugin.yml but no plugin.js
-        let metadata = serde_json::json!({
-            "id": "test-plugin",
-            "name": "test-plugin",
-            "version": "1.0.0",
-            "min_core_version": "2.0.0",
-            "author": "Test Author",
-            "description": {"en": "Test plugin"},
-            "runtime": "javascript",
-            "entry_point": "plugin.js",
-            "capabilities": [
-                {
-                    "id": "test.tools",
-                    "kind": "plugin_store",
-                    "operations": ["list_plugins"]
-                }
-            ]
-        });
-
-        fs::write(
-            plugin_dir.join("plugin.yml"),
-            serde_yaml::to_string(&metadata).unwrap(),
-        )
-        .unwrap();
-
-        let result = JavaScriptPluginLoader::new(plugin_dir);
-
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("Entry point file not found")
-        );
-    }
-
-    #[tokio::test]
-    async fn test_create_executor_and_load() {
-        let temp_dir = create_test_plugin_dir("test-plugin", "javascript");
-        let plugin_dir = temp_dir.path().join("test-plugin");
-
-        let loader = JavaScriptPluginLoader::new(plugin_dir).unwrap();
-        let mut executor = loader.create_executor().unwrap();
-
-        let result = executor.load_module().await;
-        assert!(result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn rejects_missing_declared_export_at_module_load() {
-        let temp_dir = create_test_plugin_dir("test-plugin", "javascript");
-        let plugin_dir = temp_dir.path().join("test-plugin");
-        fs::write(
-            plugin_dir.join("plugin.js"),
-            "export function unrelated() { return { plugins: [] }; }",
-        )
-        .unwrap();
-        let loader = JavaScriptPluginLoader::new(plugin_dir).unwrap();
-        let mut executor = loader.create_executor().unwrap();
-        let error = executor.load_module().await.unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("Missing declared plugin exports"),
-            "{error:#}"
-        );
-    }
-
-    #[tokio::test]
-    async fn loads_package_relative_esm_and_invokes_declared_export() {
-        let temp_dir = create_test_plugin_dir("test-plugin", "javascript");
-        let plugin_dir = temp_dir.path().join("test-plugin");
-        fs::write(
-            plugin_dir.join("sdk.js"),
-            "export function items() { return [{ id: 'ok' }]; }",
-        )
-        .unwrap();
-        fs::write(
-            plugin_dir.join("plugin.js"),
-            "import { items } from './sdk.js'; export async function list_plugins() { return { plugins: items() }; }",
-        )
-        .unwrap();
-        let loader = JavaScriptPluginLoader::new(plugin_dir).unwrap();
-        let mut executor = loader.create_executor().unwrap();
-        executor.load_module().await.unwrap();
-        let result: Value = executor
-            .call_function("list_plugins", serde_json::json!({}))
-            .await
-            .unwrap();
-        assert_eq!(result["plugins"][0]["id"], "ok");
-    }
-
-    #[tokio::test]
-    async fn esm_imports_cannot_escape_package_or_load_remote_code() {
-        let temp_dir = create_test_plugin_dir("test-plugin", "javascript");
-        let plugin_dir = temp_dir.path().join("test-plugin");
-        for request in ["../other.js", "https://example.com/remote.js", "left-pad"] {
-            fs::write(
-                plugin_dir.join("plugin.js"),
-                format!("import '{request}'; export function list_plugins() {{ return {{}}; }}"),
-            )
-            .unwrap();
-            let loader = JavaScriptPluginLoader::new(plugin_dir.clone()).unwrap();
-            let mut executor = loader.create_executor().unwrap();
-            assert!(executor.load_module().await.is_err(), "{request}");
-        }
-    }
-
-    #[tokio::test]
-    async fn initialization_supplies_config_and_data_directory_to_plugin() {
-        let temp_dir = create_test_plugin_dir("test-plugin", "javascript");
-        let plugin_dir = temp_dir.path().join("test-plugin");
-        fs::write(
-            plugin_dir.join("plugin.js"),
-            "export function list_plugins() { return { plugins: [], token: Ting.config.token, data_dir: Ting.dataDir }; }",
-        )
-        .unwrap();
-        let loader = JavaScriptPluginLoader::new(plugin_dir.clone()).unwrap();
-        let mut executor = loader.create_executor().unwrap();
-        executor.load_module().await.unwrap();
-        executor
-            .initialize(
-                serde_json::json!({"token": "configured"}),
-                plugin_dir.join("data"),
-            )
-            .await
-            .unwrap();
-        let result: Value = executor
-            .call_function("list_plugins", serde_json::json!({}))
-            .await
-            .unwrap();
-        assert_eq!(result["token"], "configured");
-        assert!(result["data_dir"].as_str().unwrap().ends_with("data"));
-    }
-}
+#[path = "../../../tests/unit/plugin/js/plugin.rs"]
+mod tests;

@@ -7,12 +7,12 @@ pub use cover::upload_book_cover;
 pub(crate) use metadata::save_webdav_metadata;
 pub use scrape::{apply_scrape_result, scrape_book_diff};
 
-use super::AppState;
 use crate::api::models::{
     BatchUpdateChaptersRequest, BookResponse, ChapterResponse, ChaptersPageResponse, ChaptersQuery,
     CreateBookRequest, MergeBooksRequest, MoveChaptersRequest, SearchQuery, SearchResponse,
     StatsResponse, UpdateBookCorrectionRequest, UpdateBookRequest, UpdateChapterRequest,
 };
+use crate::api::state::AppState;
 use crate::core::app::error::{Result, TingError};
 use crate::core::books::nfo_manager::BookMetadata;
 use crate::core::storage::local_paths::{
