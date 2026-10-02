@@ -14,6 +14,7 @@ import {
   Cpu,
   Download,
   FileText,
+  Globe,
   ListChecks,
   Package,
   Puzzle,
@@ -211,8 +212,28 @@ const formatVersion = (
   return version.startsWith("v") ? version : `v${version}`;
 };
 
-const getRuntimeLabel = (runtime?: string) =>
-  runtimeLabels[runtime || ""] || runtime || "unknown";
+const getRuntimeLabel = (runtime?: string) => {
+  const value = cleanText(runtime)?.toLowerCase();
+  return value ? runtimeLabels[value] || cleanText(runtime) : undefined;
+};
+
+const capabilityLabels = {
+  metadata_provider: "metadataProvider",
+  format_handler: "formatHandler",
+  content_processor: "contentProcessor",
+  tool_provider: "toolProvider",
+  ui_extension: "uiExtension",
+  http_route: "httpRoute",
+  plugin_store: "pluginStore",
+  task_handler: "taskHandler",
+  event_handler: "eventHandler",
+} as const;
+
+const getPluginCapabilityKinds = (capabilities?: PluginCapability[]) => {
+  const kinds = new Set((capabilities || []).map((capability) => capability.kind));
+  return (Object.keys(capabilityLabels) as Array<keyof typeof capabilityLabels>)
+    .filter((kind) => kinds.has(kind));
+};
 
 const getPluginCategory = (capabilities?: PluginCapability[]) => {
   const kinds = new Set((capabilities || []).map((capability) => capability.kind));
@@ -228,7 +249,7 @@ const getMetadataSearchFieldCount = (capabilities?: PluginCapability[]) =>
     .filter((capability) => capability.kind === "metadata_provider")
     .reduce(
       (count, capability) =>
-        count + capability.search_fields.length,
+        count + (capability.search_fields?.length || 0),
       0,
     );
 
@@ -237,7 +258,7 @@ const getMetadataResultFieldCount = (capabilities?: PluginCapability[]) =>
     .filter((capability) => capability.kind === "metadata_provider")
     .reduce(
       (count, capability) =>
-        count + capability.result_fields.length,
+        count + (capability.result_fields?.length || 0),
       0,
     );
 
@@ -255,8 +276,9 @@ const getCapabilitySupportedExtensions = (
       capability.kind === "format_handler" ||
       capability.kind === "content_processor"
     ) {
-      for (const extension of getCapabilityExtensions(capability)) {
-        if (!extensions.includes(extension)) extensions.push(extension);
+      for (const value of getCapabilityExtensions(capability)) {
+        const extension = value.trim().replace(/^\./, "").toLowerCase();
+        if (extension && !extensions.includes(extension)) extensions.push(extension);
       }
     }
   }
@@ -273,74 +295,19 @@ const getPluginTypeLabel = (
   return type || t("adminPlugins.unknownType");
 };
 
-const getSupportLabel = (support: string) => {
-  return support;
-};
-
-const capabilityRenderMode = (capability: PluginCapability) =>
-  capability.kind === "ui_extension" ? capability.render.mode : undefined;
-
-const capabilityRouteAuth = (capability: PluginCapability) =>
-  capability.kind === "http_route" ? capability.route.auth : undefined;
-
-const normalizePermission = (permission: PluginPermission) => permission.type;
-
-const getPluginSignals = (
-  data: Pick<PluginCardData, "runtime" | "permissions" | "capabilities">,
+const getPluginPermissionLabels = (
+  permissions: PluginPermission[],
+  t: ReturnType<typeof useTranslation>["t"],
 ) => {
-  const permissions = (data.permissions || []).map(normalizePermission);
-  const capabilities = data.capabilities || [];
-  const signals = new Set<string>();
-
-  if (
-    capabilities.some(
-      (capability) =>
-        capability.kind === "ui_extension" &&
-        capabilityRenderMode(capability) === "web_container",
-    )
-  ) {
-    signals.add("Web UI");
-  }
-  if (
-    capabilities.some(
-      (capability) =>
-        capability.kind === "http_route" &&
-        ["public", "signed", "public_or_signed"].includes(
-          capabilityRouteAuth(capability) || "",
-        ),
-    )
-  ) {
-    signals.add("Public HTTP");
-  }
-  if (
-    permissions.some((permission) =>
-      [
-        "books_read",
-        "libraries_read",
-        "chapters_read",
-        "media_read_url",
-      ].includes(permission),
-    )
-  ) {
-    signals.add("Library read");
-  }
-  if (permissions.includes("progress_read")) {
-    signals.add("Playback progress");
-  }
-  if (permissions.includes("cache_read") || permissions.includes("cache_write")) {
-    signals.add("Cache access");
-  }
-  if (permissions.some((permission) => permission.endsWith("_write"))) {
-    signals.add("Write access");
-  }
-  if (permissions.includes("task_create")) {
-    signals.add("Task create");
-  }
-  if (permissions.some((permission) => permission.startsWith("network"))) {
-    signals.add("Network");
-  }
-
-  return Array.from(signals);
+  return permissions.map((permission) => {
+    const label = t(`adminPlugins.permissionLabels.${permission.type}`, {
+      defaultValue: permission.type,
+    });
+    const scope = "domain" in permission ? permission.domain
+      : "path" in permission ? permission.path
+        : "event" in permission ? permission.event : undefined;
+    return scope ? `${label} (${scope})` : label;
+  });
 };
 
 const normalizeDependencyIds = (
@@ -457,14 +424,16 @@ const InfoChip = ({
   icon,
   children,
   title,
+  className,
 }: {
   icon?: React.ReactNode;
   children: React.ReactNode;
   title?: string;
+  className?: string;
 }) => (
   <span
     title={title}
-    className="inline-flex max-w-full items-center gap-1 rounded-md border border-slate-200 bg-slate-50 px-2 py-1 text-xs font-medium text-slate-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300"
+    className={`inline-flex max-w-full items-center gap-1 rounded-md border px-2 py-1 text-xs font-medium ${className || "border-slate-200 bg-slate-50 text-slate-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300"}`}
   >
     {icon}
     <span className="truncate">{children}</span>
@@ -491,7 +460,7 @@ const PluginStateBadge = ({ state }: { state?: Plugin["state"] }) => {
 
   return (
     <span className="inline-flex items-center gap-1 rounded-md border border-slate-200 bg-slate-50 px-2 py-1 text-xs font-semibold text-slate-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300">
-      <AlertCircle size={13} /> {state || t("adminPlugins.unknownType")}
+      <AlertCircle size={13} /> {state === "loading" ? t("adminPlugins.loading") : state === "inactive" ? t("adminPlugins.inactive") : t("adminPlugins.unknownType")}
     </span>
   );
 };
@@ -541,12 +510,14 @@ const PluginCard = ({
       i18n.resolvedLanguage || i18n.language,
     ) || t("adminPlugins.noDescription");
   const supports = data.supported_extensions || [];
-  const supportLabels = supports.map((support) => getSupportLabel(support));
+  const supportLabels = supports.map((support) => support.toUpperCase());
   const dependencies = data.dependencies || [];
   const permissions = data.permissions || [];
   const searchFieldCount = getMetadataSearchFieldCount(data.capabilities);
   const resultFieldCount = getMetadataResultFieldCount(data.capabilities);
-  const pluginSignals = getPluginSignals(data);
+  const capabilityKinds = getPluginCapabilityKinds(data.capabilities);
+  const permissionLabels = getPluginPermissionLabels(permissions, t);
+  const runtimeLabel = getRuntimeLabel(data.runtime);
   const canInstall = onInstall && (!data.isInstalled || data.hasUpdate);
   const externalLink = getExternalLink(data, t);
   const typeStyle = typeStyles[data.plugin_type] || {
@@ -619,12 +590,22 @@ const PluginCard = ({
       ) : null}
 
       <div className="mt-4 flex flex-wrap gap-1.5">
-        <InfoChip icon={<Tag size={12} />}>
-          {getPluginTypeLabel(data.plugin_type, t)}
-        </InfoChip>
-        <InfoChip icon={<Cpu size={12} />}>
-          {getRuntimeLabel(data.runtime)}
-        </InfoChip>
+        {capabilityKinds.length > 0 ? capabilityKinds.map((kind) => (
+          <InfoChip
+            key={kind}
+            icon={kind === "http_route" ? <Globe size={12} /> : <Tag size={12} />}
+            className={typeStyle.chip}
+          >
+            {t(`adminPlugins.capabilityLabels.${capabilityLabels[kind]}`)}
+          </InfoChip>
+        )) : (
+          <InfoChip icon={<Tag size={12} />} className={typeStyle.chip}>
+            {getPluginTypeLabel(data.plugin_type, t)}
+          </InfoChip>
+        )}
+        {runtimeLabel ? (
+          <InfoChip icon={<Cpu size={12} />}>{runtimeLabel}</InfoChip>
+        ) : null}
         {supportLabels.length > 0 ? (
           <InfoChip
             icon={<FileText size={12} />}
@@ -634,42 +615,32 @@ const PluginCard = ({
             {supportLabels.length > 4 ? ` +${supportLabels.length - 4}` : ""}
           </InfoChip>
         ) : null}
-        {permissions.length > 0 ? (
+        {data.admin_only ? (
           <InfoChip icon={<Shield size={12} />}>
-            {t("adminPlugins.permissionCount", {
-              count: permissions.length,
-            })}
+            {t("adminPlugins.adminOnly")}
           </InfoChip>
         ) : null}
-        {data.admin_only ? (
-          <InfoChip icon={<Shield size={12} />}>Admin</InfoChip>
+        {permissions.length > 0 ? (
+          <InfoChip
+            icon={<Shield size={12} />}
+            title={permissionLabels.join("\n")}
+          >
+            {t("adminPlugins.permissionCount", { count: permissions.length })}
+          </InfoChip>
         ) : null}
         {searchFieldCount > 0 ? (
           <InfoChip icon={<Search size={12} />}>
-            {t("adminPlugins.searchFieldCount", {
-              count: searchFieldCount,
-            })}
+            {t("adminPlugins.searchFieldCount", { count: searchFieldCount })}
           </InfoChip>
         ) : null}
         {resultFieldCount > 0 ? (
           <InfoChip icon={<ListChecks size={12} />}>
-            {t("adminPlugins.resultFieldCount", {
-              count: resultFieldCount,
-            })}
+            {t("adminPlugins.resultFieldCount", { count: resultFieldCount })}
           </InfoChip>
         ) : null}
         {dependencies.length > 0 ? (
-          <InfoChip
-            icon={<Package size={12} />}
-            title={dependencies.join(", ")}
-          >
+          <InfoChip icon={<Package size={12} />} title={dependencies.join("\n")}>
             {t("adminPlugins.dependencyCount", { count: dependencies.length })}
-          </InfoChip>
-        ) : null}
-        {pluginSignals.length > 0 ? (
-          <InfoChip icon={<Shield size={12} />} title={pluginSignals.join(", ")}>
-            {pluginSignals.slice(0, 3).join(", ")}
-            {pluginSignals.length > 3 ? ` +${pluginSignals.length - 3}` : ""}
           </InfoChip>
         ) : null}
         {data.license ? <InfoChip>{data.license}</InfoChip> : null}
@@ -680,6 +651,7 @@ const PluginCard = ({
         ) : null}
       </div>
 
+      <div className="h-4 shrink-0" />
       <footer className="mt-auto flex items-center gap-2 border-t border-slate-100 pt-4 dark:border-slate-800">
         {externalLink ? (
           <a
