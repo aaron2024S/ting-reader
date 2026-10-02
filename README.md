@@ -242,8 +242,6 @@ ting-reader/
 └── .github/    # GitHub 工作流与 FPK 配置
 ```
 
-后端模块职责、目录布局和验证命令见 [后端目录说明](backend/README.md)。
-
 ### 本地开发
 
 1. **克隆仓库**：
