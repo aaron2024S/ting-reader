@@ -180,6 +180,7 @@ async fn ensure_admin_user(
     system_settings_repo: &db::repository::SystemSettingsRepository,
 ) -> Result<()> {
     use ting_reader::auth::hash_password;
+    use ting_reader::auth::password::{DEFAULT_ADMIN_PASSWORD, DEFAULT_ADMIN_USERNAME};
     use ting_reader::db::models::{User, UserSettings};
     use ting_reader::db::repository::{Repository, UserRepository};
     use uuid::Uuid;
@@ -192,10 +193,10 @@ async fn ensure_admin_user(
             message_key = "system.default_admin.creating",
             "No users found, creating default admin user"
         );
-        let password_hash = hash_password("admin123")?;
+        let password_hash = hash_password(DEFAULT_ADMIN_PASSWORD)?;
         let admin_user = User {
             id: Uuid::new_v4().to_string(),
-            username: "admin".to_string(),
+            username: DEFAULT_ADMIN_USERNAME.to_string(),
             password_hash,
             role: "admin".to_string(),
             created_at: chrono::Utc::now().to_rfc3339(),

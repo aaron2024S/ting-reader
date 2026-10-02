@@ -2,7 +2,7 @@ import React, { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Link } from "react-router";
 import apiClient from "../../core/api/client";
-import type { Book, Playlist } from "../../core/types";
+import type { Book, Playlist, User as UserInfo } from "../../core/types";
 import type { HistorySummary } from "../../core/api/reading";
 import { useAuthStore } from "../../core/stores/authStore";
 import { usePlayerStore } from "../../core/stores/playerStore";
@@ -96,10 +96,8 @@ const MyPage: React.FC = () => {
       }
 
       if (Object.keys(updateData).length > 0) {
-        await apiClient.patch("/api/me", updateData);
-        if (updateData.username && user) {
-          setUser({ ...user, username: updateData.username });
-        }
+        const response = await apiClient.patch<UserInfo>("/api/me", updateData);
+        setUser({ ...user, ...response.data });
       }
 
       setAccountData({ username: nextUsername, password: "" });

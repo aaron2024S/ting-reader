@@ -7,7 +7,9 @@ use crate::auth::models::{
     LoginRequest, LoginResponse, RegisterRequest, SessionRestoreRequest, SuccessResponse,
     TokenLoginRequest, UpdateUserRequest, UserInfo,
 };
-use crate::auth::password::{hash_password, verify_password};
+use crate::auth::password::{
+    DEFAULT_ADMIN_PASSWORD, DEFAULT_ADMIN_USERNAME, hash_password, verify_password,
+};
 use crate::core::app::error::{Result, TingError};
 use crate::db::models::User;
 use crate::db::repository::Repository;
@@ -28,12 +30,15 @@ use uuid::Uuid;
 const SESSION_RESTORE_LOG_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 static SESSION_RESTORE_LOGS: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
 
-fn user_info_from_user(user: &User) -> UserInfo {
-    UserInfo {
+fn user_info_from_user(user: &User) -> Result<UserInfo> {
+    Ok(UserInfo {
         id: user.id.clone(),
         username: user.username.clone(),
         role: user.role.clone(),
-    }
+        uses_default_admin_credentials: user.role == "admin"
+            && user.username == DEFAULT_ADMIN_USERNAME
+            && verify_password(DEFAULT_ADMIN_PASSWORD, &user.password_hash)?,
+    })
 }
 
 fn record_login_success(
@@ -326,7 +331,7 @@ pub async fn login(
     record_login_success(&state, &user, &request_info, "password");
 
     Ok(Json(LoginResponse {
-        user: user_info_from_user(&user),
+        user: user_info_from_user(&user)?,
         token,
     }))
 }
@@ -366,7 +371,7 @@ pub async fn token_login(
     record_login_success(&state, &user, &request_info, "jwt_token");
 
     Ok(Json(LoginResponse {
-        user: user_info_from_user(&user),
+        user: user_info_from_user(&user)?,
         token: token.to_string(),
     }))
 }
@@ -409,7 +414,7 @@ pub async fn session_restore(
     }
 
     Ok(Json(LoginResponse {
-        user: user_info_from_user(&user),
+        user: user_info_from_user(&user)?,
         token,
     }))
 }
@@ -428,11 +433,7 @@ pub async fn get_me(
         .await?
         .ok_or_else(|| TingError::AuthenticationError("用户不存在".to_string()))?;
 
-    Ok(Json(UserInfo {
-        id: db_user.id,
-        username: db_user.username,
-        role: db_user.role,
-    }))
+    Ok(Json(user_info_from_user(&db_user)?))
 }
 
 /// Handler for PATCH /api/me - Update current user info
@@ -469,9 +470,49 @@ pub async fn update_me(
 
     tracing::info!(user_id = %user.id, "User info updated");
 
-    Ok(Json(UserInfo {
-        id: db_user.id,
-        username: db_user.username,
-        role: db_user.role,
-    }))
+    Ok(Json(user_info_from_user(&db_user)?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_admin_reminder_requires_both_default_credentials_and_admin_role() {
+        let mut user = User {
+            id: "test-admin".into(),
+            username: DEFAULT_ADMIN_USERNAME.into(),
+            password_hash: bcrypt::hash(DEFAULT_ADMIN_PASSWORD, 4).unwrap(),
+            role: "admin".into(),
+            created_at: String::new(),
+        };
+        assert!(
+            user_info_from_user(&user)
+                .unwrap()
+                .uses_default_admin_credentials
+        );
+
+        user.password_hash = bcrypt::hash("changed-password", 4).unwrap();
+        assert!(
+            !user_info_from_user(&user)
+                .unwrap()
+                .uses_default_admin_credentials
+        );
+
+        user.password_hash = bcrypt::hash(DEFAULT_ADMIN_PASSWORD, 4).unwrap();
+        user.username = "renamed-admin".into();
+        assert!(
+            !user_info_from_user(&user)
+                .unwrap()
+                .uses_default_admin_credentials
+        );
+
+        user.username = DEFAULT_ADMIN_USERNAME.into();
+        user.role = "user".into();
+        assert!(
+            !user_info_from_user(&user)
+                .unwrap()
+                .uses_default_admin_credentials
+        );
+    }
 }

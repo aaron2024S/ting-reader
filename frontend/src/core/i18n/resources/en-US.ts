@@ -24,6 +24,10 @@ const enUS = {
     deleteFailed: "Delete failed",
   },
   auth: {
+    defaultCredentialsTitle: "Change the default administrator credentials",
+    defaultCredentialsMessage: "You are still using the default administrator username and password. Go to Mine to change your credentials and protect your data.",
+    defaultCredentialsLater: "Later",
+    defaultCredentialsChange: "Change credentials",
     tagline: "Your private audiobook library",
     serverAddress: "Server Address",
     serverAddressPlaceholder: "e.g. http://192.168.1.10:3000",

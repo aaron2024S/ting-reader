@@ -24,6 +24,10 @@ const zhCN = {
     deleteFailed: "删除失败",
   },
   auth: {
+    defaultCredentialsTitle: "请修改默认管理员账号密码",
+    defaultCredentialsMessage: "您仍在使用默认的管理员账号和密码。为保障数据安全，请前往「我的」修改账号密码。",
+    defaultCredentialsLater: "稍后再说",
+    defaultCredentialsChange: "去修改",
     tagline: "您的私有有声书馆",
     serverAddress: "服务器地址",
     serverAddressPlaceholder: "例如: http://192.168.1.10:3000",

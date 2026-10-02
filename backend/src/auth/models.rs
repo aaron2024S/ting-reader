@@ -42,6 +42,7 @@ pub struct UserInfo {
     pub id: String,
     pub username: String,
     pub role: String,
+    pub uses_default_admin_credentials: bool,
 }
 
 /// Update user request

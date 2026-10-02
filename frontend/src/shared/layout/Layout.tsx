@@ -33,6 +33,7 @@ import { useClientExtensions } from '../../core/hooks/useClientExtensions';
 import { useUiPreferencesStore } from '../../core/stores/uiPreferencesStore';
 
 import Player from '../../features/player/Player';
+import DefaultAdminCredentialsDialog from '../../features/auth/DefaultAdminCredentialsDialog';
 import { isMiniPlayerHiddenPath } from '../../features/player/platform';
 import PluginExtensionHost from '../pluginExtensions/PluginExtensionHost';
 import PluginExtensionIcon from '../pluginExtensions/PluginExtensionIcon';
@@ -51,6 +52,7 @@ const Layout: React.FC = () => {
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [isConnecting, setIsConnecting] = useState(true);
   const [connectionError, setConnectionError] = useState<string | null>(null);
+  const [dismissedDefaultCredentials, setDismissedDefaultCredentials] = useState<string | null>(null);
   const location = useLocation();
   const navigate = useNavigate();
   const isMiniPlayerHidden = isMiniPlayerHiddenPath(location.pathname);
@@ -60,8 +62,11 @@ const Layout: React.FC = () => {
   const token = useAuthStore(state => state.token);
   const setUser = useAuthStore(state => state.setUser);
   const logout = useAuthStore(state => state.logout);
+  const serverUrl = useAuthStore(state => state.serverUrl);
+  const credentialReminderIdentity = `${serverUrl}:${user?.id}`;
   const hasCurrentChapter = usePlayerStore(state => !!state.currentChapter);
   const setPlaybackSpeed = usePlayerStore(state => state.setPlaybackSpeed);
+  const setIsExpanded = usePlayerStore(state => state.setIsExpanded);
   const sidebarCollapsed = useUiPreferencesStore(state => state.sidebarCollapsed);
   const toggleSidebarCollapsed = useUiPreferencesStore(state => state.toggleSidebarCollapsed);
   const setPluginToolMenuEnabled = useUiPreferencesStore(state => state.setPluginToolMenuEnabled);
@@ -395,6 +400,17 @@ const Layout: React.FC = () => {
         {!location.pathname.startsWith('/plugin-pages') && (
           <PluginExtensionHost />
         )}
+        {user?.role === 'admin' && user.uses_default_admin_credentials &&
+          dismissedDefaultCredentials !== credentialReminderIdentity && (
+            <DefaultAdminCredentialsDialog
+              onLater={() => setDismissedDefaultCredentials(credentialReminderIdentity)}
+              onChangeCredentials={() => {
+                setDismissedDefaultCredentials(credentialReminderIdentity);
+                setIsExpanded(false);
+                navigate('/mine');
+              }}
+            />
+          )}
       </div>
     </div>
   );

@@ -2,6 +2,9 @@
 
 use crate::core::app::error::{Result, TingError};
 
+pub const DEFAULT_ADMIN_USERNAME: &str = "admin";
+pub const DEFAULT_ADMIN_PASSWORD: &str = "admin123";
+
 /// Hash a password using bcrypt
 pub fn hash_password(password: &str) -> Result<String> {
     bcrypt::hash(password, bcrypt::DEFAULT_COST)
