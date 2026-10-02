@@ -403,6 +403,14 @@ tar -xzf "$WORK_DIR/$BACKEND_FILE" -C "$WORK_DIR/backend"
 tar -xzf "$WORK_DIR/$FRONTEND_FILE" -C "$WORK_DIR/frontend"
 
 [[ -x "$WORK_DIR/backend/ting-reader" ]] || { say "后端包缺少可执行文件。" "Backend package does not contain the executable."; exit 1; }
+for tool in ffmpeg ffprobe; do
+  [[ -x "$WORK_DIR/backend/bin/$tool" ]] || { say "后端包缺少可执行的 $tool。" "Backend package does not contain executable $tool."; exit 1; }
+  if ! "$WORK_DIR/backend/bin/$tool" -version >"$WORK_DIR/$tool-check.log" 2>&1; then
+    say "后端包中的 $tool 无法在当前系统运行。" "The bundled $tool cannot run on this system."
+    cat "$WORK_DIR/$tool-check.log" >&2
+    exit 1
+  fi
+done
 [[ -f "$WORK_DIR/frontend/static/index.html" ]] || { say "前端包缺少 static/index.html。" "Frontend package does not contain static/index.html."; exit 1; }
 [[ -s "$WORK_DIR/$MANAGER_FILE" ]] || { say "存储库管理脚本下载失败。" "The library management script is missing."; exit 1; }
 [[ -s "$WORK_DIR/$UNINSTALL_FILE" ]] || { say "卸载脚本下载失败。" "The uninstall script is missing."; exit 1; }
@@ -421,6 +429,8 @@ if [[ -f "$INSTALL_DIR/config.toml" ]]; then
 fi
 
 install -m 755 "$WORK_DIR/backend/ting-reader" "$INSTALL_DIR/ting-reader"
+mkdir -p "$INSTALL_DIR/bin"
+install -m 755 "$WORK_DIR/backend/bin/ffmpeg" "$WORK_DIR/backend/bin/ffprobe" "$INSTALL_DIR/bin/"
 install -m 755 "$WORK_DIR/$MANAGER_FILE" "$INSTALL_DIR/manage-libraries.sh"
 install -m 755 "$WORK_DIR/$UNINSTALL_FILE" "$INSTALL_DIR/uninstall.sh"
 install -m 755 "$WORK_DIR/$UPDATE_FILE" "$INSTALL_DIR/update.sh"

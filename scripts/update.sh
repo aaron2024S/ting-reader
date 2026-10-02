@@ -9,6 +9,7 @@ INSTALL_DIR=""
 BACKUP_DIR=""
 SERVICE_MODE="manual"
 REPLACEMENT_STARTED="false"
+MEDIA_TOOLS_REPLACEMENT_STARTED="false"
 
 if [[ -r /dev/tty ]]; then
   exec 3</dev/tty
@@ -184,6 +185,16 @@ rollback() {
   if [[ "$REPLACEMENT_STARTED" == "true" && -n "$BACKUP_DIR" ]]; then
     say "更新失败，正在恢复旧版本……" "Update failed. Restoring the previous version..."
     [[ -f "$BACKUP_DIR/ting-reader" ]] && install -m 755 "$BACKUP_DIR/ting-reader" "$INSTALL_DIR/ting-reader"
+    if [[ "$MEDIA_TOOLS_REPLACEMENT_STARTED" == "true" ]]; then
+      for tool in ffmpeg ffprobe; do
+        if [[ -f "$BACKUP_DIR/bin/$tool" ]]; then
+          install -m 755 "$BACKUP_DIR/bin/$tool" "$INSTALL_DIR/bin/$tool"
+        else
+          rm -f -- "$INSTALL_DIR/bin/$tool"
+        fi
+      done
+      rmdir -- "$INSTALL_DIR/bin" 2>/dev/null || true
+    fi
     if [[ -d "$BACKUP_DIR/static" ]]; then
       rm -rf -- "$INSTALL_DIR/static"
       mv "$BACKUP_DIR/static" "$INSTALL_DIR/static"
@@ -268,6 +279,14 @@ mkdir -p "$WORK_DIR/backend" "$WORK_DIR/frontend"
 tar -xzf "$WORK_DIR/$BACKEND_FILE" -C "$WORK_DIR/backend"
 tar -xzf "$WORK_DIR/$FRONTEND_FILE" -C "$WORK_DIR/frontend"
 [[ -x "$WORK_DIR/backend/ting-reader" ]] || { say "后端包无效。" "Invalid backend package."; exit 1; }
+for tool in ffmpeg ffprobe; do
+  [[ -x "$WORK_DIR/backend/bin/$tool" ]] || { say "后端包缺少可执行的 $tool。" "Backend package does not contain executable $tool."; exit 1; }
+  if ! "$WORK_DIR/backend/bin/$tool" -version >"$WORK_DIR/$tool-check.log" 2>&1; then
+    say "后端包中的 $tool 无法在当前系统运行。" "The bundled $tool cannot run on this system."
+    cat "$WORK_DIR/$tool-check.log" >&2
+    exit 1
+  fi
+done
 [[ -f "$WORK_DIR/frontend/static/index.html" ]] || { say "前端包无效。" "Invalid frontend package."; exit 1; }
 
 SERVICE_MODE="$(detect_service_mode)"
@@ -275,6 +294,7 @@ BACKUP_DIR="$INSTALL_DIR/backups/update-$(date +%Y%m%d%H%M%S)"
 mkdir -p "$BACKUP_DIR"
 cp -p "$INSTALL_DIR/ting-reader" "$BACKUP_DIR/ting-reader"
 [[ -f "$INSTALL_DIR/config.toml" ]] && cp -p "$INSTALL_DIR/config.toml" "$BACKUP_DIR/config.toml"
+[[ -d "$INSTALL_DIR/bin" ]] && cp -a "$INSTALL_DIR/bin" "$BACKUP_DIR/bin"
 
 stop_service
 trap rollback ERR
@@ -288,6 +308,9 @@ if [[ -d "$INSTALL_DIR/preinstalled-plugins" ]]; then
 fi
 
 install -m 755 "$WORK_DIR/backend/ting-reader" "$INSTALL_DIR/ting-reader"
+MEDIA_TOOLS_REPLACEMENT_STARTED="true"
+mkdir -p "$INSTALL_DIR/bin"
+install -m 755 "$WORK_DIR/backend/bin/ffmpeg" "$WORK_DIR/backend/bin/ffprobe" "$INSTALL_DIR/bin/"
 mv "$WORK_DIR/frontend/static" "$INSTALL_DIR/static"
 if [[ -d "$WORK_DIR/backend/preinstalled-plugins" ]]; then
   cp -a "$WORK_DIR/backend/preinstalled-plugins" "$INSTALL_DIR/preinstalled-plugins"

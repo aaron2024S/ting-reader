@@ -88,8 +88,8 @@ safe_remove_tree() {
   local expected_scope="$2"
   local resolved_path
 
-  [[ -n "$requested_path" ]] || return
-  [[ -e "$requested_path" || -L "$requested_path" ]] || return
+  [[ -n "$requested_path" ]] || return 0
+  [[ -e "$requested_path" || -L "$requested_path" ]] || return 0
   if [[ -L "$requested_path" ]]; then
     say "检测到符号链接，拒绝递归删除其目标：$requested_path" "Symlink detected; refusing to recursively remove its target: $requested_path"
     return 1
@@ -117,7 +117,7 @@ safe_remove_tree() {
 
 safe_remove_file() {
   local path="$1"
-  [[ -e "$path" || -L "$path" ]] || return
+  [[ -e "$path" || -L "$path" ]] || return 0
   is_install_child "$path" || { say "拒绝删除安装目录外的文件：$path" "Refusing to remove a file outside the installation directory: $path"; return 1; }
   privileged rm -f -- "$path"
 }
@@ -187,7 +187,7 @@ remove_matching_symlink() {
   local link_path="$1"
   local target
 
-  [[ -L "$link_path" ]] || return
+  [[ -L "$link_path" ]] || return 0
   target="$(readlink -f -- "$link_path" 2>/dev/null || true)"
   if [[ "$target" == "$INSTALL_DIR/"* ]]; then
     privileged rm -f -- "$link_path"
@@ -276,6 +276,7 @@ remove_matching_symlink "$HOME/.local/bin/ting-reader-update"
 remove_matching_symlink "$HOME/.local/bin/ting-reader-uninstall"
 
 safe_remove_tree "$INSTALL_DIR/static" install
+safe_remove_tree "$INSTALL_DIR/bin" install
 safe_remove_tree "$INSTALL_DIR/preinstalled-plugins" install
 safe_remove_file "$INSTALL_DIR/ting-reader"
 safe_remove_file "$INSTALL_DIR/run.sh"
