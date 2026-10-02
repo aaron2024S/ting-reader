@@ -248,6 +248,9 @@ const enUS = {
     strmDirectError: "Direct playback failed. Check the network, origin, access or format.",
   },
   bookshelf: {
+    viewMode: "View Mode",
+    gridView: "Grid (Default)",
+    listView: "List",
     read: "Read",
     unread: "Unread",
     markRead: "Mark as read",

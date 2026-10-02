@@ -85,7 +85,7 @@ const DisplaySettingsMenu: React.FC<Props> = ({
 
       {open && (
         <div
-          className="absolute right-0 top-full mt-2 w-56 max-w-[calc(100vw-2rem)] bg-white dark:bg-slate-900 border border-slate-100 dark:border-slate-800 rounded-2xl shadow-xl z-50 py-2 animate-in zoom-in-95 duration-200"
+          className="absolute right-0 top-full mt-2 w-56 max-w-[calc(100vw-2rem)] max-h-[65dvh] overflow-y-auto bg-white dark:bg-slate-900 border border-slate-100 dark:border-slate-800 rounded-2xl shadow-xl z-50 py-2 animate-in zoom-in-95 duration-200"
           aria-label={resolvedSheetLabel}
         >
           {renderMenuContent()}

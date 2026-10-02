@@ -233,6 +233,9 @@ const zhCN = {
     strmDirectError: "音源直连失败，可能是网络、跨域、鉴权或格式问题",
   },
   bookshelf: {
+    viewMode: "展示模式",
+    gridView: "网格（默认）",
+    listView: "列表",
     read: "已读",
     unread: "未读",
     markRead: "标记已读",

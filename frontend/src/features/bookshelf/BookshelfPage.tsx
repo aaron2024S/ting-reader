@@ -15,6 +15,7 @@ import { useAuthStore } from '../../core/stores/authStore';
 import { getPinyinInitial } from '../../core/utils/pinyin';
 import { localeCompare } from '../../core/utils/locale';
 import { publishBookshelfCoverShape } from '../../core/hooks/useBookshelfCoverShape';
+import BookshelfListItem from './BookshelfListItem';
 
 const BookshelfPage: React.FC = () => {
   const { t } = useTranslation();
@@ -29,6 +30,7 @@ const BookshelfPage: React.FC = () => {
   const [sortBy, setSortBy] = useState<'createdAt' | 'title' | 'author' | 'year'>('createdAt');
   const [iconSize, setIconSize] = useState<'small' | 'medium' | 'large'>('medium');
   const [coverShape, setCoverShape] = useState<'rect' | 'square'>('square');
+  const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid');
   const [showFilterMenu, setShowFilterMenu] = useState(false);
   const [settingsLoaded, setSettingsLoaded] = useState(false);
   
@@ -110,6 +112,7 @@ const BookshelfPage: React.FC = () => {
         if (settings.bookshelf_cover_shape) {
           setCoverShape(settings.bookshelf_cover_shape);
         }
+        setViewMode(settings.bookshelf_view_mode === 'list' ? 'list' : 'grid');
       } catch (err) {
         console.error('Failed to load bookshelf settings', err);
       } finally {
@@ -162,6 +165,12 @@ const BookshelfPage: React.FC = () => {
     setShowFilterMenu(false);
     publishBookshelfCoverShape(newShape);
     apiClient.post('/api/settings', { bookshelf_cover_shape: newShape });
+  };
+
+  const handleViewModeChange = (newMode: 'grid' | 'list') => {
+    setViewMode(newMode);
+    setShowFilterMenu(false);
+    apiClient.post('/api/settings', { bookshelf_view_mode: newMode });
   };
 
   const fetchData = async () => {
@@ -488,6 +497,37 @@ const BookshelfPage: React.FC = () => {
     } as Series;
   }, [selectedSeriesIds, series]);
 
+  const shelfLayoutClass = viewMode === 'list'
+    ? 'divide-y divide-slate-100 overflow-hidden rounded-2xl border border-slate-100 bg-white dark:divide-slate-800 dark:border-slate-800 dark:bg-slate-900'
+    : `grid ${getGridCols()}`;
+
+  const renderShelfItem = (item: Book | Series, kind: 'book' | 'series') => {
+    const selected = (kind === 'series' ? selectedSeriesIds : selectedBookIds).includes(item.id);
+    const onSelect = () => kind === 'series' ? toggleSeriesSelection(item.id) : toggleBookSelection(item.id);
+    if (viewMode === 'list') {
+      return (
+        <BookshelfListItem key={`${kind}-${item.id}`} item={item} kind={kind}
+          coverShape={coverShape} iconSize={iconSize} selected={selected}
+          onSelect={isSelectionMode ? onSelect : undefined} />
+      );
+    }
+    const card = kind === 'series'
+      ? <SeriesCard series={item as Series} coverShape={coverShape} onClick={isSelectionMode ? onSelect : undefined} />
+      : <BookCard book={item as Book} coverShape={coverShape} disableLink={isSelectionMode} onClick={isSelectionMode ? onSelect : undefined} />;
+    return (
+      <div key={`${kind}-${item.id}`} className="relative">
+        {isSelectionMode ? (
+          <>
+            <div className={`absolute top-2 right-2 z-30 w-6 h-6 rounded-full border-2 flex items-center justify-center transition-all pointer-events-none ${selected ? 'bg-primary-600 border-primary-600 text-white' : 'bg-white/80 dark:bg-slate-900/80 border-slate-300 dark:border-slate-600'}`}>
+              {selected && <Check size={14} />}
+            </div>
+            <div className={`transition-opacity duration-200 ${selected ? 'opacity-100' : 'opacity-60 grayscale-[0.5]'}`}>{card}</div>
+          </>
+        ) : card}
+      </div>
+    );
+  };
+
   if (loading) {
     return (
       <div className="flex-1 flex flex-col items-center justify-center min-h-full">
@@ -659,6 +699,15 @@ const BookshelfPage: React.FC = () => {
               onOpenChange={setShowFilterMenu}
               sections={[
                 {
+                  title: t('bookshelf.viewMode'),
+                  value: viewMode,
+                  options: [
+                    { value: 'grid', label: t('bookshelf.gridView') },
+                    { value: 'list', label: t('bookshelf.listView') },
+                  ],
+                  onChange: (value) => handleViewModeChange(value as 'grid' | 'list'),
+                },
+                {
                   title: t('bookshelf.sortBy'),
                   value: sortBy,
                   options: [
@@ -755,97 +804,17 @@ const BookshelfPage: React.FC = () => {
                    <div className="text-xs font-bold text-slate-400 dark:text-slate-500 mb-2 pl-1">
                       {key}
                    </div>
-                   <div className={`grid ${getGridCols()}`}>
-                     {visibleGroupedItems.groups[key].map(item => (
-                       'books' in item ? (
-                          <div key={item.id} className="relative">
-                            {isSelectionMode ? (
-                              <>
-                                <div className={`absolute top-2 right-2 z-30 w-6 h-6 rounded-full border-2 flex items-center justify-center transition-all pointer-events-none ${selectedSeriesIds.includes(item.id) ? 'bg-primary-600 border-primary-600 text-white' : 'bg-white/80 dark:bg-slate-900/80 border-slate-300 dark:border-slate-600'}`}>
-                                  {selectedSeriesIds.includes(item.id) && <Check size={14} />}
-                                </div>
-                                <div className={`transition-opacity duration-200 ${selectedSeriesIds.includes(item.id) ? 'opacity-100' : 'opacity-60 grayscale-[0.5]'}`}>
-                                  <SeriesCard 
-                                    series={item as Series} 
-                                    onClick={() => toggleSeriesSelection(item.id)} 
-                                    coverShape={coverShape} 
-                                  />
-                                </div>
-                              </>
-                            ) : (
-                              <SeriesCard series={item as Series} coverShape={coverShape} />
-                            )}
-                          </div>
-                       ) : (
-                         <div key={item.id} className="relative">
-                          {isSelectionMode ? (
-                            <>
-                              <div className={`absolute top-2 right-2 z-30 w-6 h-6 rounded-full border-2 flex items-center justify-center transition-all pointer-events-none ${selectedBookIds.includes(item.id) ? 'bg-primary-600 border-primary-600 text-white' : 'bg-white/80 dark:bg-slate-900/80 border-slate-300 dark:border-slate-600'}`}>
-                                {selectedBookIds.includes(item.id) && <Check size={14} />}
-                              </div>
-                              <div className={`transition-opacity duration-200 ${selectedBookIds.includes(item.id) ? 'opacity-100' : 'opacity-60 grayscale-[0.5]'}`}>
-                                <BookCard 
-                                  book={item as Book} 
-                                  disableLink 
-                                  onClick={() => toggleBookSelection(item.id)} 
-                                  coverShape={coverShape}
-                                />
-                              </div>
-                            </>
-                          ) : (
-                            <BookCard book={item as Book} coverShape={coverShape} />
-                          )}
-                       </div>
-                       )
-                     ))}
+                   <div className={shelfLayoutClass}>
+                     {visibleGroupedItems.groups[key].map(item => renderShelfItem(item, 'books' in item ? 'series' : 'book'))}
                    </div>
                  </div>
                ))}
              </div>
           ) : (
             // Default Layout (Recent)
-            <div className={`grid ${getGridCols()}`}>
-              {visibleSeries.map((s) => (
-                <div key={s.id} className="relative">
-                  {isSelectionMode ? (
-                    <>
-                      <div className={`absolute top-2 right-2 z-30 w-6 h-6 rounded-full border-2 flex items-center justify-center transition-all pointer-events-none ${selectedSeriesIds.includes(s.id) ? 'bg-primary-600 border-primary-600 text-white' : 'bg-white/80 dark:bg-slate-900/80 border-slate-300 dark:border-slate-600'}`}>
-                        {selectedSeriesIds.includes(s.id) && <Check size={14} />}
-                      </div>
-                      <div className={`transition-opacity duration-200 ${selectedSeriesIds.includes(s.id) ? 'opacity-100' : 'opacity-60 grayscale-[0.5]'}`}>
-                        <SeriesCard 
-                          series={s} 
-                          onClick={() => toggleSeriesSelection(s.id)} 
-                          coverShape={coverShape} 
-                        />
-                      </div>
-                    </>
-                  ) : (
-                    <SeriesCard series={s} coverShape={coverShape} />
-                  )}
-                </div>
-              ))}
-              {visibleBooks.map((book) => (
-                <div key={book.id} className="relative">
-                  {isSelectionMode ? (
-                    <>
-                      <div className={`absolute top-2 right-2 z-30 w-6 h-6 rounded-full border-2 flex items-center justify-center transition-all pointer-events-none ${selectedBookIds.includes(book.id) ? 'bg-primary-600 border-primary-600 text-white' : 'bg-white/80 dark:bg-slate-900/80 border-slate-300 dark:border-slate-600'}`}>
-                        {selectedBookIds.includes(book.id) && <Check size={14} />}
-                      </div>
-                      <div className={`transition-opacity duration-200 ${selectedBookIds.includes(book.id) ? 'opacity-100' : 'opacity-60 grayscale-[0.5]'}`}>
-                        <BookCard 
-                          book={book} 
-                          disableLink 
-                          onClick={() => toggleBookSelection(book.id)} 
-                          coverShape={coverShape}
-                        />
-                      </div>
-                    </>
-                  ) : (
-                    <BookCard book={book} coverShape={coverShape} />
-                  )}
-                </div>
-              ))}
+            <div className={shelfLayoutClass}>
+              {visibleSeries.map(item => renderShelfItem(item, 'series'))}
+              {visibleBooks.map(item => renderShelfItem(item, 'book'))}
             </div>
           )}
 
