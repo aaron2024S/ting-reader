@@ -131,16 +131,23 @@ impl BudgetState {
         if self.reason.load(Ordering::SeqCst) != 0 {
             return false;
         }
-        if self
-            .external_bytes
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
-                current
-                    .checked_add(length)
-                    .filter(|total| *total <= self.external_limit)
-            })
-            .is_ok()
-        {
-            return true;
+        let mut current = self.external_bytes.load(Ordering::SeqCst);
+        loop {
+            let Some(total) = current
+                .checked_add(length)
+                .filter(|total| *total <= self.external_limit)
+            else {
+                break;
+            };
+            match self.external_bytes.compare_exchange_weak(
+                current,
+                total,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => return true,
+                Err(next) => current = next,
+            }
         }
         self.reason
             .compare_exchange(0, MEMORY_EXCEEDED, Ordering::SeqCst, Ordering::SeqCst)
