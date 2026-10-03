@@ -2,6 +2,11 @@ name: Native FPK Build and Release
 
 on:
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Existing release tag to rebuild from the selected source ref, e.g. v2.0.2'
+        type: string
+        default: ''
   push:
     tags:
       - 'v*'
@@ -35,6 +40,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
 
       - name: Configure Git workspace for container steps
         run: |
@@ -43,8 +50,16 @@ jobs:
 
       - name: Resolve release context
         id: release_context
+        env:
+          REQUESTED_TAG: ${{ inputs.release_tag }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "$REQUESTED_TAG" ]; then
+            [[ "$REQUESTED_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+            git ls-remote --exit-code origin "refs/tags/$REQUESTED_TAG" >/dev/null
+            TARGET="formal"
+            VERSION="${REQUESTED_TAG#v}"
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             TARGET="beta"
             VERSION="beta"
           elif [ "${{ github.ref_type }}" = "tag" ]; then
@@ -55,9 +70,18 @@ jobs:
             exit 1
           fi
 
+          if [ "$TARGET" = formal ]; then
+            SOURCE_VERSION="$(awk -F'"' '/^version[[:space:]]*=/{print $2; exit}' backend/Cargo.toml)"
+            if [ "$SOURCE_VERSION" != "$VERSION" ]; then
+              echo "::error::Source version $SOURCE_VERSION does not match release version $VERSION"
+              exit 1
+            fi
+          fi
+
           echo "VERSION=$VERSION" >> $GITHUB_ENV
           echo "target=$TARGET" >> $GITHUB_OUTPUT
           echo "Resolved $TARGET build for version $VERSION"
+          echo "Source commit: $(git rev-parse HEAD)"
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
