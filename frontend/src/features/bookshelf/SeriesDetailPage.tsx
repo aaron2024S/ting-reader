@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next';
 import apiClient from '../../core/api/client';
 import type { Book, Series } from '../../core/types';
 import BookCard from '../../shared/cards/BookCard';
+import BookshelfListItem from './BookshelfListItem';
 import BookSelector from '../../shared/modals/BookSelector';
 import DisplaySettingsMenu from '../../shared/widgets/DisplaySettingsMenu';
 import { ArrowLeft, Trash2, Save, Settings, X, Plus, Check, CheckSquare, Layers, ChevronDown, BookCheck, BookX } from 'lucide-react';
@@ -46,6 +47,7 @@ const SeriesDetailPage: React.FC = () => {
   // Filter & Sort state
   const [sortBy, setSortBy] = useState<SeriesSortBy>('default');
   const [iconSize, setIconSize] = useState<'small' | 'medium' | 'large'>('medium');
+  const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid');
   const [showFilterMenu, setShowFilterMenu] = useState(false);
 
   // Edit form state
@@ -93,6 +95,7 @@ const SeriesDetailPage: React.FC = () => {
         if (settings.series_icon_size === 'small' || settings.series_icon_size === 'medium' || settings.series_icon_size === 'large') {
           setIconSize(settings.series_icon_size);
         }
+        setViewMode(settings.series_view_mode === 'list' ? 'list' : 'grid');
       } catch (err) {
         console.error('Failed to load series settings', err);
       }
@@ -155,6 +158,11 @@ const SeriesDetailPage: React.FC = () => {
     setIconSize(newSize);
     setShowFilterMenu(false);
     apiClient.post('/api/settings', { series_icon_size: newSize });
+  };
+  const handleViewModeChange = (newMode: 'grid' | 'list') => {
+    setViewMode(newMode);
+    setShowFilterMenu(false);
+    apiClient.post('/api/settings', { series_view_mode: newMode });
   };
 
   const getGridCols = () => {
@@ -376,6 +384,15 @@ const SeriesDetailPage: React.FC = () => {
               sheetLabel={t('bookshelf.closeSeriesDisplaySettings')}
               sections={[
                 {
+                  title: t('bookshelf.viewMode'),
+                  value: viewMode,
+                  options: [
+                    { value: 'grid', label: t('bookshelf.gridView') },
+                    { value: 'list', label: t('bookshelf.listView') },
+                  ],
+                  onChange: (value) => handleViewModeChange(value as 'grid' | 'list'),
+                },
+                {
                   title: t('bookshelf.sortBy'),
                   value: sortBy,
                   options: [
@@ -540,17 +557,35 @@ const SeriesDetailPage: React.FC = () => {
                 </div>
                 
                 {books.length > 0 ? (
-                    <div className={`grid ${getGridCols()}`}>
+                    <div className={viewMode === 'list' ? 'overflow-hidden rounded-2xl border border-slate-100 bg-white divide-y divide-slate-100 dark:border-slate-800 dark:bg-slate-900 dark:divide-slate-800' : `grid ${getGridCols()}`}>
                         {getSortedBooks().map((book) => (
                             <div key={book.id} className="relative">
-                              {isSelectionMode && (
-                                <div className={`absolute top-2 right-2 z-30 w-6 h-6 rounded-full border-2 flex items-center justify-center pointer-events-none ${selectedBookIds.includes(book.id) ? 'bg-primary-600 border-primary-600 text-white' : 'bg-white/80 border-slate-300 dark:bg-slate-900/80 dark:border-slate-600'}`}>
-                                  {selectedBookIds.includes(book.id) && <Check size={14} strokeWidth={3} />}
-                                </div>
+                              {viewMode === 'list' ? (
+                                <BookshelfListItem
+                                  item={book}
+                                  kind="book"
+                                  coverShape={coverShape}
+                                  iconSize={iconSize}
+                                  selected={selectedBookIds.includes(book.id)}
+                                  onSelect={isSelectionMode ? () => toggleBookSelection(book.id) : undefined}
+                                />
+                              ) : (
+                                <>
+                                  {isSelectionMode && (
+                                    <div className={`absolute top-2 right-2 z-30 w-6 h-6 rounded-full border-2 flex items-center justify-center pointer-events-none ${selectedBookIds.includes(book.id) ? 'bg-primary-600 border-primary-600 text-white' : 'bg-white/80 border-slate-300 dark:bg-slate-900/80 dark:border-slate-600'}`}>
+                                      {selectedBookIds.includes(book.id) && <Check size={14} strokeWidth={3} />}
+                                    </div>
+                                  )}
+                                  <div className={isSelectionMode && !selectedBookIds.includes(book.id) ? 'opacity-60 grayscale-[0.5]' : ''}>
+                                    <BookCard
+                                      book={book}
+                                      coverShape={coverShape}
+                                      disableLink={isSelectionMode}
+                                      onClick={isSelectionMode ? () => toggleBookSelection(book.id) : undefined}
+                                    />
+                                  </div>
+                                </>
                               )}
-                              <div className={isSelectionMode && !selectedBookIds.includes(book.id) ? 'opacity-60 grayscale-[0.5]' : ''}>
-                                <BookCard book={book} coverShape={coverShape} disableLink={isSelectionMode} onClick={isSelectionMode ? () => toggleBookSelection(book.id) : undefined} />
-                              </div>
                             </div>
                         ))}
                     </div>
