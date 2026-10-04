@@ -355,10 +355,10 @@ impl ApiServer {
             crate::api::handlers::media::stream::HlsSessionManager::new(hls_temp_dir),
         );
 
-        // Start HLS session cleanup task (runs every 10 minutes)
+        // Explicit player teardown is backed by frequent idle-session cleanup.
         let hls_manager_clone = hls_session_manager.clone();
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(600));
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
             loop {
                 interval.tick().await;
                 hls_manager_clone.cleanup_expired().await;

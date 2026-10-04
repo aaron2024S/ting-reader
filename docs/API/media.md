@@ -71,7 +71,8 @@
 {
   "type": "hls",
   "session_id": "string",
-  "playlist_url": "/api/stream/hls/{sessionId}/playlist.m3u8",
+  "playlist_url": "/api/stream/hls/{sessionId}/0/playlist.m3u8",
+  "start_offset": 0,
   "is_strm": false,
   "ready": true
 }
@@ -117,19 +118,24 @@ Web 使用普通音频元素加载重定向地址，不设置 `crossOrigin`。�
 
 ## HLS 流
 
-### GET /api/stream/hls/:sessionId/playlist.m3u8
+HLS 使用 AAC 128kbps、4 秒 MPEG-TS 分片和 EVENT 播放列表，边转码边播放。只有完整首片与播放列表都可读取时，初始化才返回 `ready: true`；首片超时或 FFmpeg 失败返回错误。格式插件先解密再将音频流送入 FFmpeg，普通格式优先读取完整磁盘缓存。
 
-获取 HLS 播放列表（无需认证，Session ID 提供安全保护）。
+最多同时保留 3 个会话（含正在启动的会话）。会话 ID 是播放与控制接口的访问凭据，请勿公开。客户端切章、退出或播放失败时应主动删除会话；暂停期间每 30 秒发送心跳。120 秒未访问的会话由服务端定时回收，并终止进程、取消输入任务、删除临时文件。
+
+### GET /api/stream/hls/:sessionId/:generation/playlist.m3u8
+
+获取指定转码代次的播放列表，无需再次认证。分片使用相对地址，与播放列表共用代次目录。播放列表禁止缓存。
 
 **路径参数：**
 
 | 参数 | 类型 | 说明 |
 |------|------|------|
 | sessionId | string | HLS 会话 ID |
+| generation | number | 转码代次，首次为 `0`，超出已生成范围的跳转会递增 |
 
 ---
 
-### GET /api/stream/hls/:sessionId/:filename
+### GET /api/stream/hls/:sessionId/:generation/:filename
 
 获取 HLS 分片（无需认证）。
 
@@ -138,13 +144,16 @@ Web 使用普通音频元素加载重定向地址，不设置 `crossOrigin`。�
 | 参数 | 类型 | 说明 |
 |------|------|------|
 | sessionId | string | HLS 会话 ID |
+| generation | number | 转码代次 |
 | filename | string | 分片文件名，如 `segment_000.ts` |
+
+分片以流式响应发送，不声明 Range 支持。旧版无代次的播放列表和分片地址仍可访问当前代次；新客户端应使用初始化或跳转返回的完整地址，避免切换代次时混用分片。
 
 ---
 
 ### POST /api/stream/hls/:sessionId/seek
 
-HLS 流跳转（无需认证）。
+HLS 流跳转（凭会话 ID 访问）。当前代次中已生成的范围直接复用；超出范围时重启转码，等待新首片可播放后返回。最多保留 3 个代次，新代次不覆盖旧分片。客户端已有可跳转范围时可直接修改播放器时间，无需调用此接口。
 
 **路径参数：**
 
@@ -156,7 +165,7 @@ HLS 流跳转（无需认证）。
 
 | 参数 | 类型 | 说明 |
 |------|------|------|
-| seek | number | 跳转秒数 |
+| seek | number | 非负有限秒数，省略时为 `0` |
 
 **响应：** `200 OK`
 
@@ -165,9 +174,22 @@ HLS 流跳转（无需认证）。
   "status": "seeked",
   "seek_time": 120.5,
   "seq": 2,
-  "playlist_url": "/api/stream/hls/{sessionId}/playlist.m3u8?seq=2"
+  "start_offset": 120.5,
+  "playback_time": 0,
+  "reused": false,
+  "playlist_url": "/api/stream/hls/{sessionId}/2/playlist.m3u8"
 }
 ```
+
+`start_offset` 为播放列表对应的章节起始位置，播放器时间加上它才是章节绝对进度。复用时播放器应跳到 `playback_time`，不能再次把 `seek_time` 当作新流起点。
+
+### POST /api/stream/hls/:sessionId/touch
+
+更新会话的最后访问时间，返回 `204 No Content`；会话已被回收时返回 `404`。
+
+### DELETE /api/stream/hls/:sessionId
+
+终止转码、取消解密输入任务并删除会话文件，返回 `204 No Content`。重复删除仍返回 `204`。
 
 ---
 

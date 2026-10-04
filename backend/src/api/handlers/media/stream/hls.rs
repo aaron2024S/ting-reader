@@ -1,14 +1,20 @@
+use super::hls_session::{HlsGeneration, HlsProcess, HlsSession};
 use crate::api::state::AppState;
 use crate::core::app::error::{Result, TingError};
 use crate::db::models::{Book, Chapter, Library};
-use axum::{
-    http::StatusCode,
-    response::{IntoResponse, Response},
-};
+use axum::response::{IntoResponse, Response};
+use bytes::Bytes;
+use futures::{StreamExt, stream::BoxStream};
+use std::path::Path;
 use std::process::Stdio;
-use tokio::io::AsyncReadExt;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+use std::time::{Duration, Instant};
+use ting_plugin_contract::format::FormatOperation;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-/// 处理 HLS 转码请求
 pub async fn handle_hls_request(
     state: AppState,
     chapter: Chapter,
@@ -17,177 +23,229 @@ pub async fn handle_hls_request(
     is_strm: bool,
     seek: Option<String>,
 ) -> Result<Response> {
-    // 1. 获取输入源 URL
-    let input_url = get_input_url(&state, &chapter, &library, is_strm).await?;
-    let is_remote_input = is_strm || library.library_type != "local";
-
-    // 2. 创建 HLS 会话
-    let session_id = state
+    let start_offset = parse_seek(seek.as_deref())?;
+    let pending = state
         .hls_session_manager
-        .create_session(
-            chapter.id.clone(),
-            library.id.clone(),
-            _book.id.clone(),
-            is_strm,
-            Some(input_url.clone()),
-        )
-        .await
-        .map_err(|e| {
-            if e.contains("Too many") {
-                TingError::ResourceLimitExceeded(e)
-            } else {
-                TingError::ExternalError(e)
-            }
-        })?;
-
-    let temp_dir = state
-        .hls_session_manager
-        .get_session(&session_id)
-        .await
-        .ok_or_else(|| TingError::ExternalError("Failed to create session".to_string()))?;
-
-    // 3. 启动 FFmpeg 转码
-    start_hls_transcoding(
-        &state,
-        &session_id,
-        &temp_dir,
-        &input_url,
-        is_remote_input,
-        seek.as_deref(),
-    )
-    .await?;
-
-    // 4. 等待首分片生成
-    wait_for_first_segment(&temp_dir, is_remote_input).await;
-
-    // 5. 返回播放列表 URL（JSON 格式，前端解析后传给 ExoPlayer）
-    let playlist_url = format!("/api/stream/hls/{}/playlist.m3u8", session_id);
-
-    Ok((
-        StatusCode::OK,
-        axum::Json(serde_json::json!({
-            "type": "hls",
-            "session_id": session_id,
-            "playlist_url": playlist_url,
-            "is_strm": is_strm,
-            "ready": temp_dir.join("segment_000.ts").exists()
-        })),
-    )
-        .into_response())
+        .create_session(chapter.id.clone(), library.id.clone(), is_strm)
+        .await?;
+    let mut session = pending.session.lock().await;
+    let generation =
+        start_generation(&state, &mut session, &chapter, &library, start_offset).await?;
+    drop(session);
+    let session_id = pending.commit();
+    Ok(axum::Json(serde_json::json!({
+        "type": "hls",
+        "session_id": session_id,
+        "playlist_url": playlist_url(&session_id, generation.seq),
+        "start_offset": generation.start_offset,
+        "is_strm": is_strm,
+        "ready": true
+    }))
+    .into_response())
 }
 
-/// 获取输入源 URL（复用现有逻辑）
-pub async fn get_input_url_for_seek(
+pub(super) fn parse_seek(seek: Option<&str>) -> Result<f64> {
+    let value = seek
+        .unwrap_or("0")
+        .parse::<f64>()
+        .map_err(|_| TingError::InvalidRequest("Invalid HLS seek time".into()))?;
+    validate_seek(value)?;
+    Ok(value)
+}
+
+pub(super) fn validate_seek(value: f64) -> Result<()> {
+    if !value.is_finite() || value < 0.0 {
+        return Err(TingError::InvalidRequest(
+            "HLS seek time must be finite and nonnegative".into(),
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn playlist_url(session_id: &str, seq: u32) -> String {
+    format!("/api/stream/hls/{session_id}/{seq}/playlist.m3u8")
+}
+
+enum HlsInput {
+    Direct(String),
+    Decrypted(BoxStream<'static, std::io::Result<Bytes>>),
+}
+
+async fn get_input(
     state: &AppState,
     chapter: &Chapter,
     library: &Library,
     is_strm: bool,
-) -> Result<String> {
-    get_input_url(state, chapter, library, is_strm).await
-}
-
-/// 启动 HLS 转码（公开接口用于 Seek）
-pub async fn start_hls_transcoding_internal(
-    state: &AppState,
-    session_id: &str,
-    temp_dir: &std::path::Path,
-    input_url: &str,
-    is_strm: bool,
-    seek: Option<&str>,
-) -> Result<()> {
-    start_hls_transcoding(state, session_id, temp_dir, input_url, is_strm, seek).await
-}
-
-/// 获取输入源 URL（内部使用）
-async fn get_input_url(
-    state: &AppState,
-    chapter: &Chapter,
-    library: &Library,
-    is_strm: bool,
-) -> Result<String> {
+) -> Result<HlsInput> {
     if is_strm {
-        // 读取 strm 文件内容
-        let url = if library.library_type == "local" {
-            std::fs::read_to_string(&chapter.path)
-                .map_err(TingError::IoError)?
-                .trim()
-                .to_string()
-        } else if library.library_type == "webdav" {
-            let (mut reader, _) = state
-                .storage_service
-                .get_webdav_reader(library, &chapter.path, None, state.encryption_key.as_ref())
-                .await?;
-
-            let mut content = String::new();
-            reader.read_to_string(&mut content).await?;
-            content.trim().to_string()
-        } else {
-            let (mut reader, _) = state
-                .storage_service
-                .get_http_reader(&chapter.path, None)
-                .await?;
-
-            let mut content = String::new();
-            reader.read_to_string(&mut content).await?;
-            content.trim().to_string()
-        };
-
-        if url.is_empty() || !url.starts_with("http") {
-            return Err(TingError::InvalidRequest("Invalid strm URL".to_string()));
-        }
-
-        tracing::info!("HLS transcoding strm: {}", sanitize_url(&url));
-        Ok(url)
-    } else if matches!(library.library_type.as_str(), "local" | "rss") {
-        Ok(chapter.path.clone())
+        let reader: Box<dyn tokio::io::AsyncRead + Send + Unpin> =
+            if library.library_type == "local" {
+                Box::new(tokio::fs::File::open(&chapter.path).await?)
+            } else {
+                super::get_remote_media_reader(state, library, &chapter.path, None)
+                    .await?
+                    .0
+            };
+        let url = super::strm::read_strm_url(reader).await?;
+        super::strm::validate_strm_url(&url)?;
+        return Ok(HlsInput::Direct(url));
+    }
+    if state
+        .plugin_manager
+        .has_format_operation(Path::new(&chapter.path), FormatOperation::OpenDecrypt)
+        .await?
+    {
+        let (stream, _, _, _, _, _, _) =
+            super::create_decrypted_stream(state, chapter, library, None).await?;
+        return Ok(HlsInput::Decrypted(stream));
+    }
+    let cache_path = state.cache_manager.get_cache_path(&chapter.id);
+    if tokio::fs::try_exists(&cache_path).await? {
+        return Ok(HlsInput::Direct(cache_path.to_string_lossy().into_owned()));
+    }
+    if library.library_type == "webdav" {
+        Ok(HlsInput::Direct(build_webdav_url(
+            library,
+            &chapter.path,
+            Some(state.encryption_key.as_ref()),
+        )?))
     } else {
-        // 构建 WebDAV URL
-        build_webdav_url(library, &chapter.path, Some(state.encryption_key.as_ref()))
+        Ok(HlsInput::Direct(chapter.path.clone()))
     }
 }
 
-/// 启动 HLS 转码
-async fn start_hls_transcoding(
+pub(super) async fn start_generation(
     state: &AppState,
-    session_id: &str,
-    temp_dir: &std::path::Path,
-    input_url: &str,
-    is_strm: bool,
-    seek: Option<&str>,
-) -> Result<()> {
-    let playlist_path = temp_dir.join("playlist.m3u8");
-    let segment_pattern = temp_dir.join("segment_%03d.ts");
+    session: &mut HlsSession,
+    chapter: &Chapter,
+    library: &Library,
+    start_offset: f64,
+) -> Result<HlsGeneration> {
+    let result = tokio::time::timeout(
+        Duration::from_secs(40),
+        start_generation_inner(state, session, chapter, library, start_offset),
+    )
+    .await
+    .unwrap_or_else(|_| Err(TingError::Timeout("HLS startup timed out".into())));
+    if result.is_err()
+        && let Some(process) = session.process.take()
+    {
+        process.stop().await;
+    }
+    result
+}
 
+async fn start_generation_inner(
+    state: &AppState,
+    session: &mut HlsSession,
+    chapter: &Chapter,
+    library: &Library,
+    start_offset: f64,
+) -> Result<HlsGeneration> {
+    if session.closed {
+        return Err(TingError::NotFound("HLS session closed".into()));
+    }
+    // Decode before FFmpeg for plugin formats; the stream is owned by this session.
+    let input = get_input(state, chapter, library, session.is_strm).await?;
+    let generation = session.next_generation(start_offset).await?;
     let mut cmd = crate::core::audio::AudioService::ffmpeg_command()?;
     cmd.arg("-y")
+        .arg("-nostdin")
         .arg("-loglevel")
         .arg("warning")
         .arg("-fflags")
-        .arg("+genpts+igndts") // 快速启动标志
+        .arg("+genpts+igndts")
         .arg("-analyzeduration")
-        .arg("1000000") // 减少分析时间到 1 秒
+        .arg("1000000")
         .arg("-probesize")
-        .arg("5000000"); // 减少探测大小到 5MB
-
-    // STRM 特殊参数：网络重连
-    if is_strm {
-        cmd.arg("-reconnect")
-            .arg("1")
-            .arg("-reconnect_streamed")
-            .arg("1")
-            .arg("-reconnect_delay_max")
-            .arg("5")
-            .arg("-timeout")
-            .arg("10000000");
+        .arg("5000000");
+    let is_remote = matches!(&input, HlsInput::Direct(url) if url.starts_with("http://") || url.starts_with("https://"));
+    let is_pipe = matches!(&input, HlsInput::Decrypted(_));
+    if is_remote {
+        cmd.arg("-rw_timeout").arg("10000000");
     }
-
-    // Seek 支持
-    if let Some(seek_time) = seek {
-        cmd.arg("-ss").arg(seek_time);
+    if !is_pipe && start_offset > 0.0 {
+        cmd.arg("-ss").arg(start_offset.to_string());
     }
+    let input_name = match &input {
+        HlsInput::Direct(path) => path.as_str(),
+        HlsInput::Decrypted(_) => "pipe:0",
+    };
+    cmd.arg("-i").arg(input_name);
+    // Pipe inputs cannot perform input seeking; decode/discard until the target.
+    if is_pipe && start_offset > 0.0 {
+        cmd.arg("-ss").arg(start_offset.to_string());
+    }
+    configure_hls_output(&mut cmd, &generation.temp_dir);
+    cmd.stdin(if is_pipe {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    })
+    .stdout(Stdio::null())
+    .stderr(Stdio::piped());
+    let mut process = HlsProcess {
+        child: cmd.spawn()?,
+        input_task: None,
+        stderr_task: None,
+        input_error: Arc::new(AtomicBool::new(false)),
+    };
+    process.stderr_task = process.child.stderr.take().map(|mut stderr| {
+        tokio::spawn(async move {
+            // Drain continuously with a fixed buffer, even for long chapters.
+            // FFmpeg diagnostics can include signed URLs, so don't log raw data.
+            let mut buffer = [0; 4096];
+            let mut count = 0_u64;
+            while let Ok(read) = stderr.read(&mut buffer).await {
+                if read == 0 {
+                    break;
+                }
+                count = count.saturating_add(read as u64);
+            }
+            if count > 0 {
+                tracing::debug!(diagnostic_bytes = count, "HLS FFmpeg emitted diagnostics");
+            }
+        })
+    });
+    process.input_task = if let HlsInput::Decrypted(mut stream) = input {
+        let input_error = process.input_error.clone();
+        let mut stdin = process
+            .child
+            .stdin
+            .take()
+            .ok_or_else(|| TingError::ExternalError("FFmpeg stdin unavailable".into()))?;
+        Some(tokio::spawn(async move {
+            while let Some(chunk) = stream.next().await {
+                match chunk {
+                    Ok(bytes) => {
+                        if stdin.write_all(&bytes).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        input_error.store(true, Ordering::Relaxed);
+                        tracing::warn!(%error, "HLS decoded input failed");
+                        break;
+                    }
+                }
+            }
+            let _ = stdin.shutdown().await;
+        }))
+    } else {
+        None
+    };
+    session.process = Some(process);
+    let deadline = Instant::now() + Duration::from_secs(if is_remote || is_pipe { 30 } else { 10 });
+    let result = wait_for_first_segment(session, &generation.temp_dir, deadline).await;
+    session.last_accessed = Instant::now();
+    result?;
+    Ok(generation)
+}
 
-    cmd.arg("-i")
-        .arg(input_url)
+pub(super) fn configure_hls_output(cmd: &mut tokio::process::Command, temp_dir: &Path) {
+    cmd.arg("-map")
+        .arg("0:a:0")
+        .arg("-vn")
         .arg("-c:a")
         .arg("aac")
         .arg("-b:a")
@@ -196,91 +254,97 @@ async fn start_hls_transcoding(
         .arg("44100")
         .arg("-ac")
         .arg("2")
-        .arg("-channel_layout")
-        .arg("stereo") // 明确指定通道布局
         .arg("-aac_coder")
-        .arg("fast") // 使用快速 AAC 编码器
-        .arg("-vn")
+        .arg("fast")
         .arg("-f")
         .arg("hls")
         .arg("-hls_time")
-        .arg("4") // 减少到 4 秒，加快起播
+        .arg("4")
         .arg("-hls_list_size")
         .arg("0")
         .arg("-hls_playlist_type")
-        .arg("vod") // 明确指定为 VOD 类型
+        .arg("event")
         .arg("-hls_segment_type")
-        .arg("mpegts") // 明确指定分片类型
+        .arg("mpegts")
         .arg("-hls_flags")
-        .arg("append_list+split_by_time") // 追加模式 + 精确时间分割
+        .arg("temp_file")
         .arg("-hls_segment_filename")
-        .arg(&segment_pattern)
-        .arg(&playlist_path);
-
-    cmd.stdout(Stdio::null());
-    cmd.stderr(Stdio::piped());
-
-    let mut child = cmd.spawn().map_err(TingError::IoError)?;
-
-    // 监控 stderr
-    if let Some(mut stderr) = child.stderr.take() {
-        let session_id = session_id.to_string();
-        tokio::spawn(async move {
-            let mut buffer = String::new();
-            if stderr.read_to_string(&mut buffer).await.is_ok() && !buffer.is_empty() {
-                tracing::warn!("HLS [{}] FFmpeg: {}", session_id, buffer);
-            }
-        });
-    }
-
-    // 保存进程到会话
-    state
-        .hls_session_manager
-        .set_process(session_id, child)
-        .await;
-
-    Ok(())
+        .arg(temp_dir.join("segment_%03d.ts"))
+        .arg(temp_dir.join("playlist.m3u8"));
 }
 
-/// 等待首分片生成
-async fn wait_for_first_segment(temp_dir: &std::path::Path, is_strm: bool) {
-    let first_segment = temp_dir.join("segment_000.ts");
-    let playlist = temp_dir.join("playlist.m3u8");
-    let max_wait = if is_strm { 30 } else { 8 }; // 减少本地文件等待时间到 8 秒
+pub(super) fn playlist_duration(content: &str) -> f64 {
+    content
+        .lines()
+        .filter_map(|line| line.strip_prefix("#EXTINF:"))
+        .filter_map(|value| value.split(',').next()?.parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .sum()
+}
 
-    for _ in 0..(max_wait * 20) {
-        // 增加检查频率到每 50ms
-        // 检查播放列表是否存在（FFmpeg 会先创建播放列表）
-        if playlist.exists()
-            && first_segment.exists()
-            && let Ok(metadata) = tokio::fs::metadata(&first_segment).await
+pub(super) async fn cached_generation(session: &HlsSession, target: f64) -> Option<HlsGeneration> {
+    if session
+        .process
+        .as_ref()
+        .is_some_and(|process| process.check_input().is_err())
+    {
+        return None;
+    }
+    let current = session.generations.back()?;
+    let content = tokio::fs::read_to_string(current.temp_dir.join("playlist.m3u8"))
+        .await
+        .ok()?;
+    (target >= current.start_offset && target < current.start_offset + playlist_duration(&content))
+        .then(|| current.clone())
+}
+
+pub(super) fn valid_segment_filename(filename: &str) -> bool {
+    filename
+        .strip_prefix("segment_")
+        .and_then(|value| value.strip_suffix(".ts"))
+        .is_some_and(|number| !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()))
+}
+
+async fn wait_for_first_segment(
+    session: &mut HlsSession,
+    temp_dir: &Path,
+    deadline: Instant,
+) -> Result<()> {
+    loop {
+        let process = session
+            .process
+            .as_mut()
+            .ok_or_else(|| TingError::ExternalError("HLS process unavailable".into()))?;
+        process.check_input()?;
+        let status = process.child.try_wait()?;
+        if let Some(status) = status
+            && !status.success()
         {
-            // 降低文件大小要求到 512 字节（约 0.03 秒的音频）
-            if metadata.len() > 512 {
-                tracing::info!("First segment generated: {} bytes", metadata.len());
-                return;
-            }
+            return Err(TingError::ExternalError(format!(
+                "HLS FFmpeg exited with {status}"
+            )));
         }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
-
-    tracing::warn!(
-        message_key = "media.hls.first_segment_timeout",
-        "Timed out waiting for first HLS segment; returning anyway"
-    );
-}
-
-/// 清理 URL 中的敏感信息（用于日志）
-fn sanitize_url(url: &str) -> String {
-    if let Ok(parsed) = url::Url::parse(url) {
-        let mut sanitized = parsed.clone();
-        if parsed.username() != "" || parsed.password().is_some() {
-            let _ = sanitized.set_username("***");
-            let _ = sanitized.set_password(None);
-            return sanitized.to_string();
+        if let Ok(content) = tokio::fs::read_to_string(temp_dir.join("playlist.m3u8")).await
+            && playlist_duration(&content) > 0.0
+            && let Some(filename) = content.lines().find(|line| valid_segment_filename(line))
+            && tokio::fs::metadata(temp_dir.join(filename))
+                .await
+                .is_ok_and(|meta| meta.len() > 0)
+        {
+            return Ok(());
         }
+        if status.is_some() {
+            return Err(TingError::ExternalError(
+                "HLS FFmpeg exited before producing playable audio".into(),
+            ));
+        }
+        if Instant::now() >= deadline {
+            return Err(TingError::Timeout(
+                "Timed out waiting for playable HLS audio".into(),
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    url.to_string()
 }
 
 /// 构建 WebDAV URL
@@ -338,3 +402,7 @@ fn build_webdav_url(
 
     Ok(webdav_url.to_string())
 }
+
+#[cfg(test)]
+#[path = "../../../../../tests/unit/api/handlers/media/stream/hls.rs"]
+mod tests;

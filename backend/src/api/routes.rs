@@ -1,7 +1,8 @@
 //! API routes
 
 use crate::api::handlers::media::stream::{
-    get_hls_playlist, get_hls_segment, seek_hls_stream, stream_signed_chapter,
+    close_hls_stream, get_hls_file, get_hls_playlist, get_hls_segment, seek_hls_stream,
+    stream_signed_chapter, touch_hls_stream,
 };
 use crate::api::handlers::{
     COVER_BODY_LIMIT,
@@ -183,7 +184,16 @@ pub fn build_api_routes(state: AppState) -> Router {
             get(get_hls_playlist),
         )
         .route("/api/stream/hls/:sessionId/:filename", get(get_hls_segment))
+        .route(
+            "/api/stream/hls/:sessionId/:generation/:filename",
+            get(get_hls_file),
+        )
         .route("/api/stream/hls/:sessionId/seek", post(seek_hls_stream))
+        .route(
+            "/api/stream/hls/:sessionId",
+            axum::routing::delete(close_hls_stream),
+        )
+        .route("/api/stream/hls/:sessionId/touch", post(touch_hls_stream))
         .route(
             "/api/v1/public/media/:chapterId",
             get(stream_signed_chapter).head(stream_signed_chapter),

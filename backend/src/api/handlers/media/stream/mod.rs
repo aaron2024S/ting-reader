@@ -21,7 +21,10 @@ use axum::{
 };
 pub(crate) use decrypt::create_decrypted_stream;
 pub use hls::handle_hls_request;
-pub use hls_serve::{get_hls_playlist, get_hls_segment, seek_hls_stream};
+pub use hls_serve::{
+    close_hls_stream, get_hls_file, get_hls_playlist, get_hls_segment, seek_hls_stream,
+    touch_hls_stream,
+};
 pub use hls_session::HlsSessionManager;
 use std::process::Stdio;
 use ting_plugin_contract::format::FormatOperation;

@@ -395,7 +395,7 @@ fn strm_resolve_error(error: reqwest::Error) -> TingError {
     }
 }
 
-async fn read_strm_url(reader: impl tokio::io::AsyncRead + Unpin) -> Result<String> {
+pub(super) async fn read_strm_url(reader: impl tokio::io::AsyncRead + Unpin) -> Result<String> {
     let mut content = String::new();
     reader.take(65_537).read_to_string(&mut content).await?;
     if content.len() > 65_536 {
@@ -406,7 +406,7 @@ async fn read_strm_url(reader: impl tokio::io::AsyncRead + Unpin) -> Result<Stri
     Ok(content.trim().to_string())
 }
 
-fn validate_strm_url(url: &str) -> Result<()> {
+pub(super) fn validate_strm_url(url: &str) -> Result<()> {
     let parsed_url = reqwest::Url::parse(url)
         .map_err(|_| TingError::InvalidRequest("Invalid strm URL".to_string()))?;
     if !matches!(parsed_url.scheme(), "http" | "https") || parsed_url.host_str().is_none() {

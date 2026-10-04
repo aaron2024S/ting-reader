@@ -210,6 +210,10 @@ const Player: React.FC = () => {
   const isInitialLoadRef = useRef(true);
   const transcodeFallbackChapterRef = useRef<string | null>(null);
   const hlsRequestIdRef = useRef(0);
+  const hlsPendingSeekRef = useRef<number | null>(null);
+  const hlsSeekingRef = useRef(false);
+  const hlsSourceSwitchingRef = useRef(false);
+  const hlsSeekQueueRef = useRef<Promise<void>>(Promise.resolve());
   // 防止 skip-outro 在同一章节内多次触发 nextChapter。
   const skipOutroChapterRef = useRef<string | null>(null);
   const shouldUseHlsForCurrentChapter =
@@ -398,8 +402,23 @@ const Player: React.FC = () => {
   }, [currentChapter?.duration, setDuration]);
 
   useEffect(() => {
-    let requestId: number | null = null;
+    let disposed = false;
+    let ownedSession: string | null = null;
+    let heartbeat: number | undefined;
+    const sessionUrl = (id: string) => getRuntimeUrl(`/api/stream/hls/${id}`, API_BASE_URL || window.location.origin);
+    const release = (id: string) => {
+      void apiClient.delete(sessionUrl(id)).catch(err => console.debug("HLS session cleanup failed", err));
+    };
+    const onPageHide = () => {
+      if (ownedSession) {
+        void fetch(sessionUrl(ownedSession), { method: "DELETE", keepalive: true }).catch(() => {});
+      }
+    };
+    window.addEventListener("pagehide", onPageHide);
     const timer = window.setTimeout(() => {
+      hlsPendingSeekRef.current = null;
+      hlsSeekingRef.current = false;
+      hlsSourceSwitchingRef.current = false;
       if (!currentChapter || !shouldUseHlsForCurrentChapter) {
         setHlsStreamUrl(null);
         setHlsSessionId(null);
@@ -407,62 +426,66 @@ const Player: React.FC = () => {
         setHlsSeekOffset(0);
         return;
       }
-
-      requestId = ++hlsRequestIdRef.current;
+      const requestId = ++hlsRequestIdRef.current;
       let startAt = Math.max(0, usePlayerStore.getState().currentTime || 0);
-      if (
-        isInitialLoadRef.current &&
-        currentBook?.skip_intro &&
-        startAt < currentBook.skip_intro
-      ) {
+      if (isInitialLoadRef.current && currentBook?.skip_intro && startAt < currentBook.skip_intro) {
         startAt = currentBook.skip_intro;
       }
-
+      hlsSourceSwitchingRef.current = true;
       setHlsChapterId(currentChapter.id);
       setHlsStreamUrl(null);
       setHlsSessionId(null);
       setHlsSeekOffset(startAt);
       setCurrentTime(startAt);
       isInitialLoadRef.current = false;
-
       const params: Record<string, string | number> = { transcode: "hls" };
       if (token) params.token = token;
       if (startAt > 0) params.seek = startAt;
-
-      void apiClient
-        .get(`/api/stream/${currentChapter.id}`, { params })
-        .then((res) => {
-          if (requestId !== hlsRequestIdRef.current) return;
+      // Let a stale response finish so its session ID can be explicitly released.
+      void apiClient.get(`/api/stream/${currentChapter.id}`, { params })
+        .then(res => {
           const playlistUrl = res.data?.playlist_url;
           const sessionId = res.data?.session_id;
+          if (disposed || requestId !== hlsRequestIdRef.current) {
+            if (sessionId) release(sessionId);
+            return;
+          }
           if (!playlistUrl || !sessionId) {
+            if (sessionId) release(sessionId);
             throw new Error("HLS response missing playlist URL or session ID");
           }
+          ownedSession = sessionId;
           setHlsSessionId(sessionId);
+          setHlsSeekOffset(res.data.start_offset ?? startAt);
+          hlsPendingSeekRef.current = 0;
           setHlsStreamUrl(toAbsoluteMediaUrl(playlistUrl));
+          // A paused player may not fetch segments; keep its session alive too.
+          heartbeat = window.setInterval(() => {
+            void apiClient.post(`${sessionUrl(sessionId)}/touch`).catch(err => {
+              if (!disposed && err.response?.status === 404) setHlsUnavailable(true);
+            });
+          }, 30_000);
         })
-        .catch((err) => {
-          if (requestId !== hlsRequestIdRef.current) return;
+        .catch(err => {
+          if (disposed || requestId !== hlsRequestIdRef.current) return;
           console.error("HLS stream initialization failed", err);
+          hlsSourceSwitchingRef.current = false;
           setHlsStreamUrl(null);
           setHlsSessionId(null);
           setHlsChapterId(null);
           setHlsUnavailable(true);
         });
     }, 0);
-
     return () => {
+      disposed = true;
+      hlsRequestIdRef.current += 1;
       window.clearTimeout(timer);
-      if (requestId !== null) hlsRequestIdRef.current += 1;
+      window.clearInterval(heartbeat);
+      window.removeEventListener("pagehide", onPageHide);
+      if (ownedSession) release(ownedSession);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [
-    currentChapter?.id,
-    currentChapter?.path,
-    shouldUseHlsForCurrentChapter,
-    currentBook?.skip_intro,
-    token,
-  ]);
+  }, [currentChapter?.id, currentChapter?.path, shouldUseHlsForCurrentChapter, currentBook?.skip_intro, token, API_BASE_URL]);
 
   // Reset initial load ref when retrying (to allow resume logic to run again)
   useEffect(() => {
@@ -536,6 +559,7 @@ const Player: React.FC = () => {
     shouldTranscode,
     retryCount,
     onStuck: () => {
+      if (hlsSeekingRef.current) return;
       if (!tryTranscodeFallback()) setError(t("player.audioLoadError"));
     },
   });
@@ -552,6 +576,7 @@ const Player: React.FC = () => {
   // Handle Skip Intro and Outro
   const handleTimeUpdate = () => {
     if (!audioRef.current) return;
+    if (isUsingHlsForCurrentChapter && hlsSeekingRef.current) return;
 
     const rawTime = audioRef.current.currentTime;
     // Server-side seeked streams start from 0 but represent audio at an offset.
@@ -607,7 +632,25 @@ const Player: React.FC = () => {
     }
   };
 
+  const applyPendingHlsSeek = () => {
+    const audio = audioRef.current;
+    const target = hlsPendingSeekRef.current;
+    if (!audio || !isUsingHlsForCurrentChapter || target === null) return;
+    const ranges = audio.seekable;
+    const canSeek = target === 0 || Array.from({ length: ranges.length }, (_, index) => index)
+      .some(index => target >= ranges.start(index) && target < ranges.end(index));
+    if (!canSeek) return;
+    try {
+      audio.currentTime = target;
+      hlsPendingSeekRef.current = null;
+      hlsSeekingRef.current = false;
+    } catch {
+      // Metadata may precede the first seekable range. Retry on progress/canplay.
+    }
+  };
+
   const handleProgress = () => {
+    applyPendingHlsSeek();
     if (audioRef.current && audioRef.current.buffered.length > 0) {
       const rawTime = audioRef.current.currentTime;
       const mediaOffset = getMediaOffset();
@@ -640,6 +683,7 @@ const Player: React.FC = () => {
 
   const handleLoadedMetadata = () => {
     if (audioRef.current) {
+      applyPendingHlsSeek();
       audioRef.current.volume = isMuted ? 0 : volume;
       let browserDuration = audioRef.current.duration;
 
@@ -734,6 +778,7 @@ const Player: React.FC = () => {
 
       // Sync duration back only when the chapter lacks one and metadata is valid.
       if (
+        !isUsingHlsForCurrentChapter &&
         currentChapter &&
         (!currentChapter.duration || currentChapter.duration === 0)
       ) {
@@ -802,24 +847,49 @@ const Player: React.FC = () => {
     if (audioRef.current) {
       if (isUsingHlsForCurrentChapter && hlsSessionId) {
         const requestId = ++hlsRequestIdRef.current;
-        setHlsSeekOffset(targetTime);
+        const relative = targetTime - hlsSeekOffset;
+        const ranges = audioRef.current.seekable;
+        const locallySeekable = !hlsSeekingRef.current && relative >= 0 &&
+          Array.from({ length: ranges.length }, (_, index) => index)
+            .some(index => relative >= ranges.start(index) && relative < ranges.end(index));
         setCurrentTime(targetTime);
         isInitialLoadRef.current = false;
-
-        apiClient
-          .post(`/api/stream/hls/${hlsSessionId}/seek`, null, {
+        if (locallySeekable) {
+          audioRef.current.currentTime = relative;
+          hlsPendingSeekRef.current = null;
+          return;
+        }
+        hlsSeekingRef.current = true;
+        hlsPendingSeekRef.current = null;
+        // Serialize requests and discard queued stale targets. Response guards
+        // alone cannot prevent an older server request stopping a newer process.
+        hlsSeekQueueRef.current = hlsSeekQueueRef.current.then(async () => {
+          if (requestId !== hlsRequestIdRef.current) return;
+          const res = await apiClient.post(`/api/stream/hls/${hlsSessionId}/seek`, null, {
             params: { seek: targetTime },
-          })
-          .then((res) => {
-            if (requestId !== hlsRequestIdRef.current) return;
-            const playlistUrl = res.data?.playlist_url;
-            if (!playlistUrl) {
-              throw new Error("HLS seek response missing playlist URL");
-            }
-            setHlsStreamUrl(toAbsoluteMediaUrl(playlistUrl));
-          })
+          });
+          if (requestId !== hlsRequestIdRef.current) return;
+          const playlistUrl = res.data?.playlist_url;
+          if (!playlistUrl) {
+            throw new Error("HLS seek response missing playlist URL");
+          }
+          const offset = res.data.start_offset ?? targetTime;
+          const playbackTime = res.data.playback_time ?? 0;
+          const nextUrl = toAbsoluteMediaUrl(playlistUrl);
+          setHlsSeekOffset(offset);
+          if (nextUrl === hlsStreamUrl && audioRef.current) {
+            audioRef.current.currentTime = playbackTime;
+            hlsSeekingRef.current = false;
+          } else {
+            hlsSourceSwitchingRef.current = true;
+            hlsPendingSeekRef.current = playbackTime;
+            setHlsStreamUrl(nextUrl);
+          }
+        })
           .catch((err) => {
             if (requestId !== hlsRequestIdRef.current) return;
+            hlsSeekingRef.current = false;
+            hlsSourceSwitchingRef.current = false;
             console.error("HLS seek failed", err);
             tryTranscodeFallback();
           });
@@ -1014,6 +1084,8 @@ const Player: React.FC = () => {
         onProgress={handleProgress}
         onLoadedMetadata={handleLoadedMetadata}
         onCanPlay={() => {
+          applyPendingHlsSeek();
+          hlsSourceSwitchingRef.current = false;
           setError(null);
           const audio = audioRef.current;
           if (
@@ -1031,7 +1103,9 @@ const Player: React.FC = () => {
             audioRef.current.playbackRate = playbackSpeed;
           }
         }}
-        onPause={() => setIsPlaying(false)}
+        onPause={() => {
+          if (!hlsSourceSwitchingRef.current) setIsPlaying(false);
+        }}
         onError={(e) => {
           const audio = audioRef.current;
           console.log("Audio error event fired", {
