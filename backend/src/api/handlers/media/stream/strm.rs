@@ -8,8 +8,23 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use std::process::Stdio;
+use std::{collections::HashSet, process::Stdio, sync::LazyLock, time::Duration};
 use tokio::io::AsyncReadExt;
+
+const STRM_MAX_REDIRECTS: usize = 10;
+const STRM_RESOLVE_TIMEOUT: Duration = Duration::from_secs(15);
+
+static STRM_CLIENT: LazyLock<std::result::Result<reqwest::Client, reqwest::Error>> =
+    LazyLock::new(|| {
+        reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(STRM_RESOLVE_TIMEOUT)
+            .pool_max_idle_per_host(1)
+            .pool_idle_timeout(Duration::from_secs(30))
+            .user_agent("Mozilla/5.0")
+            .build()
+    });
 
 pub(super) async fn handle_strm_stream(
     state: AppState,
@@ -245,16 +260,23 @@ pub(super) async fn handle_strm_stream(
         }
     }
 
-    Ok(redirect_strm_url(url))
+    redirect_strm_url(url).await
 }
 
-fn redirect_strm_url(url: String) -> Response {
+async fn redirect_strm_url(url: String) -> Result<Response> {
+    let client = STRM_CLIENT
+        .as_ref()
+        .map_err(|error| TingError::InitializationError(error.to_string()))?;
+    let target = tokio::time::timeout(STRM_RESOLVE_TIMEOUT, resolve_strm_url(client, &url))
+        .await
+        .map_err(|_| TingError::Timeout("STRM redirect resolution timed out".into()))??;
+
     use axum::http::header;
-    tracing::info!("Redirecting strm playback to origin");
-    (
+    tracing::debug!("Redirecting strm playback to resolved source");
+    Ok((
         StatusCode::FOUND,
         [
-            (header::LOCATION, url),
+            (header::LOCATION, target),
             (header::CACHE_CONTROL, "private, no-store".to_string()),
             (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*".to_string()),
             (
@@ -272,7 +294,105 @@ fn redirect_strm_url(url: String) -> Response {
         ],
         Body::empty(),
     )
-        .into_response()
+        .into_response())
+}
+
+async fn resolve_strm_url(client: &reqwest::Client, url: &str) -> Result<String> {
+    use reqwest::{StatusCode, Url, header};
+    let mut current = url.to_string();
+    let mut visited = HashSet::new();
+    let mut redirects = 0;
+
+    loop {
+        validate_strm_url(&current)?;
+        let parsed = Url::parse(&current)
+            .map_err(|_| TingError::InvalidRequest("Invalid strm URL".into()))?;
+        let mut visit_url = parsed.clone();
+        visit_url.set_fragment(None);
+        if !visited.insert(visit_url) {
+            return Err(TingError::NetworkError(
+                "STRM redirect loop detected".into(),
+            ));
+        }
+
+        // GET matches playback redirects on sources that do not support HEAD.
+        // Do not read the audio body, even when the source ignores Range.
+        let mut response = client
+            .get(parsed.clone())
+            .header(header::RANGE, "bytes=0-0")
+            .send()
+            .await
+            .map_err(strm_resolve_error)?;
+        if response.status() == StatusCode::RANGE_NOT_SATISFIABLE {
+            drop(response);
+            response = client
+                .get(parsed.clone())
+                .send()
+                .await
+                .map_err(strm_resolve_error)?;
+        }
+
+        let status = response.status();
+        if !matches!(
+            status,
+            StatusCode::MOVED_PERMANENTLY
+                | StatusCode::FOUND
+                | StatusCode::SEE_OTHER
+                | StatusCode::TEMPORARY_REDIRECT
+                | StatusCode::PERMANENT_REDIRECT
+        ) {
+            if status.is_success() {
+                // Keep the original spelling, credentials and signed query
+                // when no redirect occurred; reqwest strips URL credentials.
+                return Ok(current);
+            }
+            return Err(TingError::NetworkError(format!(
+                "STRM source returned HTTP {}",
+                status.as_u16()
+            )));
+        }
+        if redirects >= STRM_MAX_REDIRECTS {
+            return Err(TingError::NetworkError(
+                "STRM redirect limit exceeded".into(),
+            ));
+        }
+        let location = response
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .ok_or_else(|| TingError::NetworkError("STRM redirect has no valid Location".into()))?;
+        let mut next = parsed
+            .join(location)
+            .map_err(|_| TingError::NetworkError("Invalid STRM redirect URL".into()))?;
+        validate_strm_url(next.as_str())?;
+
+        // Carry URL credentials only within the same scheme/host/port. A new
+        // request per hop never forwards the application's headers or cookies.
+        if next.origin() == parsed.origin()
+            && next.username().is_empty()
+            && next.password().is_none()
+        {
+            next.set_username(parsed.username())
+                .map_err(|_| TingError::NetworkError("Invalid STRM redirect credentials".into()))?;
+            next.set_password(parsed.password())
+                .map_err(|_| TingError::NetworkError("Invalid STRM redirect credentials".into()))?;
+        }
+        current = next.to_string();
+        redirects += 1;
+        // Dropping each response closes an unfinished body instead of buffering
+        // or keeping a background audio download alive.
+    }
+}
+
+fn strm_resolve_error(error: reqwest::Error) -> TingError {
+    if error.is_timeout() {
+        TingError::Timeout("STRM redirect resolution timed out".into())
+    } else {
+        TingError::NetworkError(format!(
+            "Failed to resolve STRM source: {}",
+            error.without_url()
+        ))
+    }
 }
 
 async fn read_strm_url(reader: impl tokio::io::AsyncRead + Unpin) -> Result<String> {

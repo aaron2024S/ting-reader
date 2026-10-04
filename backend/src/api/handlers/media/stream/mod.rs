@@ -277,7 +277,7 @@ pub async fn stream_chapter(
 
     let is_download_request = is_download_query(&params);
 
-    // STRM playback redirects to the source unless transcoding was requested.
+    // STRM playback resolves redirects before returning the final source URL.
     if ext == "strm" {
         if !is_download_request {
             preload::cancel_auto_preload(&state, user.as_ref()).await;
