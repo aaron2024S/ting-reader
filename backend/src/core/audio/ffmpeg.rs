@@ -7,6 +7,7 @@ use crate::core::app::error::{Result, TingError};
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
 use std::path::{Path, PathBuf};
+use tokio::io::AsyncReadExt;
 use tokio::process::{Child, Command};
 use tokio_util::io::ReaderStream;
 
@@ -48,6 +49,67 @@ fn command(name: &str) -> Result<Command> {
 /// Every streaming caller uses this factory so dropping a response or HLS
 /// session cannot leave an orphaned encoder behind.
 impl AudioService {
+    pub(crate) async fn bounded_output(
+        mut command: Command,
+        limit: usize,
+        timeout: std::time::Duration,
+    ) -> Result<Vec<u8>> {
+        use std::process::Stdio;
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let mut child = command.spawn()?;
+        let mut stdout = child.stdout.take().ok_or_else(|| {
+            TingError::IoError(std::io::Error::other("Missing audio tool stdout"))
+        })?;
+        let mut stderr = child.stderr.take().ok_or_else(|| {
+            TingError::IoError(std::io::Error::other("Missing audio tool stderr"))
+        })?;
+        let result = tokio::time::timeout(timeout, async {
+            let output = async {
+                let mut bytes = Vec::new();
+                (&mut stdout)
+                    .take(limit as u64 + 1)
+                    .read_to_end(&mut bytes)
+                    .await?;
+                if bytes.len() > limit {
+                    return Err(std::io::Error::other(
+                        "Audio tool output exceeded its limit",
+                    ));
+                }
+                Ok(bytes)
+            };
+            let drain = async {
+                tokio::io::copy(&mut stderr, &mut tokio::io::sink()).await?;
+                Ok::<_, std::io::Error>(())
+            };
+            let (bytes, ()) = tokio::try_join!(output, drain)?;
+            let status = child.wait().await?;
+            if !status.success() {
+                return Err(std::io::Error::other(format!(
+                    "Audio tool exited with {status}"
+                )));
+            }
+            Ok::<_, std::io::Error>(bytes)
+        })
+        .await;
+        match result {
+            Ok(Ok(bytes)) => Ok(bytes),
+            result => {
+                let _ = child.kill().await;
+                match result {
+                    Ok(Err(error)) => Err(error.into()),
+                    Err(_) => Err(TingError::Timeout(
+                        "Audio metadata operation timed out".into(),
+                    )),
+                    Ok(Ok(_)) => unreachable!(),
+                }
+            }
+        }
+    }
+
     pub fn ffmpeg_command() -> Result<Command> {
         command("ffmpeg")
     }

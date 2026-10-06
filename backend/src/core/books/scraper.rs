@@ -813,6 +813,11 @@ impl ScraperService {
         config: &crate::db::models::ScraperConfig,
         context: Option<serde_json::Value>,
     ) -> Result<BookDetail> {
+        if !config.has_scraper_sources() {
+            return Err(TingError::NotFound(
+                "No scraper plugins selected for this library".into(),
+            ));
+        }
         let mut all_sources = HashSet::new();
 
         for s in &config.default_sources {
@@ -849,16 +854,9 @@ impl ScraperService {
         all_sources.retain(|source| auto_sources.contains(source));
 
         if all_sources.is_empty() {
-            if let Some(source) = auto_sources
-                .iter()
-                .find(|source| !aggregate_sources.contains(*source))
-            {
-                all_sources.insert(source.clone());
-            } else {
-                return Err(TingError::NotFound(
-                    "No active automatic scraper plugins available".to_string(),
-                ));
-            }
+            return Err(TingError::NotFound(
+                "No selected automatic scraper plugins are active".into(),
+            ));
         }
 
         let aggregate_sources_to_run: Vec<String> = all_sources

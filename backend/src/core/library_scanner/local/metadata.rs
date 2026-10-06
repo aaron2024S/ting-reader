@@ -219,7 +219,7 @@ impl LibraryScanner {
                         }
                     }
                 }
-                "scraper" => {
+                "scraper" if scraper_config.has_scraper_sources() => {
                     if let Some(ref title) = final_meta.title {
                         let context = serde_json::json!({
                             "library_type": "local",
@@ -267,7 +267,7 @@ impl LibraryScanner {
             let first_file = &files[0];
             // We've already tried extracting cover in extract_from_audio above for both standard and non-standard.
             // This is a final fallback just in case the file wasn't picked up by the priority system.
-            if let Some(path) = self.extract_and_save_cover(first_file, dir) {
+            if let Some(path) = self.extract_and_save_cover(first_file, dir).await {
                 final_meta.cover_url = Some(path);
             } else {
                 // Try extracting cover from non-standard files (like .xm) via plugin
@@ -471,16 +471,23 @@ impl LibraryScanner {
                 plugin_handled = true;
             }
 
-            // 2. 如果插件没有处理，且是标准格式，尝试 Symphonia（仅用于完整文件）
+            // Standard containers use the same core reader as remote sources.
             if !plugin_handled
                 && is_standard
-                && let Ok(meta) = self.audio_streamer.read_metadata(file_path)
+                && let Ok(meta) = crate::core::audio::AudioService::read_file_metadata(
+                    &crate::core::audio::metadata::AudioInput::local(file_path),
+                    extract_cover.then_some(dir),
+                )
+                .await
             {
                 if index == 0 {
-                    tracing::debug!("Using Symphonia to process the first {} file", ext);
+                    tracing::debug!(
+                        "Using core audio metadata to process the first {} file",
+                        ext
+                    );
                 } else {
                     tracing::debug!(
-                        "Using Symphonia to process file #{} ({}) for supplemental metadata",
+                        "Using core audio metadata to process file #{} ({}) for supplemental metadata",
                         index + 1,
                         ext
                     );
@@ -523,10 +530,14 @@ impl LibraryScanner {
                     m.genre = Some(g);
                 }
 
-                // Symphonia 不提取封面，使用 extract_and_save_cover
+                if (index == 0 || m.description.is_none())
+                    && let Some(description) = meta.description
+                {
+                    m.description = Some(description);
+                }
                 if extract_cover
                     && m.cover_url.is_none()
-                    && let Some(path) = self.extract_and_save_cover(file_path, dir)
+                    && let Some(path) = meta.cover_url
                 {
                     m.cover_url = Some(path);
                     found = true;
@@ -554,6 +565,10 @@ impl LibraryScanner {
             }
         }
 
+        found |= m.author.is_some()
+            || m.narrator.is_some()
+            || m.description.is_some()
+            || m.genre.is_some();
         info!(
             "extract_from_audio: returning found={}, meta={:?}",
             found, m
@@ -567,7 +582,9 @@ impl LibraryScanner {
         scraper_config: &crate::db::models::ScraperConfig,
         context: serde_json::Value,
     ) -> Option<ScannedMetadata> {
-        if let Some(scraper) = &self.scraper_service {
+        if scraper_config.has_scraper_sources()
+            && let Some(scraper) = &self.scraper_service
+        {
             // Basic scrape check
             if let Ok(detail) = scraper
                 .scrape_book_metadata_with_context(title, scraper_config, Some(context))
@@ -611,58 +628,14 @@ impl LibraryScanner {
         None
     }
 
-    fn extract_and_save_cover(&self, audio_path: &Path, book_dir: &Path) -> Option<String> {
-        // Check if cover file already exists in the directory
-        // Common cover file patterns: cover.jpg, cover.png, cover.webp, cover.gif
-        let cover_extensions = ["jpg", "jpeg", "png", "webp", "gif"];
-        for ext in &cover_extensions {
-            let cover_path = book_dir.join(format!("cover.{}", ext));
-            if cover_path.exists() {
-                info!(
-                    "Cover file already exists at {:?}, skipping extraction",
-                    cover_path
-                );
-                return Some(cover_path.to_string_lossy().replace('\\', "/"));
-            }
-        }
-
-        // No existing cover found, proceed with extraction
-        // We use id3 library here, which mainly supports MP3 (ID3v2 tags).
-        // For M4A, id3 library might fail. We should check if we can extract M4A covers too.
-        // The id3 crate only supports ID3v1 and ID3v2 tags, not MP4/M4A metadata.
-        // Wait! In v1.2.0, the `native-audio-support` plugin was used for M4A.
-        // Let's first try id3 tag.
-        if let Ok(tag) = id3::Tag::read_from_path(audio_path) {
-            // Prefer CoverFront, otherwise take the first picture
-            let picture = tag
-                .pictures()
-                .find(|p| p.picture_type == id3::frame::PictureType::CoverFront)
-                .or_else(|| tag.pictures().next());
-
-            if let Some(picture) = picture {
-                // Determine extension from mime type
-                let ext = match picture.mime_type.as_str() {
-                    "image/jpeg" | "image/jpg" => "jpg",
-                    "image/png" => "png",
-                    "image/webp" => "webp",
-                    "image/gif" => "gif",
-                    _ => "jpg", // Default to jpg
-                };
-
-                let cover_filename = format!("cover.{}", ext);
-                let cover_path = book_dir.join(&cover_filename);
-
-                // Save to file
-                if let Err(e) = std::fs::write(&cover_path, &picture.data) {
-                    warn!("Failed to save extracted cover to {:?}: {}", cover_path, e);
-                    return None;
-                }
-
-                info!("Extracted cover from ID3 tag to {:?}", cover_path);
-                return Some(cover_path.to_string_lossy().replace('\\', "/"));
-            }
-        }
-        None
+    async fn extract_and_save_cover(&self, audio_path: &Path, book_dir: &Path) -> Option<String> {
+        crate::core::audio::AudioService::read_file_metadata(
+            &crate::core::audio::metadata::AudioInput::local(audio_path),
+            Some(book_dir),
+        )
+        .await
+        .ok()
+        .and_then(|metadata| metadata.cover_url)
     }
 }
 

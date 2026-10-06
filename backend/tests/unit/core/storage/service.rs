@@ -18,6 +18,34 @@ fn metadata_library() -> Library {
 }
 
 #[test]
+fn metadata_probe_input_enforces_webdav_library_boundary() {
+    let service = StorageService::new();
+    let library = metadata_library();
+    for path in [
+        "https://example.test/dav/books/book/001.m4a",
+        "book/001.m4a",
+        "book/Chapter%20One.wma",
+    ] {
+        assert!(
+            service
+                .webdav_metadata_input(&library, path, &[0; 32])
+                .is_ok()
+        );
+    }
+    for path in [
+        "https://other.test/dav/books/book/001.m4a",
+        "https://example.test/dav/outside/001.m4a",
+        "file:///outside/001.m4a",
+    ] {
+        assert!(
+            service
+                .webdav_metadata_input(&library, path, &[0; 32])
+                .is_err()
+        );
+    }
+}
+
+#[test]
 fn sidecar_upload_keeps_encoded_book_names_and_library_root() {
     let library = metadata_library();
     for book in [

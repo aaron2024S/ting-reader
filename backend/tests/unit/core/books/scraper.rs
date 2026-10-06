@@ -98,6 +98,102 @@ async fn add_scraper(manager: &PluginManager, id: &str, aggregate: bool) -> Arc<
 }
 
 #[tokio::test]
+async fn automatic_scraping_without_library_sources_never_invokes_active_plugins() {
+    let directory = tempfile::tempdir().unwrap();
+    let manager = cache_test_manager(directory.path());
+    let regular = add_scraper(&manager, "unselected-source", false).await;
+    let aggregate = add_scraper(&manager, "unselected-aggregate", true).await;
+    let service = ScraperService::new(manager);
+    for config in [
+        crate::db::models::ScraperConfig::default(),
+        crate::db::models::ScraperConfig {
+            default_sources: vec![" ".into()],
+            author_sources: Some(vec![]),
+            narrator_sources: Some(vec!["".into()]),
+            cover_sources: Some(vec![]),
+            intro_sources: Some(vec![]),
+            tags_sources: Some(vec![]),
+            ..Default::default()
+        },
+    ] {
+        assert!(!config.has_scraper_sources());
+        assert!(matches!(
+            service.scrape_book_metadata("Book", &config).await,
+            Err(TingError::NotFound(_))
+        ));
+        assert!(matches!(
+            service
+                .scrape_book_metadata_with_context("Book", &config, Some(json!({})))
+                .await,
+            Err(TingError::NotFound(_))
+        ));
+    }
+    assert_eq!(regular.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(aggregate.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(service.get_cache_stats(), 0);
+}
+
+#[tokio::test]
+async fn unavailable_library_sources_never_fall_back_to_unselected_plugins() {
+    let directory = tempfile::tempdir().unwrap();
+    let manager = cache_test_manager(directory.path());
+    let regular = add_scraper(&manager, "unselected-source", false).await;
+    let aggregate = add_scraper(&manager, "unselected-aggregate", true).await;
+    let inactive = add_scraper(&manager, "inactive-source", false).await;
+    let inactive_id = inactive.metadata.instance_id();
+    manager
+        .registry
+        .write()
+        .await
+        .get_mut(&inactive_id)
+        .unwrap()
+        .state = PluginState::Unloaded;
+    let service = ScraperService::new(manager);
+    for source in ["removed-source@2.0.0".into(), inactive_id] {
+        let config = crate::db::models::ScraperConfig {
+            default_sources: vec![source],
+            ..Default::default()
+        };
+        assert!(config.has_scraper_sources());
+        assert!(matches!(
+            service.scrape_book_metadata("Book", &config).await,
+            Err(TingError::NotFound(_))
+        ));
+    }
+    assert_eq!(regular.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(aggregate.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(inactive.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn automatic_scraping_uses_only_explicit_default_or_field_sources() {
+    let directory = tempfile::tempdir().unwrap();
+    let manager = cache_test_manager(directory.path());
+    let selected = add_scraper(&manager, "selected-source", false).await;
+    let unselected = add_scraper(&manager, "unselected-source", false).await;
+    let aggregate = add_scraper(&manager, "unselected-aggregate", true).await;
+    let service = ScraperService::with_cache_ttl(manager, Duration::ZERO);
+    let source = selected.metadata.instance_id();
+    for config in [
+        crate::db::models::ScraperConfig {
+            default_sources: vec![source.clone()],
+            ..Default::default()
+        },
+        crate::db::models::ScraperConfig {
+            author_sources: Some(vec![source]),
+            ..Default::default()
+        },
+    ] {
+        assert!(config.has_scraper_sources());
+        let detail = service.scrape_book_metadata("Book", &config).await.unwrap();
+        assert_eq!(detail.author, "Author");
+    }
+    assert_eq!(selected.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(unselected.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(aggregate.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn search_entry_points_share_cache_and_expired_results_are_refetched() {
     let directory = tempfile::tempdir().unwrap();
     let manager = cache_test_manager(directory.path());

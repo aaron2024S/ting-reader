@@ -1,4 +1,4 @@
-use super::detect_audio_format;
+use crate::core::audio::metadata::detect_audio_format;
 use std::fs;
 
 fn id3_header(payload_size: u32) -> [u8; 10] {

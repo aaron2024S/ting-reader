@@ -20,6 +20,52 @@ impl Default for StorageService {
 }
 
 impl StorageService {
+    pub(crate) fn webdav_metadata_input(
+        &self,
+        library: &Library,
+        file_path: &str,
+        key: &[u8; 32],
+    ) -> Result<crate::core::audio::metadata::AudioInput> {
+        use base64::Engine;
+        let url = if Url::parse(file_path).is_ok() {
+            webdav_book_url(library, file_path)?
+        } else {
+            let mut url = Url::parse(&library.url)
+                .map_err(|error| TingError::ValidationError(error.to_string()))?;
+            {
+                let mut segments = url
+                    .path_segments_mut()
+                    .map_err(|_| TingError::ValidationError("Invalid WebDAV library URL".into()))?;
+                segments.pop_if_empty();
+                for segment in library
+                    .root_path
+                    .trim_matches('/')
+                    .split('/')
+                    .chain(file_path.trim_matches('/').split('/'))
+                    .filter(|part| !part.is_empty())
+                {
+                    segments.push(
+                        &urlencoding::decode(segment)
+                            .map_err(|error| TingError::ValidationError(error.to_string()))?,
+                    );
+                }
+            }
+            webdav_book_url(library, url.as_str())?
+        };
+        let authorization = library.username.as_ref().map(|username| {
+            let password = library.password.as_deref().unwrap_or_default();
+            let password = crate::core::security::crypto::decrypt(password, key)
+                .unwrap_or_else(|_| password.to_string());
+            let encoded =
+                base64::engine::general_purpose::STANDARD.encode(format!("{username}:{password}"));
+            format!("Authorization: Basic {encoded}\r\n")
+        });
+        Ok(crate::core::audio::metadata::AudioInput::remote(
+            url,
+            authorization,
+        ))
+    }
+
     pub fn new() -> Self {
         let client = Client::builder()
             .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")

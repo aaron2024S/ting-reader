@@ -99,6 +99,28 @@ async fn encoder_failure_is_reported_as_a_stream_error() {
     assert!(error.to_string().contains('7'));
 }
 
+#[tokio::test]
+async fn bounded_metadata_process_reaps_on_timeout_and_output_limit() {
+    for (limit, timeout) in [
+        (1, Duration::from_secs(5)),
+        (1024, Duration::from_millis(500)),
+    ] {
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "core::audio::ffmpeg::tests::stream_process_fixture",
+                "--nocapture",
+            ])
+            .env("TING_AUDIO_STREAM_TEST_MODE", "running");
+        assert!(
+            AudioService::bounded_output(command, limit, timeout)
+                .await
+                .is_err()
+        );
+    }
+}
+
 #[test]
 fn binary_paths_are_fixed_beside_the_service_executable() {
     let executable = Path::new("root/bin/ting-reader");

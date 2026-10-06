@@ -1,10 +1,7 @@
 use super::{Task, TaskPayload, TaskQueue};
 use crate::core::app::error::{Result, TingError};
+use crate::core::audio::metadata::AudioMetadataUpdate;
 use crate::db::repository::Repository;
-use id3::frame::{Picture, PictureType as Id3PictureType};
-use id3::{Tag, TagLike, Version};
-use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
@@ -426,7 +423,10 @@ impl TaskQueue {
                     let path = temp_dir.join(file_name);
 
                     // Download
-                    let client = reqwest::Client::new();
+                    let client = reqwest::Client::builder()
+                        .timeout(std::time::Duration::from_secs(30))
+                        .build()
+                        .map_err(|error| TingError::NetworkError(error.to_string()))?;
                     let mut req = client.get(&fetch_url).header(
                         reqwest::header::USER_AGENT,
                         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -435,17 +435,34 @@ impl TaskQueue {
                         req = req.header(reqwest::header::REFERER, referer);
                     }
 
-                    match req.send().await {
-                        Ok(resp) => {
-                            if let Ok(bytes) = resp.bytes().await
-                                && tokio::fs::write(&path, bytes).await.is_ok()
-                            {
-                                temp_cover_path = Some(path.clone());
-                                cover_path_str = Some(path.to_string_lossy().to_string());
-                            }
+                    let mut response = req
+                        .send()
+                        .await
+                        .and_then(reqwest::Response::error_for_status)
+                        .map_err(|error| TingError::NetworkError(error.to_string()))?;
+                    let mut bytes = Vec::new();
+                    while let Some(chunk) = response
+                        .chunk()
+                        .await
+                        .map_err(|error| TingError::NetworkError(error.to_string()))?
+                    {
+                        if bytes.len() + chunk.len() > crate::core::audio::metadata::MAX_COVER_BYTES
+                        {
+                            return Err(TingError::InvalidRequest(
+                                "Metadata cover is too large".into(),
+                            ));
                         }
-                        Err(e) => warn!("Failed to download cover for metadata writing: {}", e),
+                        bytes.extend_from_slice(&chunk);
                     }
+                    let temporary = tokio::task::spawn_blocking(move || {
+                        let temporary = TemporaryMetadataFile(path);
+                        std::fs::write(&temporary.0, bytes)?;
+                        Ok::<_, TingError>(temporary)
+                    })
+                    .await
+                    .map_err(|error| TingError::TaskError(error.to_string()))??;
+                    cover_path_str = Some(temporary.0.to_string_lossy().to_string());
+                    temp_cover_path = Some(temporary);
                 }
             } else {
                 // Local path
@@ -618,98 +635,41 @@ impl TaskQueue {
             } else {
                 // Generic formats may have a misleading filename extension.
                 // Sniff only after ruling out special format declarations.
-                let detected_format = detect_audio_format(path).unwrap_or_else(|| ext.to_string());
+                let detected_format = crate::core::audio::metadata::detect_audio_format(path)
+                    .unwrap_or_else(|| ext.to_string());
                 if detected_format != ext {
                     warn!(
                         "Audio extension mismatch for {:?}: extension={}, detected={}",
                         path, ext, detected_format
                     );
                 }
-                // No plugin found, try native/builtin support
-                if detected_format == "mp3" {
-                    let path_clone = path.to_path_buf();
-                    let title_clone = chapter.title.clone().unwrap_or_default();
-                    let artist_clone = if let Some(narrator) = &book.narrator {
-                        if !narrator.trim().is_empty() {
-                            narrator.clone()
-                        } else {
-                            book.author.clone().unwrap_or_default()
-                        }
-                    } else {
-                        book.author.clone().unwrap_or_default()
-                    };
-                    let album_clone = book.title.clone().unwrap_or_default();
-                    let genre_clone = book.genre.clone().unwrap_or_default();
-                    let desc_clone = book.description.clone().unwrap_or_default();
-                    let cover_path_str_clone = cover_path_str.clone();
-
-                    // Spawn blocking task for native ID3 write
-                    let native_write_result = tokio::task::spawn_blocking(move || -> Result<()> {
-                        let mut tag = match Tag::read_from_path(&path_clone) {
-                            Ok(t) => t,
-                            Err(_) => Tag::new(),
-                        };
-
-                        tag.set_title(&title_clone);
-                        tag.set_artist(&artist_clone);
-                        tag.set_album(&album_clone);
-                        tag.set_genre(&genre_clone);
-
-                        tag.remove_comment(Some("eng"), None);
-                        tag.add_frame(id3::frame::Comment {
-                            lang: "eng".to_string(),
-                            description: "".to_string(),
-                            text: desc_clone,
-                        });
-
-                        if let Some(cp) = cover_path_str_clone
-                            && let Ok(data) = std::fs::read(&cp)
-                        {
-                            let mime_type = if cp.to_lowercase().ends_with("png") {
-                                "image/png".to_string()
-                            } else {
-                                "image/jpeg".to_string()
-                            };
-
-                            tag.remove_all_pictures();
-                            tag.add_frame(Picture {
-                                mime_type,
-                                picture_type: Id3PictureType::CoverFront,
-                                description: "Cover".to_string(),
-                                data,
-                            });
-                        }
-
-                        tag.write_to_path(&path_clone, Version::Id3v23)
-                            .map_err(|e| {
-                                crate::core::app::error::TingError::IoError(std::io::Error::other(
-                                    e.to_string(),
-                                ))
-                            })?;
-
-                        Ok(())
-                    })
-                    .await;
-
-                    match native_write_result {
-                        Ok(Ok(_)) => {
-                            info!(
-                                "Successfully wrote metadata natively for MP3 (fallback): {:?}",
-                                path
-                            );
-                            success_count += 1;
-                        }
-                        Ok(Err(e)) => {
-                            warn!("Native ID3 write failed for {:?}: {}", path, e);
-                            error_count += 1;
-                        }
-                        Err(e) => {
-                            warn!("Native ID3 task panic for {:?}: {}", path, e);
-                            error_count += 1;
-                        }
+                let update = AudioMetadataUpdate {
+                    title: chapter.title.clone().unwrap_or_default(),
+                    artist: book
+                        .narrator
+                        .as_ref()
+                        .filter(|value| !value.trim().is_empty())
+                        .or(book.author.as_ref())
+                        .cloned()
+                        .unwrap_or_default(),
+                    album: book.title.clone().unwrap_or_default(),
+                    album_artist: book.author.clone().unwrap_or_default(),
+                    composer: book.narrator.clone().unwrap_or_default(),
+                    genre: book.genre.clone().unwrap_or_default(),
+                    description: book.description.clone().unwrap_or_default(),
+                };
+                match crate::core::audio::AudioService::write_file_metadata(
+                    path,
+                    update,
+                    cover_path_str.as_deref().map(Path::new),
+                )
+                .await
+                {
+                    Ok(()) => success_count += 1,
+                    Err(error) => {
+                        warn!(path = %path.display(), error = %error, "Core audio metadata write failed");
+                        error_count += 1;
                     }
-                } else {
-                    error_count += 1;
                 }
             }
             if success_count > successful_before
@@ -758,9 +718,7 @@ impl TaskQueue {
         }
 
         // Cleanup temp cover
-        if let Some(path) = temp_cover_path {
-            let _ = tokio::fs::remove_file(path).await;
-        }
+        drop(temp_cover_path);
 
         let _ = self
             .task_repo
@@ -793,9 +751,9 @@ impl TaskQueue {
             "Book metadata write completed"
         );
 
-        if remote && error_count > 0 {
+        if error_count > 0 {
             return Err(TingError::TaskError(format!(
-                "WebDAV metadata writing: {success_count} succeeded, {error_count} failed, {skipped_count} skipped"
+                "Audio metadata writing: {success_count} succeeded, {error_count} failed, {skipped_count} skipped"
             )));
         }
         Ok(())
@@ -808,57 +766,6 @@ impl Drop for TemporaryMetadataFile {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.0);
     }
-}
-
-fn detect_audio_format(path: &Path) -> Option<String> {
-    const ASF_HEADER_GUID: [u8; 12] = [
-        0x30, 0x26, 0xb2, 0x75, 0x8e, 0x66, 0xcf, 0x11, 0xa6, 0xd9, 0x00, 0xaa,
-    ];
-
-    let mut file = File::open(path).ok()?;
-    let mut header = [0_u8; 12];
-    let read = file.read(&mut header).ok()?;
-    if read < 4 {
-        return None;
-    }
-
-    let mut media_offset = 0_u64;
-    if read >= 10 && &header[..3] == b"ID3" {
-        media_offset = 10
-            + ((u64::from(header[6]) & 0x7f) << 21)
-            + ((u64::from(header[7]) & 0x7f) << 14)
-            + ((u64::from(header[8]) & 0x7f) << 7)
-            + (u64::from(header[9]) & 0x7f);
-        file.seek(SeekFrom::Start(media_offset)).ok()?;
-        header.fill(0);
-        if file.read(&mut header).ok()? < 4 {
-            return None;
-        }
-    }
-
-    if &header[4..8] == b"ftyp" {
-        return Some("m4a".to_string());
-    }
-    if media_offset > 0 && &header[1..5] == b"ftyp" {
-        return Some("m4a".to_string());
-    }
-    if header.starts_with(b"fLaC") {
-        return Some("flac".to_string());
-    }
-    if header.starts_with(b"OggS") {
-        return Some("ogg".to_string());
-    }
-    if header.starts_with(b"RIFF") && &header[8..12] == b"WAVE" {
-        return Some("wav".to_string());
-    }
-    if header == ASF_HEADER_GUID {
-        return Some("wma".to_string());
-    }
-    if header[0] == 0xff && header[1] & 0xe0 == 0xe0 {
-        return Some("mp3".to_string());
-    }
-
-    None
 }
 
 #[cfg(test)]

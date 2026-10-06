@@ -452,7 +452,10 @@ impl LibraryScanner {
         }
 
         // Run scraper if enabled and NOT manual corrected
-        if !manual_corrected && let Some(scraper_service) = &self.scraper_service {
+        if !manual_corrected
+            && scraper_config.has_scraper_sources()
+            && let Some(scraper_service) = &self.scraper_service
+        {
             let chapter_candidates = file_urls
                 .iter()
                 .enumerate()
@@ -722,7 +725,7 @@ impl LibraryScanner {
             ch_hasher.update(file_url.as_bytes());
             let ch_hash = format!("{:x}", ch_hasher.finalize());
 
-            // Extract metadata from WebDAV file (download header chunk)
+            // Read standard containers through the core audio metadata service.
             // In cloud mode we avoid probing WebDAV audio files and rely solely on scraped/sidecar metadata
             let (meta_title, meta_duration) = if use_json_chapters {
                 if let Some(ref chapters) = json_chapters {

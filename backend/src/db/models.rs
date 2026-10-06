@@ -206,6 +206,22 @@ pub struct ScraperConfig {
     pub scheduled_sync_interval: String,
 }
 
+impl ScraperConfig {
+    pub fn has_scraper_sources(&self) -> bool {
+        [
+            Some(&self.default_sources),
+            self.author_sources.as_ref(),
+            self.narrator_sources.as_ref(),
+            self.cover_sources.as_ref(),
+            self.intro_sources.as_ref(),
+            self.tags_sources.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|sources| sources.iter().any(|source| !source.trim().is_empty()))
+    }
+}
+
 impl Default for ScraperConfig {
     fn default() -> Self {
         Self {

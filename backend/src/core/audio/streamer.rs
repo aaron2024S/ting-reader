@@ -300,7 +300,7 @@ impl AudioStreamer {
 
         let metadata_opts = MetadataOptions::default();
 
-        let probed = symphonia::default::get_probe()
+        let mut probed = symphonia::default::get_probe()
             .format(&hint, mss, &format_opts, &metadata_opts)
             .map_err(|e| {
                 let error_msg = e.to_string();
@@ -361,58 +361,19 @@ impl AudioStreamer {
             0
         };
 
-        // Extract tags
-        let mut title = None;
-        let mut artist = None;
-        let mut album = None;
-        let mut album_artist = None;
-        let mut composer = None;
-        let mut genre = None;
-
-        // Iterate through all metadata revisions
-        // Symphonia might provide multiple metadata blocks (e.g. ID3v2 and ID3v1, or iTunes metadata)
-        // We process them all, preferring values found later (or earlier? usually header metadata comes first)
-        // We'll fill in missing values.
-
-        // Note: metadata() returns a MetadataLog. pop() returns the oldest?
-        // Actually Symphonia documentation says pop() "Removes the oldest metadata from the log".
-        // So we should probably process them in order.
-
-        while let Some(metadata_rev) = format_reader.metadata().pop() {
-            for tag in metadata_rev.tags() {
-                match tag.std_key {
-                    Some(symphonia::core::meta::StandardTagKey::TrackTitle) => {
-                        if title.is_none() {
-                            title = Some(tag.value.to_string());
-                        }
-                    }
-                    Some(symphonia::core::meta::StandardTagKey::Artist) => {
-                        if artist.is_none() {
-                            artist = Some(tag.value.to_string());
-                        }
-                    }
-                    Some(symphonia::core::meta::StandardTagKey::Album) => {
-                        if album.is_none() {
-                            album = Some(tag.value.to_string());
-                        }
-                    }
-                    Some(symphonia::core::meta::StandardTagKey::AlbumArtist) => {
-                        if album_artist.is_none() {
-                            album_artist = Some(tag.value.to_string());
-                        }
-                    }
-                    Some(symphonia::core::meta::StandardTagKey::Composer) => {
-                        if composer.is_none() {
-                            composer = Some(tag.value.to_string());
-                        }
-                    }
-                    Some(symphonia::core::meta::StandardTagKey::Genre) if genre.is_none() => {
-                        genre = Some(tag.value.to_string());
-                    }
-                    _ => {}
-                }
-            }
+        let mut tags = Default::default();
+        if let Some(metadata) = probed.metadata.get() {
+            read_symphonia_tags(metadata, &mut tags);
         }
+        read_symphonia_tags(format_reader.metadata(), &mut tags);
+        let [
+            mut title,
+            mut artist,
+            mut album,
+            mut album_artist,
+            composer,
+            mut genre,
+        ] = tags;
 
         // Try to use id3 crate for MP3 AND M4A files as fallback if metadata is missing
         // Some M4A files might contain ID3v2 tags (non-standard but common)
@@ -610,6 +571,36 @@ impl AudioStreamer {
                 None,
                 "bytes".to_string(),
             )
+        }
+    }
+}
+
+fn read_symphonia_tags(
+    mut metadata: symphonia::core::meta::Metadata<'_>,
+    values: &mut [Option<String>; 6],
+) {
+    use symphonia::core::meta::StandardTagKey;
+    loop {
+        if let Some(revision) = metadata.current() {
+            for tag in revision.tags() {
+                let index = match tag.std_key {
+                    Some(StandardTagKey::TrackTitle) => 0,
+                    Some(StandardTagKey::Artist) => 1,
+                    Some(StandardTagKey::Album) => 2,
+                    Some(StandardTagKey::AlbumArtist) => 3,
+                    Some(StandardTagKey::Composer) => 4,
+                    Some(StandardTagKey::Genre) => 5,
+                    _ => continue,
+                };
+                let value = tag.value.to_string();
+                if values[index].is_none() && !value.trim().is_empty() {
+                    values[index] = Some(value);
+                }
+            }
+        }
+        // pop advances only when a newer revision exists; it retains the last one.
+        if metadata.pop().is_none() {
+            break;
         }
     }
 }

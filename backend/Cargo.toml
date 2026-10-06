@@ -1,6 +1,6 @@
 [package]
 name = "ting_reader"
-version = "2.0.4"
+version = "2.0.5"
 edition = "2024"
 rust-version = "1.93"
 license = "AGPL-3.0-only"
@@ -80,6 +80,7 @@ base64 = "0.21"
 # Audio Processing
 symphonia = { version = "0.5", default-features = false, features = ["mp3", "aac", "isomp4", "alac"] }
 id3 = "1.14"
+lofty = "0.25.4"
 bytes = "1.10.1"
 memmap2 = "0.9"
 
