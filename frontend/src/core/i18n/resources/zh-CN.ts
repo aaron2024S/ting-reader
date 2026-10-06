@@ -1004,6 +1004,8 @@ const zhCN = {
       playlists_write: "修改书单",
       favorites_read: "读取收藏",
       favorites_write: "修改收藏",
+      bookmarks_read: "读取当前用户书签",
+      bookmarks_write: "修改当前用户书签",
       user_settings_read: "读取个人设置",
       user_settings_write: "修改个人设置",
       event_subscribe: "订阅事件",

@@ -27,8 +27,11 @@ const ProgressBar: React.FC<ProgressBarProps> = ({
   onSeekEnd
 }) => {
   const displayTime = isSeeking ? seekTime : currentTime;
-  const playedPercent = (Number.isFinite(duration) && duration > 0) ? (displayTime / duration) * 100 : 0;
-  const bufferedPercent = (Number.isFinite(duration) && duration > 0) ? (bufferedTime / duration) * 100 : 0;
+  const hasDuration = Number.isFinite(duration) && duration > 0;
+  const safeDisplayTime = Number.isFinite(displayTime) ? Math.max(0, displayTime) : 0;
+  const playedPercent = hasDuration ? Math.min(100, (safeDisplayTime / duration) * 100) : 0;
+  const bufferedPercent = hasDuration && Number.isFinite(bufferedTime)
+    ? Math.max(0, Math.min(100, (bufferedTime / duration) * 100)) : 0;
 
   // Filter out light colors
   const effectiveThemeColor = themeColor && !isTooLight(themeColor) ? themeColor : undefined;
@@ -73,9 +76,10 @@ const ProgressBar: React.FC<ProgressBarProps> = ({
       <input
         type="range"
         min="0"
-        max={Number.isFinite(duration) ? duration : 0}
+        max={hasDuration ? duration : 0}
         step="any"
-        value={displayTime}
+        value={hasDuration ? Math.min(safeDisplayTime, duration) : 0}
+        disabled={!hasDuration}
         onInput={onSeek}
         onMouseDown={onSeekStart}
         onTouchStart={onSeekStart}

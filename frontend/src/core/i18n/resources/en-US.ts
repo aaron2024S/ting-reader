@@ -1048,6 +1048,8 @@ const enUS = {
       playlists_write: "Modify playlists",
       favorites_read: "Read favorites",
       favorites_write: "Modify favorites",
+      bookmarks_read: "Read current user's bookmarks",
+      bookmarks_write: "Modify current user's bookmarks",
       user_settings_read: "Read preferences",
       user_settings_write: "Modify preferences",
       event_subscribe: "Subscribe to events",

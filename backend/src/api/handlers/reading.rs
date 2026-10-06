@@ -1,6 +1,7 @@
 use crate::api::state::AppState;
 use crate::auth::middleware::AuthUser;
 use crate::core::app::error::{Result, TingError};
+use crate::core::books::{BookmarkService, CreateBookmark};
 use crate::db::repository::{Repository, reading::ReadingRepository};
 use axum::{
     Json,
@@ -25,6 +26,14 @@ impl ReadingPageQuery {
 }
 fn repo(state: &AppState) -> ReadingRepository {
     ReadingRepository::new(state.book_repo.db().clone())
+}
+fn bookmarks<'a>(state: &'a AppState, user: &'a AuthUser) -> BookmarkService<'a> {
+    BookmarkService::new(
+        &state.book_repo,
+        &state.chapter_repo,
+        &user.id,
+        user.role == "admin",
+    )
 }
 async fn ensure_access(state: &AppState, user: &AuthUser, book: &str) -> Result<()> {
     if state.book_repo.find_by_id(book).await?.is_none() {
@@ -82,11 +91,7 @@ pub async fn bookmark_books(
     Query(query): Query<ReadingPageQuery>,
 ) -> Result<impl IntoResponse> {
     let (page, size) = query.bounds();
-    Ok(Json(
-        repo(&state)
-            .activity_books(&user.id, user.role == "admin", true, page, size)
-            .await?,
-    ))
+    Ok(Json(bookmarks(&state, &user).books(page, size).await?))
 }
 pub async fn list_bookmarks(
     State(state): State<AppState>,
@@ -94,10 +99,9 @@ pub async fn list_bookmarks(
     Path(book): Path<String>,
     Query(query): Query<ReadingPageQuery>,
 ) -> Result<impl IntoResponse> {
-    ensure_access(&state, &user, &book).await?;
     let (page, size) = query.bounds();
     Ok(Json(
-        repo(&state).bookmarks(&user.id, &book, page, size).await?,
+        bookmarks(&state, &user).list(&book, page, size).await?,
     ))
 }
 #[derive(Deserialize)]
@@ -123,69 +127,20 @@ pub async fn mark_books(
         .await?;
     Ok(StatusCode::NO_CONTENT)
 }
-#[derive(Deserialize)]
-pub struct AddBookmarkRequest {
-    pub book_id: String,
-    pub chapter_id: String,
-    pub position: f64,
-    #[serde(default)]
-    pub note: String,
-}
-fn validate_note(note: &str) -> Result<()> {
-    if note.chars().count() > 2000 {
-        return Err(TingError::InvalidRequest(
-            "Bookmark note exceeds 2000 characters".into(),
-        ));
-    }
-    Ok(())
-}
+pub type AddBookmarkRequest = CreateBookmark;
 pub async fn add_bookmark(
     State(state): State<AppState>,
     user: AuthUser,
     Json(request): Json<AddBookmarkRequest>,
 ) -> Result<impl IntoResponse> {
-    ensure_access(&state, &user, &request.book_id).await?;
-    validate_note(&request.note)?;
-    if !request.position.is_finite() || request.position < 0.0 {
-        return Err(TingError::InvalidRequest(
-            "Invalid bookmark position".into(),
-        ));
-    }
-    let chapter = state
-        .chapter_repo
-        .find_by_id(&request.chapter_id)
-        .await?
-        .ok_or_else(|| TingError::NotFound("Chapter not found".into()))?;
-    if chapter.book_id != request.book_id {
-        return Err(TingError::InvalidRequest(
-            "Chapter does not belong to book".into(),
-        ));
-    }
     Ok((
         StatusCode::CREATED,
-        Json(
-            repo(&state)
-                .add_bookmark(
-                    &user.id,
-                    request.book_id,
-                    request.chapter_id,
-                    request.position,
-                    request.note,
-                )
-                .await?,
-        ),
+        Json(bookmarks(&state, &user).create(request).await?),
     ))
 }
 #[derive(Deserialize)]
 pub struct EditBookmarkRequest {
     pub note: String,
-}
-async fn ensure_bookmark_access(state: &AppState, user: &AuthUser, id: &str) -> Result<()> {
-    let book = repo(state)
-        .bookmark_book(&user.id, id)
-        .await?
-        .ok_or_else(|| TingError::NotFound("Bookmark not found".into()))?;
-    ensure_access(state, user, &book).await
 }
 pub async fn edit_bookmark(
     State(state): State<AppState>,
@@ -193,11 +148,7 @@ pub async fn edit_bookmark(
     Path(id): Path<String>,
     Json(request): Json<EditBookmarkRequest>,
 ) -> Result<impl IntoResponse> {
-    validate_note(&request.note)?;
-    ensure_bookmark_access(&state, &user, &id).await?;
-    repo(&state)
-        .change_bookmark(&user.id, &id, Some(request.note))
-        .await?;
+    bookmarks(&state, &user).update(&id, request.note).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 pub async fn delete_bookmark(
@@ -205,7 +156,6 @@ pub async fn delete_bookmark(
     user: AuthUser,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse> {
-    ensure_bookmark_access(&state, &user, &id).await?;
-    repo(&state).change_bookmark(&user.id, &id, None).await?;
+    bookmarks(&state, &user).delete(&id).await?;
     Ok(StatusCode::NO_CONTENT)
 }

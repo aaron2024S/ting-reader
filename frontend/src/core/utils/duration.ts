@@ -15,3 +15,16 @@ export const formatMinuteMetric = (minutes: number): MinuteMetric => {
   }
   return { value: safeMinutes, unit: 'minutes' };
 };
+
+export const resolvePlaybackDuration = (
+  chapterDuration: number | undefined,
+  browserDuration: number,
+  isTranscoded: boolean,
+): number => {
+  if (chapterDuration !== undefined && Number.isFinite(chapterDuration) && chapterDuration > 0) {
+    return chapterDuration;
+  }
+  // A chunked transcode's finite duration can still be just a partial estimate.
+  if (isTranscoded) return 0;
+  return Number.isFinite(browserDuration) && browserDuration > 0 ? browserDuration : 0;
+};

@@ -123,6 +123,8 @@ pub enum PluginHostPermission {
     PlaylistsWrite,
     FavoritesRead,
     FavoritesWrite,
+    BookmarksRead,
+    BookmarksWrite,
     UserSettingsRead,
     UserSettingsWrite,
     ConfigRead,
@@ -337,6 +339,12 @@ impl PluginHostGateway {
             | "playlists.remove_item" => Some(PluginHostPermission::PlaylistsWrite),
             "favorites.list" => Some(PluginHostPermission::FavoritesRead),
             "favorites.add" | "favorites.remove" => Some(PluginHostPermission::FavoritesWrite),
+            "bookmarks.books" | "bookmarks.list" | "bookmarks.get" => {
+                Some(PluginHostPermission::BookmarksRead)
+            }
+            "bookmarks.create" | "bookmarks.update" | "bookmarks.delete" => {
+                Some(PluginHostPermission::BookmarksWrite)
+            }
             "user_settings.get" => Some(PluginHostPermission::UserSettingsRead),
             "user_settings.set" => Some(PluginHostPermission::UserSettingsWrite),
             _ => None,
@@ -418,6 +426,18 @@ impl PluginHostGateway {
                     | (
                         PluginHostPermission::FavoritesWrite,
                         Permission::FavoritesWrite
+                    )
+                    | (
+                        PluginHostPermission::BookmarksRead,
+                        Permission::BookmarksRead
+                    )
+                    | (
+                        PluginHostPermission::BookmarksRead,
+                        Permission::BookmarksWrite
+                    )
+                    | (
+                        PluginHostPermission::BookmarksWrite,
+                        Permission::BookmarksWrite
                     )
                     | (
                         PluginHostPermission::UserSettingsRead,
@@ -550,6 +570,10 @@ impl PluginHostGateway {
             "favorites.list" => self.favorites_list(user, &params).await,
             "favorites.add" => self.favorites_add(user, &params).await,
             "favorites.remove" => self.favorites_remove(user, &params).await,
+            "bookmarks.books" | "bookmarks.list" | "bookmarks.get" | "bookmarks.create"
+            | "bookmarks.update" | "bookmarks.delete" => {
+                self.bookmarks_invoke(user, method, &params).await
+            }
             "user_settings.get" => self.user_settings_get(user, &params).await,
             "user_settings.set" => self.user_settings_set(user, &params).await,
             _ => Err(TingError::InvalidRequest(format!(

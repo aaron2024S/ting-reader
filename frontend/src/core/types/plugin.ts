@@ -34,6 +34,8 @@ export type PluginPermission =
         | "playlists_write"
         | "favorites_read"
         | "favorites_write"
+        | "bookmarks_read"
+        | "bookmarks_write"
         | "user_settings_read"
         | "user_settings_write"
         | "config_read"

@@ -4528,8 +4528,8 @@ dependencies = [
 
 [[package]]
 name = "ting-plugin-contract"
-version = "2.0.2"
-source = "git+https://github.com/dqsq2e2/ting-reader-plugin-contract.git?tag=v2.0.2#d8c6782746855bc98efe0e897723209145701500"
+version = "2.0.3"
+source = "git+https://github.com/dqsq2e2/ting-reader-plugin-contract.git?tag=v2.0.3#1cbf0b4eebbac327dcc5699d52d0e1bc46eaee4a"
 dependencies = [
  "semver 1.0.28",
  "serde",
@@ -4538,7 +4538,7 @@ dependencies = [
 
 [[package]]
 name = "ting_reader"
-version = "2.0.3"
+version = "2.0.4"
 dependencies = [
  "aes-gcm",
  "anyhow",

@@ -288,12 +288,11 @@ async fn bookmarks_enforce_ownership_and_cascade_when_chapters_are_deleted() {
         repo.bookmarks("u1", "book", 1, 40).await.unwrap().items[0].chapter_duration,
         100.0
     );
-    assert!(
-        repo.bookmark_book("u2", &bookmark.id)
-            .await
-            .unwrap()
-            .is_none()
-    );
+    assert!(repo.bookmark("u2", &bookmark.id).await.unwrap().is_none());
+    let fetched = repo.bookmark("u1", &bookmark.id).await.unwrap().unwrap();
+    assert_eq!(fetched.book_id, "book");
+    assert_eq!(fetched.position, 12.5);
+    assert_eq!(fetched.chapter_duration, 100.0);
     assert_eq!(
         repo.change_bookmark("u2", &bookmark.id, None)
             .await
@@ -321,4 +320,5 @@ async fn bookmarks_enforce_ownership_and_cascade_when_chapters_are_deleted() {
     .await
     .unwrap();
     assert_eq!(repo.bookmarks("u1", "book", 1, 40).await.unwrap().total, 0);
+    assert!(repo.bookmark("u1", &bookmark.id).await.unwrap().is_none());
 }

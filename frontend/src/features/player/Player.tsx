@@ -8,6 +8,8 @@ import apiClient from "../../core/api/client";
 import { BOOKMARK_SEEK_REQUESTED } from "../../core/api/reading";
 import type { Chapter } from "../../core/types";
 import { sortChaptersForPlayback } from "../../core/utils/chapter";
+import { resolvePlaybackDuration } from "../../core/utils/duration";
+import { getCoverUrl } from "../../core/utils/image";
 import { setAlpha, toSolidColor, isTooLight } from "../../core/utils/color";
 import { useBookshelfCoverShape } from "../../core/hooks/useBookshelfCoverShape";
 import {
@@ -15,6 +17,11 @@ import {
   type PlaybackPreferences,
 } from "../../core/utils/playbackPreferences";
 import ProgressBar from "./ProgressBar";
+import {
+  registerMediaSessionControls,
+  updateMediaSessionMetadata,
+  updateMediaSessionPlayback,
+} from "./mediaSession";
 import {
   isAppleMobileBrowser,
   isMiniPlayerHiddenPath,
@@ -207,12 +214,15 @@ const Player: React.FC = () => {
   const [hlsChapterId, setHlsChapterId] = useState<string | null>(null);
   const [hlsSeekOffset, setHlsSeekOffset] = useState(0);
   const [hlsUnavailable, setHlsUnavailable] = useState(false);
+  const currentBookId = currentBook?.id;
+  const currentChapterId = currentChapter?.id;
+  const chapterDuration = currentChapter?.duration;
   const isInitialLoadRef = useRef(true);
   const transcodeFallbackChapterRef = useRef<string | null>(null);
   const hlsRequestIdRef = useRef(0);
   const hlsPendingSeekRef = useRef<number | null>(null);
   const hlsSeekingRef = useRef(false);
-  const hlsSourceSwitchingRef = useRef(false);
+  const sourceSwitchingRef = useRef(false);
   const hlsSeekQueueRef = useRef<Promise<void>>(Promise.resolve());
   // 防止 skip-outro 在同一章节内多次触发 nextChapter。
   const skipOutroChapterRef = useRef<string | null>(null);
@@ -276,6 +286,7 @@ const Player: React.FC = () => {
       setHlsUnavailable(true);
     }
     transcodeFallbackChapterRef.current = currentChapter.id;
+    sourceSwitchingRef.current = true;
     setShouldTranscode(true);
     setRetryCount((prev) => prev + 1);
     isInitialLoadRef.current = true;
@@ -402,6 +413,54 @@ const Player: React.FC = () => {
   }, [currentChapter?.duration, setDuration]);
 
   useEffect(() => {
+    if (!shouldTranscode || !currentBookId || !currentChapterId) return;
+    if (resolvePlaybackDuration(chapterDuration, 0, true) > 0) return;
+
+    const bookId = currentBookId;
+    const chapterId = currentChapterId;
+    const controller = new AbortController();
+    let timer: number | undefined;
+    let attempts = 0;
+    const refreshDuration = async () => {
+      try {
+        const response = await apiClient.get<Chapter[]>(`/api/books/${bookId}/chapters`, {
+          signal: controller.signal,
+          timeout: 5000,
+        });
+        if (controller.signal.aborted) return;
+        const chapter = response.data.find((item) => item.id === chapterId);
+        const sourceDuration = resolvePlaybackDuration(chapter?.duration, 0, true);
+        const state = usePlayerStore.getState();
+        if (state.currentBook?.id !== bookId || state.currentChapter?.id !== chapterId) return;
+        if (sourceDuration > 0) {
+          const updateChapter = (item: Chapter) =>
+            item.id === chapterId ? { ...item, duration: sourceDuration } : item;
+          setChapters((items) => items.map(updateChapter));
+          usePlayerStore.setState((current) => ({
+            chapters: current.chapters.map(updateChapter),
+            currentChapter: current.currentChapter ? updateChapter(current.currentChapter) : null,
+            duration: sourceDuration,
+          }));
+          return;
+        }
+      } catch (err) {
+        if (controller.signal.aborted) return;
+        console.debug("Source duration is not available yet", err);
+      }
+      // FFprobe can finish after the stream has already loaded its metadata.
+      attempts += 1;
+      if (!controller.signal.aborted && attempts < 6) {
+        timer = window.setTimeout(refreshDuration, Math.min(1000 * 2 ** attempts, 8000));
+      }
+    };
+    timer = window.setTimeout(refreshDuration, 0);
+    return () => {
+      controller.abort();
+      window.clearTimeout(timer);
+    };
+  }, [shouldTranscode, currentBookId, currentChapterId, chapterDuration, token, API_BASE_URL]);
+
+  useEffect(() => {
     let disposed = false;
     let ownedSession: string | null = null;
     let heartbeat: number | undefined;
@@ -418,7 +477,7 @@ const Player: React.FC = () => {
     const timer = window.setTimeout(() => {
       hlsPendingSeekRef.current = null;
       hlsSeekingRef.current = false;
-      hlsSourceSwitchingRef.current = false;
+      sourceSwitchingRef.current = false;
       if (!currentChapter || !shouldUseHlsForCurrentChapter) {
         setHlsStreamUrl(null);
         setHlsSessionId(null);
@@ -431,7 +490,7 @@ const Player: React.FC = () => {
       if (isInitialLoadRef.current && currentBook?.skip_intro && startAt < currentBook.skip_intro) {
         startAt = currentBook.skip_intro;
       }
-      hlsSourceSwitchingRef.current = true;
+      sourceSwitchingRef.current = true;
       setHlsChapterId(currentChapter.id);
       setHlsStreamUrl(null);
       setHlsSessionId(null);
@@ -469,7 +528,7 @@ const Player: React.FC = () => {
         .catch(err => {
           if (disposed || requestId !== hlsRequestIdRef.current) return;
           console.error("HLS stream initialization failed", err);
-          hlsSourceSwitchingRef.current = false;
+          sourceSwitchingRef.current = false;
           setHlsStreamUrl(null);
           setHlsSessionId(null);
           setHlsChapterId(null);
@@ -681,63 +740,23 @@ const Player: React.FC = () => {
     wsSendProgress,
   });
 
+  const updateAudioDuration = () => {
+    const audio = audioRef.current;
+    if (!audio) return 0;
+    const sourceDuration = resolvePlaybackDuration(
+      currentChapter?.duration,
+      audio.duration,
+      shouldTranscode,
+    );
+    setDuration(sourceDuration);
+    return sourceDuration;
+  };
+
   const handleLoadedMetadata = () => {
     if (audioRef.current) {
       applyPendingHlsSeek();
       audioRef.current.volume = isMuted ? 0 : volume;
-      let browserDuration = audioRef.current.duration;
-
-      // Prefer duration already stored with the chapter.
-      if (currentChapter?.duration && currentChapter.duration > 0) {
-        browserDuration = currentChapter.duration;
-        console.log(`Using chapter duration: ${browserDuration}s`);
-      }
-      // Use browser metadata only when the chapter has no stored duration.
-      else if (
-        Number.isFinite(browserDuration) &&
-        !isNaN(browserDuration) &&
-        browserDuration > 0
-      ) {
-        console.log(`Using browser-reported duration: ${browserDuration}s`);
-      } else {
-        console.warn("Unable to determine a valid duration; using 0");
-        browserDuration = 0;
-
-        // Transcoded chunked streams may report Infinity/NaN. Refetch the
-        // chapter list because the backend stores the real FFprobe duration.
-        if (shouldTranscode && currentBook?.id && currentChapter?.id) {
-          const fetchBookId = currentBook.id;
-          const fetchChapterId = currentChapter.id;
-          apiClient
-            .get(`/api/books/${fetchBookId}/chapters`)
-            .then((res) => {
-              const updatedChapters = sortChaptersForPlayback(res.data);
-              const updatedChapter = updatedChapters.find(
-                (c: Chapter) => c.id === fetchChapterId,
-              );
-              if (
-                updatedChapter &&
-                updatedChapter.duration &&
-                updatedChapter.duration > 0
-              ) {
-                setChapters(updatedChapters);
-                usePlayerStore.setState({
-                  chapters: updatedChapters,
-                  currentChapter: updatedChapter,
-                });
-                setDuration(updatedChapter.duration);
-                console.log(
-                  `Fetched transcoded audio duration from server: ${updatedChapter.duration}s`,
-                );
-              }
-            })
-            .catch((err) =>
-              console.error("Failed to fetch transcoded audio duration", err),
-            );
-        }
-      }
-
-      setDuration(browserDuration);
+      const browserDuration = updateAudioDuration();
 
       // Resume position from store if this is the initial load for this chapter
       if (isInitialLoadRef.current && !isUsingHlsForCurrentChapter) {
@@ -778,7 +797,7 @@ const Player: React.FC = () => {
 
       // Sync duration back only when the chapter lacks one and metadata is valid.
       if (
-        !isUsingHlsForCurrentChapter &&
+        !shouldTranscode &&
         currentChapter &&
         (!currentChapter.duration || currentChapter.duration === 0)
       ) {
@@ -822,14 +841,7 @@ const Player: React.FC = () => {
     const time = parseFloat((e.target as HTMLInputElement).value);
     setSeekTime(time);
     if (!isSeeking) {
-      if (isUsingHlsForCurrentChapter) {
-        setCurrentTime(time);
-        return;
-      }
-      if (audioRef.current) {
-        audioRef.current.currentTime = time;
-      }
-      setCurrentTime(time);
+      seekToTime(time);
     }
   };
 
@@ -839,6 +851,7 @@ const Player: React.FC = () => {
   };
 
   const seekToTime = (time: number) => {
+    if (!Number.isFinite(time)) return;
     const targetTime = Math.max(
       0,
       duration > 0 ? Math.min(time, duration) : time,
@@ -881,7 +894,7 @@ const Player: React.FC = () => {
             audioRef.current.currentTime = playbackTime;
             hlsSeekingRef.current = false;
           } else {
-            hlsSourceSwitchingRef.current = true;
+            sourceSwitchingRef.current = true;
             hlsPendingSeekRef.current = playbackTime;
             setHlsStreamUrl(nextUrl);
           }
@@ -889,7 +902,7 @@ const Player: React.FC = () => {
           .catch((err) => {
             if (requestId !== hlsRequestIdRef.current) return;
             hlsSeekingRef.current = false;
-            hlsSourceSwitchingRef.current = false;
+            sourceSwitchingRef.current = false;
             console.error("HLS seek failed", err);
             tryTranscodeFallback();
           });
@@ -903,6 +916,7 @@ const Player: React.FC = () => {
 
       if (isNonSeekable && shouldTranscode) {
         // Reload audio with seek parameter (server-side seek via FFmpeg -ss)
+        sourceSwitchingRef.current = true;
         setSeekOffset(targetTime);
         setCurrentTime(targetTime);
         isInitialLoadRef.current = false;
@@ -931,6 +945,54 @@ const Player: React.FC = () => {
     window.addEventListener(BOOKMARK_SEEK_REQUESTED, onBookmarkSeek);
     return () => window.removeEventListener(BOOKMARK_SEEK_REQUESTED, onBookmarkSeek);
   }, []);
+
+  const onMediaPlay = React.useEffectEvent(() => setIsPlaying(true));
+  const onMediaPause = React.useEffectEvent(() => setIsPlaying(false));
+  const onMediaPrevious = React.useEffectEvent(() => prevChapter());
+  const onMediaNext = React.useEffectEvent(() => nextChapter());
+  const onMediaSeek = React.useEffectEvent((position: number) => seekToTime(position));
+  const hasCurrentChapter = !!currentChapter;
+
+  useEffect(() => {
+    if (!hasCurrentChapter || !("mediaSession" in navigator)) return;
+    const session = navigator.mediaSession;
+    const unregister = registerMediaSessionControls(session, {
+      play: () => onMediaPlay(),
+      pause: () => onMediaPause(),
+      previous: () => onMediaPrevious(),
+      next: () => onMediaNext(),
+      seek: (position) => onMediaSeek(position),
+      getPosition: () => usePlayerStore.getState().currentTime,
+    });
+    return () => {
+      unregister();
+      session.metadata = null;
+      session.playbackState = "none";
+      session.setPositionState?.();
+    };
+  }, [hasCurrentChapter]);
+
+  useEffect(() => {
+    if (!("mediaSession" in navigator)) return;
+    const cover = currentBook?.cover_url
+      ? getCoverUrl(currentBook.cover_url, currentBook.library_id, currentBook.id)
+      : null;
+    updateMediaSessionMetadata(navigator.mediaSession, currentChapterId ? {
+      title: currentChapter?.title || currentBook?.title || "",
+      artist: currentBook?.narrator || currentBook?.author || "",
+      album: currentBook?.title || "",
+      artwork: cover ? [{ src: new URL(cover, window.location.href).href }] : [],
+    } : null);
+  }, [
+    currentChapterId, currentChapter?.title,
+    currentBook?.id, currentBook?.title, currentBook?.author, currentBook?.narrator,
+    currentBook?.cover_url, currentBook?.library_id, token, API_BASE_URL,
+  ]);
+
+  useEffect(() => {
+    if (!hasCurrentChapter || !("mediaSession" in navigator)) return;
+    updateMediaSessionPlayback(navigator.mediaSession, isPlaying, duration, currentTime, playbackSpeed);
+  }, [hasCurrentChapter, isPlaying, duration, currentTime, playbackSpeed]);
 
   const formatTime = formatPlayerTime;
   const getLocalizedChapterProgressText = React.useCallback(
@@ -1083,9 +1145,10 @@ const Player: React.FC = () => {
         onTimeUpdate={handleTimeUpdate}
         onProgress={handleProgress}
         onLoadedMetadata={handleLoadedMetadata}
+        onDurationChange={updateAudioDuration}
         onCanPlay={() => {
           applyPendingHlsSeek();
-          hlsSourceSwitchingRef.current = false;
+          sourceSwitchingRef.current = false;
           setError(null);
           const audio = audioRef.current;
           if (
@@ -1104,7 +1167,7 @@ const Player: React.FC = () => {
           }
         }}
         onPause={() => {
-          if (!hlsSourceSwitchingRef.current) setIsPlaying(false);
+          if (!sourceSwitchingRef.current) setIsPlaying(false);
         }}
         onError={(e) => {
           const audio = audioRef.current;

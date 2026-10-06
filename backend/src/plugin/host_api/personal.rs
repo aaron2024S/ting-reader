@@ -1,11 +1,44 @@
-//! Host access to playlists, favorites and user settings.
+//! Host access to playlists, favorites, bookmarks and user settings.
 
 use super::{PluginHostGateway, PluginHostUser, required_string_param, string_param, usize_param};
 use crate::core::app::error::{Result, TingError};
+use crate::core::books::{BookmarkService, CreateBookmark};
 use crate::db::models::{Favorite, Playlist, PlaylistItem, UserSettings};
 use crate::db::repository::Repository;
+use serde::Deserialize;
+use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
 use uuid::Uuid;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BookmarkPage {
+    page: Option<usize>,
+    page_size: Option<usize>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BookBookmarks {
+    book_id: String,
+    page: Option<usize>,
+    page_size: Option<usize>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BookmarkId {
+    #[serde(alias = "id")]
+    bookmark_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UpdateBookmark {
+    #[serde(alias = "id")]
+    bookmark_id: String,
+    note: String,
+}
 
 impl PluginHostGateway {
     pub(super) async fn playlists_list(
@@ -281,6 +314,67 @@ impl PluginHostGateway {
         }))
     }
 
+    pub(super) async fn bookmarks_invoke(
+        &self,
+        user: &PluginHostUser,
+        method: &str,
+        params: &Value,
+    ) -> Result<Value> {
+        let service = BookmarkService::new(
+            &self.book_repo,
+            &self.chapter_repo,
+            &user.id,
+            user.is_admin(),
+        );
+        let result = match method {
+            "bookmarks.books" => {
+                let request: BookmarkPage = decode_bookmark_params(params)?;
+                serde_json::to_value(
+                    service
+                        .books(request.page.unwrap_or(1), request.page_size.unwrap_or(40))
+                        .await?,
+                )
+            }
+            "bookmarks.list" => {
+                let request: BookBookmarks = decode_bookmark_params(params)?;
+                serde_json::to_value(
+                    service
+                        .list(
+                            &request.book_id,
+                            request.page.unwrap_or(1),
+                            request.page_size.unwrap_or(40),
+                        )
+                        .await?,
+                )
+            }
+            "bookmarks.get" => {
+                let request: BookmarkId = decode_bookmark_params(params)?;
+                serde_json::to_value(service.get(&request.bookmark_id).await?)
+            }
+            "bookmarks.create" => {
+                let request: CreateBookmark = decode_bookmark_params(params)?;
+                serde_json::to_value(service.create(request).await?)
+            }
+            "bookmarks.update" => {
+                let request: UpdateBookmark = decode_bookmark_params(params)?;
+                serde_json::to_value(service.update(&request.bookmark_id, request.note).await?)
+            }
+            "bookmarks.delete" => {
+                let request: BookmarkId = decode_bookmark_params(params)?;
+                service.delete(&request.bookmark_id).await?;
+                Ok(serde_json::json!({"ok": true, "id": request.bookmark_id}))
+            }
+            _ => {
+                return Err(TingError::InvalidRequest(
+                    "Unknown bookmark Host method".into(),
+                ));
+            }
+        };
+        result.map_err(|error| {
+            TingError::SerializationError(format!("Bookmark serialization failed: {error}"))
+        })
+    }
+
     pub(super) async fn user_settings_get(
         &self,
         user: &PluginHostUser,
@@ -373,6 +467,11 @@ impl PluginHostGateway {
         }
         Ok(playlist)
     }
+}
+
+fn decode_bookmark_params<T: DeserializeOwned>(params: &Value) -> Result<T> {
+    serde_json::from_value(params.clone())
+        .map_err(|error| TingError::InvalidRequest(format!("Invalid bookmark parameters: {error}")))
 }
 
 fn plugin_host_playlist_value(playlist: Playlist) -> Value {

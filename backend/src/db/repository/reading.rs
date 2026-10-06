@@ -337,6 +337,26 @@ impl ReadingRepository {
         }).await
     }
 
+    pub async fn bookmark(&self, user: &str, id: &str) -> Result<Option<Bookmark>> {
+        let user = user.to_owned();
+        let id = id.to_owned();
+        self.db.execute(move |conn| {
+            Ok(conn.query_row(
+                "SELECT m.id,m.book_id,m.chapter_id,c.title,m.position,m.note,m.created_at,m.updated_at,
+                        COALESCE(NULLIF(c.duration,0),p.duration,0)
+                 FROM bookmarks m JOIN chapters c ON c.id=m.chapter_id
+                 LEFT JOIN progress p ON p.user_id=m.user_id AND p.book_id=m.book_id AND p.chapter_id=m.chapter_id
+                 WHERE m.user_id=?1 AND m.id=?2",
+                [&user, &id],
+                |row| Ok(Bookmark {
+                    id: row.get(0)?, book_id: row.get(1)?, chapter_id: row.get(2)?,
+                    chapter_title: row.get(3)?, position: row.get(4)?, note: row.get(5)?,
+                    created_at: row.get(6)?, updated_at: row.get(7)?, chapter_duration: row.get(8)?,
+                }),
+            ).optional()?)
+        }).await
+    }
+
     pub async fn add_bookmark(
         &self,
         user: &str,
@@ -356,21 +376,6 @@ impl ReadingRepository {
                 [&chapter, &user], |r| Ok((r.get(0)?, r.get(1)?)))?;
             Ok(Bookmark {id,book_id:book,chapter_id:chapter,chapter_title,chapter_duration,position,note,created_at:now.clone(),updated_at:now})
         }).await
-    }
-
-    pub async fn bookmark_book(&self, user: &str, id: &str) -> Result<Option<String>> {
-        let user = user.to_owned();
-        let id = id.to_owned();
-        self.db
-            .execute(move |c| {
-                Ok(c.query_row(
-                    "SELECT book_id FROM bookmarks WHERE user_id=? AND id=?",
-                    [user, id],
-                    |r| r.get(0),
-                )
-                .optional()?)
-            })
-            .await
     }
 
     pub async fn change_bookmark(

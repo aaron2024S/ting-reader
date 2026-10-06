@@ -1,5 +1,6 @@
 //! Book services, metadata files, cover colors and text normalization.
 
+pub mod bookmarks;
 pub mod color;
 pub mod merge_service;
 pub mod metadata_writer;
@@ -9,6 +10,7 @@ pub mod service;
 pub mod text_cleaner;
 pub mod webdav_metadata;
 
+pub use bookmarks::{BookmarkService, CreateBookmark};
 pub use merge_service::MergeService;
 pub use nfo_manager::{BookMetadata, ChapterMetadata, NfoManager};
 pub use scraper::ScraperService;
