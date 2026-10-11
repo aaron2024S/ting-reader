@@ -334,14 +334,14 @@ jobs:
           sed -i "s/^version[[:space:]]*=.*/version = $VERSION/" .github/ting-reader-fpk/manifest
 
           fnpack build --directory .github/ting-reader-fpk
-          mv ting-reader.fpk ting-reader-$VERSION.fpk
+          mv ting-reader-docker.fpk ting-reader-$VERSION.fpk
 
           # Keep backup of LICENSE and use English LICENSE for fygopack
           cp .github/ting-reader-fpk/LICENSE .github/ting-reader-fpk/LICENSE.bak
           cp .github/ting-reader-fpk/LICENSE.en .github/ting-reader-fpk/LICENSE
 
           fygopack build --directory .github/ting-reader-fpk
-          mv ting-reader.fpk ting-reader-fygo-$VERSION.fpk
+          mv ting-reader-docker.fpk ting-reader-fygo-$VERSION.fpk
 
           # Restore Chinese LICENSE
           mv .github/ting-reader-fpk/LICENSE.bak .github/ting-reader-fpk/LICENSE
@@ -354,14 +354,14 @@ jobs:
           sed -i "s/^version[[:space:]]*=.*/version = beta/" .github/ting-reader-fpk/manifest
 
           fnpack build --directory .github/ting-reader-fpk
-          mv ting-reader.fpk ting-reader-beta.fpk
+          mv ting-reader-docker.fpk ting-reader-beta.fpk
 
           # Keep backup of LICENSE and use English LICENSE for fygopack
           cp .github/ting-reader-fpk/LICENSE .github/ting-reader-fpk/LICENSE.bak
           cp .github/ting-reader-fpk/LICENSE.en .github/ting-reader-fpk/LICENSE
 
           fygopack build --directory .github/ting-reader-fpk
-          mv ting-reader.fpk ting-reader-fygo-beta.fpk
+          mv ting-reader-docker.fpk ting-reader-fygo-beta.fpk
 
           # Restore Chinese LICENSE
           mv .github/ting-reader-fpk/LICENSE.bak .github/ting-reader-fpk/LICENSE

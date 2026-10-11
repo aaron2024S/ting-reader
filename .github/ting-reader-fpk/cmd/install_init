@@ -3,11 +3,11 @@
 ### This script is called before the user installs the application.
 
 # Pre-create the default storage directory to ensure permissions and availability
-DEFAULT_STORAGE="${TRIM_APPDEST_VOL}/@appshare/ting-reader/storage"
-DEFAULT_DATA="${TRIM_APPDEST_VOL}/@appshare/ting-reader/data"
-DEFAULT_PLUGINS="${TRIM_APPDEST_VOL}/@appshare/ting-reader/plugins"
-DEFAULT_TEMP="${TRIM_APPDEST_VOL}/@appshare/ting-reader/temp"
-GATEWAY_SOCKET="${TRIM_APPDEST}/ting-reader.sock"
+DEFAULT_STORAGE="${TRIM_APPDEST_VOL}/@appshare/ting-reader-docker/storage"
+DEFAULT_DATA="${TRIM_APPDEST_VOL}/@appshare/ting-reader-docker/data"
+DEFAULT_PLUGINS="${TRIM_APPDEST_VOL}/@appshare/ting-reader-docker/plugins"
+DEFAULT_TEMP="${TRIM_APPDEST_VOL}/@appshare/ting-reader-docker/temp"
+GATEWAY_SOCKET="${TRIM_APPDEST}/ting-reader-docker.sock"
 
 echo "Pre-creating directories..."
 mkdir -p "$DEFAULT_STORAGE"

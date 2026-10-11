@@ -2,7 +2,7 @@
     "docker-project": {
         "projects": [
             {
-                "name": "ting-reader",
+                "name": "ting-reader-docker",
                 "path": "docker"
             }
         ]
@@ -13,34 +13,34 @@
     "data-share": {
         "shares": [
             {
-                "name": "ting-reader/data",
+                "name": "ting-reader-docker/data",
                 "permission": {
                     "rw": [
-                        "docker-ting-reader"
+                        "ting-reader-docker"
                     ]
                 }
             },
             {
-                "name": "ting-reader/storage",
+                "name": "ting-reader-docker/storage",
                 "permission": {
                     "rw": [
-                        "docker-ting-reader"
+                        "ting-reader-docker"
                     ]
                 }
             },
             {
-                "name": "ting-reader/plugins",
+                "name": "ting-reader-docker/plugins",
                 "permission": {
                     "rw": [
-                        "docker-ting-reader"
+                        "ting-reader-docker"
                     ]
                 }
             },
             {
-                "name": "ting-reader/temp",
+                "name": "ting-reader-docker/temp",
                 "permission": {
                     "rw": [
-                        "docker-ting-reader"
+                        "ting-reader-docker"
                     ]
                 }
             }

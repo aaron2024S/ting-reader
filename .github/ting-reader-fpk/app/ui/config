@@ -1,13 +1,13 @@
 {
     ".url": {
-        "ting-reader.main": {
+        "ting-reader-docker.main": {
             "title": "${entry.title}",
             "icon": "images/icon-{0}.png",
             "type": "url",
             "protocol": "",
-            "gatewaySocket": "ting-reader.sock",
-            "gatewayPrefix": "/app/ting-reader",
-            "url": "/app/ting-reader/",
+            "gatewaySocket": "ting-reader-docker.sock",
+            "gatewayPrefix": "/app/ting-reader-docker",
+            "url": "/app/ting-reader-docker/",
             "allUsers": true
         }
     }

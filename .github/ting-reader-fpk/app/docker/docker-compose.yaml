@@ -1,17 +1,17 @@
 services:
-  ting-reader:
+  ting-reader-docker:
     image: dqsq2e2/ting-reader:${TRIM_APPVER}
-    container_name: ting-reader
+    container_name: ting-reader-docker
     ports:
       - "0.0.0.0:${wizard_port}:3000"
       - "[::]:${wizard_port}:3000"
     volumes:
       - "${TRIM_APPDEST}:/app/target:rw"
       - "/var/run/trim_open_gateway_apiscope.socket:/var/run/trim_open_gateway_apiscope.socket"
-      - "${TRIM_APPDEST_VOL}/@appshare/ting-reader/data:/app/data"
-      - "${wizard_storage_path:-${TRIM_APPDEST_VOL}/@appshare/ting-reader/storage}:/app/storage"
-      - "${TRIM_APPDEST_VOL}/@appshare/ting-reader/plugins:/app/plugins"
-      - "${TRIM_APPDEST_VOL}/@appshare/ting-reader/temp:/app/temp"
+      - "${TRIM_APPDEST_VOL}/@appshare/ting-reader-docker/data:/app/data"
+      - "${wizard_storage_path:-${TRIM_APPDEST_VOL}/@appshare/ting-reader-docker/storage}:/app/storage"
+      - "${TRIM_APPDEST_VOL}/@appshare/ting-reader-docker/plugins:/app/plugins"
+      - "${TRIM_APPDEST_VOL}/@appshare/ting-reader-docker/temp:/app/temp"
       - "/etc/localtime:/etc/localtime:ro"
       - "/etc/timezone:/etc/timezone:ro"
     restart: unless-stopped
@@ -19,10 +19,11 @@ services:
       - RUST_LOG=info
       - TING_SERVER__HOST=0.0.0.0
       - TING_SERVER__PORT=3000
-      - FNNAS_GATEWAY_SOCKET=/app/target/ting-reader.sock
-      - FNNAS_GATEWAY_PREFIX=/app/ting-reader
+      - FNNAS_GATEWAY_SOCKET=/app/target/ting-reader-docker.sock
+      - FNNAS_GATEWAY_PREFIX=/app/ting-reader-docker
       - FNNAS_FPK_INITIAL_ADMIN_LANGUAGE=1
       - FNNAS_FPK_INITIAL_TIME_ZONE=1
+      - TRIM_APPNAME=${TRIM_APPNAME:-ting-reader-docker}
       - TRIM_API_TOKEN=${TRIM_API_TOKEN:-}
       - TRIM_SYS_LANGUAGE=${TRIM_SYS_LANGUAGE:-}
       - TEMP_DIR=/app/temp

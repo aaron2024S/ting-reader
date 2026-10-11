@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Write the updated accessible paths to a file for runtime reload without restart
-DATA_DIR="${TRIM_APPDEST_VOL}/@appshare/ting-reader/data"
+DATA_DIR="${TRIM_APPDEST_VOL}/@appshare/ting-reader-docker/data"
 
 if [ -n "$DATA_DIR" ] && [ -d "$DATA_DIR" ]; then
     echo "$TRIM_DATA_ACCESSIBLE_PATHS" > "$DATA_DIR/.accessible_paths"

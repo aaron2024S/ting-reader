@@ -4,9 +4,9 @@
 CLEAN_OPTIONS="$wizard_clean_options"
 
 # 定义内部默认路径
-DEFAULT_DATA_PATH="${TRIM_APPDEST_VOL}/@appshare/ting-reader/data"
-DEFAULT_PLUGINS_PATH="${TRIM_APPDEST_VOL}/@appshare/ting-reader/plugins"
-DEFAULT_TEMP_PATH="${TRIM_APPDEST_VOL}/@appshare/ting-reader/temp"
+DEFAULT_DATA_PATH="${TRIM_APPDEST_VOL}/@appshare/ting-reader-docker/data"
+DEFAULT_PLUGINS_PATH="${TRIM_APPDEST_VOL}/@appshare/ting-reader-docker/plugins"
+DEFAULT_TEMP_PATH="${TRIM_APPDEST_VOL}/@appshare/ting-reader-docker/temp"
 
 # 判断环境变量中是否包含指定的清理项
 contains_option() {

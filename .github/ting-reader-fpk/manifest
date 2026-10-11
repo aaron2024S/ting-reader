@@ -1,4 +1,4 @@
-appname               = ting-reader
+appname               = ting-reader-docker
 version               = 2.0.5
 display_name          = ${common.displayName}
 desc                  = ${common.desc}
@@ -9,4 +9,4 @@ maintainer_url        = https://github.com/dqsq2e2/ting-reader
 distributor           = ${common.distributor}
 distributor_url       = ${common.distributorUrl}
 desktop_uidir         = ui
-desktop_applaunchname = ting-reader.main
+desktop_applaunchname = ting-reader-docker.main

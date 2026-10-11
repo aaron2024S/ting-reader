@@ -1,7 +1,7 @@
 #!/bin/bash
 
 FILE_PATH="${TRIM_APPDEST}/docker/docker-compose.yaml"
-GATEWAY_SOCKET="${TRIM_APPDEST}/ting-reader.sock"
+GATEWAY_SOCKET="${TRIM_APPDEST}/ting-reader-docker.sock"
 
 is_docker_running () {
     DOCKER_NAME=""

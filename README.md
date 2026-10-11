@@ -224,6 +224,8 @@ docker-compose up -d
 
 访问 `http://localhost:3000` (或您自定义的端口) 即可开始使用。
 
+Docker 版 FPK 的应用标识为 `ting-reader-docker`，默认数据目录为 `@appshare/ting-reader-docker`，桌面访问路径为 `/app/ting-reader-docker/`。旧版 Docker FPK 使用 `ting-reader` 标识，安装新版前请停止旧实例，并将需要保留的数据从 `@appshare/ting-reader` 手动迁移至新目录。
+
 > ⚠️ **注意**：首次登录请使用管理员账号：`admin`，密码：`admin123`。登录后请务必及时在设置页面修改密码以保证安全。
 
 ## 🛠️ 开发指南

@@ -2,7 +2,7 @@
 
 ### This script is called after the user installs the application.
 
-DATA_DIR="${TRIM_APPDEST_VOL}/@appshare/ting-reader/data"
+DATA_DIR="${TRIM_APPDEST_VOL}/@appshare/ting-reader-docker/data"
 mkdir -p "$DATA_DIR"
 
 exit 0
