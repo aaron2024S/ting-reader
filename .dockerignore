@@ -3,6 +3,7 @@
 .gitignore
 .gitattributes
 .github
+fnrc.json
 
 # Frontend
 frontend/node_modules
