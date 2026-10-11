@@ -7,7 +7,7 @@
             "protocol": "",
             "gatewaySocket": "ting-reader-docker.sock",
             "gatewayPrefix": "/app/ting-reader-docker",
-            "url": "/app/ting-reader-docker/",
+            "url": "/app/ting-reader-docker",
             "allUsers": true
         }
     }
