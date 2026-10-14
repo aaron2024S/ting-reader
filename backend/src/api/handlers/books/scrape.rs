@@ -1,28 +1,15 @@
+use crate::core::books::metadata::{MetadataChange, MetadataPatch};
+
 use crate::api::models::{BookResponse, ScrapeApplyRequest, ScrapeDiffRequest, ScrapeDiffResponse};
 use crate::api::state::AppState;
 use crate::core::app::error::{Result, TingError};
-use crate::core::books::nfo_manager::BookMetadata;
 use crate::db::models::ScraperConfig;
-use crate::db::repository::{ChapterRepository, Repository};
+use crate::db::repository::Repository;
 use axum::{
     Json,
     extract::{Path, State},
     response::IntoResponse,
 };
-
-#[derive(Default)]
-struct SelectedScrapeExtendedMetadata {
-    subtitle: Option<String>,
-    published_year: Option<String>,
-    published_date: Option<String>,
-    publisher: Option<String>,
-    isbn: Option<String>,
-    asin: Option<String>,
-    language: Option<String>,
-    explicit: Option<bool>,
-    abridged: Option<bool>,
-    duration: Option<u64>,
-}
 
 /// Handler for POST /api/v1/books/:id/scrape-diff - Get scrape diff
 pub async fn scrape_book_diff(
@@ -31,11 +18,7 @@ pub async fn scrape_book_diff(
     user: crate::auth::middleware::AuthUser,
     Json(req): Json<ScrapeDiffRequest>,
 ) -> Result<impl IntoResponse> {
-    if user.role != "admin" {
-        return Err(TingError::PermissionDenied(
-            "Admin access required".to_string(),
-        ));
-    }
+    crate::api::require_admin(&user)?;
 
     let existing_book = state
         .book_repo
@@ -327,11 +310,7 @@ pub async fn apply_scrape_result(
     user: crate::auth::middleware::AuthUser,
     Json(req): Json<ScrapeApplyRequest>,
 ) -> Result<impl IntoResponse> {
-    if user.role != "admin" {
-        return Err(TingError::PermissionDenied(
-            "Admin access required".to_string(),
-        ));
-    }
+    crate::api::require_admin(&user)?;
 
     let mut book = state
         .book_repo
@@ -340,8 +319,7 @@ pub async fn apply_scrape_result(
         .ok_or_else(|| TingError::NotFound(format!("Book with id {} not found", id)))?;
 
     if let Some(fields) = &req.fields {
-        let mut extended = SelectedScrapeExtendedMetadata::default();
-        let mut has_extended = false;
+        let mut extended = MetadataPatch::default();
 
         for (field, selection) in fields {
             match field.as_str() {
@@ -387,65 +365,54 @@ pub async fn apply_scrape_result(
                             book.year = Some(year);
                         }
                         extended.published_year = Some(value);
-                        has_extended = true;
                     } else if let Some(year) = selection.value.as_i64() {
                         book.year = Some(year as i32);
                         extended.published_year = Some(year.to_string());
-                        has_extended = true;
                     }
                 }
                 "subtitle" => {
                     if let Some(value) = scrape_value_to_string(&selection.value) {
                         extended.subtitle = Some(value);
-                        has_extended = true;
                     }
                 }
                 "published_date" => {
                     if let Some(value) = scrape_value_to_string(&selection.value) {
                         extended.published_date = Some(value);
-                        has_extended = true;
                     }
                 }
                 "publisher" => {
                     if let Some(value) = scrape_value_to_string(&selection.value) {
                         extended.publisher = Some(value);
-                        has_extended = true;
                     }
                 }
                 "isbn" => {
                     if let Some(value) = scrape_value_to_string(&selection.value) {
                         extended.isbn = Some(value);
-                        has_extended = true;
                     }
                 }
                 "asin" => {
                     if let Some(value) = scrape_value_to_string(&selection.value) {
                         extended.asin = Some(value);
-                        has_extended = true;
                     }
                 }
                 "language" => {
                     if let Some(value) = scrape_value_to_string(&selection.value) {
                         extended.language = Some(value);
-                        has_extended = true;
                     }
                 }
                 "explicit" => {
                     if let Some(value) = scrape_value_to_bool(&selection.value) {
                         extended.explicit = Some(value);
-                        has_extended = true;
                     }
                 }
                 "abridged" => {
                     if let Some(value) = scrape_value_to_bool(&selection.value) {
                         extended.abridged = Some(value);
-                        has_extended = true;
                     }
                 }
                 "duration" => {
                     if let Some(value) = scrape_value_to_u64(&selection.value) {
                         extended.duration = Some(value);
-                        has_extended = true;
                     }
                 }
                 _ => {}
@@ -454,11 +421,10 @@ pub async fn apply_scrape_result(
 
         state.book_repo.update(&book).await?;
         sync_manual_scrape_lock(&state, &mut book).await?;
-        sync_basic_scrape_outputs(&state, &book).await?;
-        if has_extended {
-            sync_scrape_extended_metadata(&state, &book, &extended).await?;
-        }
-        super::metadata::save_webdav_metadata(&state, &book).await?;
+        state
+            .metadata_service()
+            .sync(&book, MetadataChange::Book, &extended)
+            .await?;
 
         return Ok(Json(BookResponse::from(book)));
     }
@@ -542,174 +508,17 @@ pub async fn apply_scrape_result(
 
         state.book_repo.update(&book).await?;
         sync_manual_scrape_lock(&state, &mut book).await?;
-
-        // Check NFO writing
-        if let Ok(Some(library)) = state.library_repo.find_by_id(&book.library_id).await
-            && library.library_type == "local"
-        {
-            let config: crate::db::models::ScraperConfig = library
-                .scraper_config
-                .as_ref()
-                .and_then(|json| serde_json::from_str(json).ok())
-                .unwrap_or_default();
-
-            // Determine path (shared for NFO and metadata.json)
-            let target_dir = std::path::PathBuf::from(&book.path);
-
-            // Handle NFO writing (Local & WebDAV)
-            if config.nfo_writing_enabled {
-                let mut metadata = BookMetadata::new(
-                    book.title.clone().unwrap_or_default(),
-                    "ting-reader".to_string(),
-                    book.id.clone(),
-                    0,
-                );
-                metadata.author = book.author.clone();
-                metadata.narrator = book.narrator.clone();
-                metadata.intro = book.description.clone();
-                metadata.cover_url = book.cover_url.clone();
-                if let Some(tags_str) = &book.tags {
-                    metadata.tags.items = tags_str
-                        .split(',')
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty())
-                        .collect();
-                }
-                metadata.touch();
-
-                if let Err(e) = state
-                    .nfo_manager
-                    .write_book_nfo_to_dir(&target_dir, &metadata)
-                {
-                    tracing::warn!(
-                        message_key = "metadata.nfo.write_failed",
-                        message_params = %serde_json::json!({
-                            "book_title": book.title.as_deref().unwrap_or("?"),
-                            "error": e.to_string(),
-                        }),
-                        book_title = %book.title.as_deref().unwrap_or("?"),
-                        error = %e,
-                        "Failed to write NFO"
-                    );
-                }
-            }
-
-            // Handle metadata.json writing
-            if config.metadata_writing_enabled {
-                // Read existing metadata.json to preserve extended fields
-                let mut metadata_json =
-                    crate::core::books::metadata_writer::read_metadata_json(&target_dir)
-                        .unwrap_or(None)
-                        .unwrap_or_default();
-
-                // Update fields from book record
-                metadata_json.title = book.title.clone();
-                metadata_json.authors = book.author.clone().map(|s| vec![s]).unwrap_or_default();
-                metadata_json.narrators =
-                    book.narrator.clone().map(|s| vec![s]).unwrap_or_default();
-                metadata_json.description = book.description.clone();
-                metadata_json.genres = book
-                    .genre
-                    .clone()
-                    .map(|s| s.split(',').map(|t| t.trim().to_string()).collect())
-                    .unwrap_or_default();
-                metadata_json.tags = book
-                    .tags
-                    .clone()
-                    .map(|s| s.split(',').map(|t| t.trim().to_string()).collect())
-                    .unwrap_or_default();
-                metadata_json.published_year = book.year.map(|y| y.to_string());
-
-                // Sync chapters from DB
-                let chapter_repo = ChapterRepository::new(state.book_repo.db().clone());
-                if let Ok(chapters) = chapter_repo.find_by_book(&book.id).await {
-                    metadata_json.chapters =
-                        crate::core::books::metadata_writer::build_audiobookshelf_chapters(
-                            chapters,
-                        );
-                }
-
-                // Sync series from DB
-                let series_list = state
-                    .series_repo
-                    .find_series_by_book(&book.id)
-                    .await
-                    .unwrap_or_default();
-                let mut series_titles = Vec::new();
-                for series in series_list {
-                    if let Ok(books) = state.series_repo.find_books_by_series(&series.id).await {
-                        if let Some((_, order)) = books.iter().find(|(b, _)| b.id == book.id) {
-                            series_titles.push(format!("{} #{}", series.title, order));
-                        } else {
-                            series_titles.push(series.title);
-                        }
-                    } else {
-                        series_titles.push(series.title);
-                    }
-                }
-                metadata_json.series = series_titles;
-
-                // Apply scraped extended fields if available
-                if detail.subtitle.is_some() {
-                    metadata_json.subtitle = detail.subtitle.clone();
-                }
-                if detail.published_year.is_some() {
-                    metadata_json.published_year = detail.published_year.clone();
-                }
-                if detail.published_date.is_some() {
-                    metadata_json.published_date = detail.published_date.clone();
-                }
-                if detail.publisher.is_some() {
-                    metadata_json.publisher = detail.publisher.clone();
-                }
-                if detail.isbn.is_some() {
-                    metadata_json.isbn = detail.isbn.clone();
-                }
-                if detail.asin.is_some() {
-                    metadata_json.asin = detail.asin.clone();
-                }
-                if detail.language.is_some() {
-                    metadata_json.language = detail.language.clone();
-                }
-                if detail.explicit {
-                    metadata_json.explicit = true;
-                }
-                if detail.abridged {
-                    metadata_json.abridged = true;
-                }
-
-                if let Err(e) = crate::core::books::metadata_writer::write_metadata_json(
-                    &target_dir,
-                    &metadata_json,
-                ) {
-                    tracing::error!(
-                        target: "audit::metadata",
-                        book_title = %book.title.as_deref().unwrap_or("?"),
-                        error = %e,
-                        message_key = "metadata.json.write_failed",
-                        message_params = %serde_json::json!({
-                            "book_title": book.title.as_deref().unwrap_or("?"),
-                            "error": e.to_string(),
-                        }),
-                        "Failed to write metadata.json"
-                    );
-                }
-            }
-        }
     }
 
     // Even a manual save without selected metadata fields establishes ownership
     // of the current book metadata and protects it from later automatic scans.
     sync_manual_scrape_lock(&state, &mut book).await?;
 
-    if let Some(detail) = req.metadata.as_ref().filter(|_| req.apply_metadata)
-        && state
-            .library_repo
-            .find_by_id(&book.library_id)
-            .await?
-            .is_some_and(|library| library.library_type == "webdav")
-    {
-        let extended = SelectedScrapeExtendedMetadata {
+    let patch = req
+        .metadata
+        .as_ref()
+        .filter(|_| req.apply_metadata)
+        .map(|detail| MetadataPatch {
             subtitle: detail.subtitle.clone(),
             published_year: detail.published_year.clone(),
             published_date: detail.published_date.clone(),
@@ -720,10 +529,12 @@ pub async fn apply_scrape_result(
             explicit: Some(detail.explicit),
             abridged: Some(detail.abridged),
             duration: None,
-        };
-        sync_scrape_extended_metadata(&state, &book, &extended).await?;
-    }
-    super::metadata::save_webdav_metadata(&state, &book).await?;
+        })
+        .unwrap_or_default();
+    state
+        .metadata_service()
+        .sync(&book, MetadataChange::Book, &patch)
+        .await?;
 
     // Handle chapter updates if any (req.apply_chapters)
     // Since we don't have scraped chapters yet, we skip this for now.
@@ -851,271 +662,6 @@ async fn sync_manual_scrape_lock(
 
     if let Some(updated_book) = state.book_repo.find_by_id(&book.id).await? {
         *book = updated_book;
-    }
-
-    Ok(())
-}
-
-async fn sync_basic_scrape_outputs(state: &AppState, book: &crate::db::models::Book) -> Result<()> {
-    let Some(library) = state.library_repo.find_by_id(&book.library_id).await? else {
-        return Ok(());
-    };
-    if library.library_type != "local" {
-        return Ok(());
-    }
-
-    let config: crate::db::models::ScraperConfig = library
-        .scraper_config
-        .as_ref()
-        .and_then(|json| serde_json::from_str(json).ok())
-        .unwrap_or_default();
-
-    if !config.nfo_writing_enabled && !config.metadata_writing_enabled {
-        return Ok(());
-    }
-
-    let target_dir = std::path::PathBuf::from(&book.path);
-
-    if config.nfo_writing_enabled {
-        let mut metadata = BookMetadata::new(
-            book.title.clone().unwrap_or_default(),
-            "ting-reader".to_string(),
-            book.id.clone(),
-            0,
-        );
-        metadata.author = book.author.clone();
-        metadata.narrator = book.narrator.clone();
-        metadata.intro = book.description.clone();
-        metadata.cover_url = book.cover_url.clone();
-        if let Some(tags_str) = &book.tags {
-            metadata.tags.items = tags_str
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
-        }
-        metadata.touch();
-
-        if let Err(e) = state
-            .nfo_manager
-            .write_book_nfo_to_dir(&target_dir, &metadata)
-        {
-            tracing::warn!(
-                book_title = %book.title.as_deref().unwrap_or("?"),
-                error = %e,
-                message_key = "metadata.nfo.write_failed",
-                message_params = %serde_json::json!({
-                    "book_title": book.title.as_deref().unwrap_or("?"),
-                    "error": e.to_string(),
-                }),
-                "Failed to write NFO"
-            );
-        }
-    }
-
-    if config.metadata_writing_enabled {
-        let mut metadata_json =
-            crate::core::books::metadata_writer::read_metadata_json(&target_dir)
-                .unwrap_or(None)
-                .unwrap_or_default();
-
-        metadata_json.title = book.title.clone();
-        metadata_json.authors = book.author.clone().map(|s| vec![s]).unwrap_or_default();
-        metadata_json.narrators = book.narrator.clone().map(|s| vec![s]).unwrap_or_default();
-        metadata_json.description = book.description.clone();
-        metadata_json.genres = book
-            .genre
-            .clone()
-            .map(|s| {
-                s.split(',')
-                    .map(|t| t.trim().to_string())
-                    .filter(|t| !t.is_empty())
-                    .collect()
-            })
-            .unwrap_or_default();
-        metadata_json.tags = book
-            .tags
-            .clone()
-            .map(|s| {
-                s.split(',')
-                    .map(|t| t.trim().to_string())
-                    .filter(|t| !t.is_empty())
-                    .collect()
-            })
-            .unwrap_or_default();
-        metadata_json.published_year = book.year.map(|y| y.to_string());
-
-        let chapter_repo = ChapterRepository::new(state.book_repo.db().clone());
-        if let Ok(chapters) = chapter_repo.find_by_book(&book.id).await {
-            metadata_json.chapters =
-                crate::core::books::metadata_writer::build_audiobookshelf_chapters(chapters);
-        }
-
-        let series_list = state
-            .series_repo
-            .find_series_by_book(&book.id)
-            .await
-            .unwrap_or_default();
-        let mut series_titles = Vec::new();
-        for series in series_list {
-            if let Ok(books) = state.series_repo.find_books_by_series(&series.id).await {
-                if let Some((_, order)) = books.iter().find(|(b, _)| b.id == book.id) {
-                    series_titles.push(format!("{} #{}", series.title, order));
-                } else {
-                    series_titles.push(series.title);
-                }
-            } else {
-                series_titles.push(series.title);
-            }
-        }
-        metadata_json.series = series_titles;
-
-        if let Err(e) =
-            crate::core::books::metadata_writer::write_metadata_json(&target_dir, &metadata_json)
-        {
-            tracing::error!(
-                target: "audit::metadata",
-                book_title = %book.title.as_deref().unwrap_or("?"),
-                error = %e,
-                message_key = "metadata.json.write_failed",
-                message_params = %serde_json::json!({
-                    "book_title": book.title.as_deref().unwrap_or("?"),
-                    "error": e.to_string(),
-                }),
-                "Failed to write metadata.json"
-            );
-        }
-    }
-
-    Ok(())
-}
-
-async fn sync_scrape_extended_metadata(
-    state: &AppState,
-    book: &crate::db::models::Book,
-    extended: &SelectedScrapeExtendedMetadata,
-) -> Result<()> {
-    let Some(library) = state.library_repo.find_by_id(&book.library_id).await? else {
-        return Ok(());
-    };
-    if !matches!(library.library_type.as_str(), "local" | "webdav") {
-        return Ok(());
-    }
-
-    let config: crate::db::models::ScraperConfig = library
-        .scraper_config
-        .as_ref()
-        .and_then(|json| serde_json::from_str(json).ok())
-        .unwrap_or_default();
-
-    let webdav = library.library_type == "webdav";
-    if !webdav && !config.nfo_writing_enabled && !config.metadata_writing_enabled {
-        return Ok(());
-    }
-
-    let target_dir = if webdav {
-        let dir = crate::core::books::metadata_writer::remote_metadata_dir(&book.path)?;
-        tokio::fs::create_dir_all(&dir).await?;
-        dir
-    } else {
-        std::path::PathBuf::from(&book.path)
-    };
-
-    if config.nfo_writing_enabled || webdav {
-        let mut metadata = BookMetadata::new(
-            book.title.clone().unwrap_or_default(),
-            "ting-reader".to_string(),
-            book.id.clone(),
-            0,
-        );
-        metadata.author = book.author.clone();
-        metadata.narrator = book.narrator.clone();
-        metadata.subtitle = extended.subtitle.clone();
-        metadata.intro = book.description.clone();
-        metadata.cover_url = book.cover_url.clone();
-        metadata.total_duration = extended.duration;
-        if let Some(tags_str) = &book.tags {
-            metadata.tags.items = tags_str
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
-        }
-        if let Some(genre) = &book.genre {
-            metadata.genre.items = genre
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
-        }
-        metadata.touch();
-
-        if let Err(e) = state
-            .nfo_manager
-            .write_book_nfo_to_dir(&target_dir, &metadata)
-        {
-            tracing::warn!(
-                book_title = %book.title.as_deref().unwrap_or("?"),
-                error = %e,
-                message_key = "metadata.nfo.write_failed",
-                message_params = %serde_json::json!({
-                    "book_title": book.title.as_deref().unwrap_or("?"),
-                    "error": e.to_string(),
-                }),
-                "Failed to write NFO"
-            );
-        }
-    }
-
-    if config.metadata_writing_enabled || webdav {
-        let mut metadata_json =
-            crate::core::books::metadata_writer::read_metadata_json(&target_dir)
-                .unwrap_or(None)
-                .unwrap_or_default();
-
-        if extended.subtitle.is_some() {
-            metadata_json.subtitle = extended.subtitle.clone();
-        }
-        if extended.published_year.is_some() {
-            metadata_json.published_year = extended.published_year.clone();
-        }
-        if extended.published_date.is_some() {
-            metadata_json.published_date = extended.published_date.clone();
-        }
-        if extended.publisher.is_some() {
-            metadata_json.publisher = extended.publisher.clone();
-        }
-        if extended.isbn.is_some() {
-            metadata_json.isbn = extended.isbn.clone();
-        }
-        if extended.asin.is_some() {
-            metadata_json.asin = extended.asin.clone();
-        }
-        if extended.language.is_some() {
-            metadata_json.language = extended.language.clone();
-        }
-        if let Some(explicit) = extended.explicit {
-            metadata_json.explicit = explicit;
-        }
-        if let Some(abridged) = extended.abridged {
-            metadata_json.abridged = abridged;
-        }
-
-        if let Err(e) =
-            crate::core::books::metadata_writer::write_metadata_json(&target_dir, &metadata_json)
-        {
-            tracing::error!(
-                target: "audit::metadata",
-                book_title = %book.title.as_deref().unwrap_or("?"),
-                error = %e,
-                message_key = "metadata.json.write_failed",
-                message_params = %serde_json::json!({
-                    "book_title": book.title.as_deref().unwrap_or("?"),
-                    "error": e.to_string(),
-                }),
-                "Failed to write metadata.json"
-            );
-        }
     }
 
     Ok(())

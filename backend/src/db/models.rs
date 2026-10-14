@@ -207,7 +207,21 @@ pub struct ScraperConfig {
 }
 
 impl ScraperConfig {
-    pub fn has_scraper_sources(&self) -> bool {
+    pub fn metadata_sources(&self) -> impl DoubleEndedIterator<Item = &str> {
+        self.metadata_priority.iter().map(String::as_str).chain(
+            DEFAULT_METADATA_PRIORITY
+                .into_iter()
+                .filter(|_| self.metadata_priority.is_empty()),
+        )
+    }
+
+    pub fn metadata_rank(&self, source: &str) -> usize {
+        self.metadata_sources()
+            .position(|candidate| candidate == source)
+            .unwrap_or(usize::MAX - 1)
+    }
+
+    pub fn scraper_sources(&self) -> impl Iterator<Item = &str> {
         [
             Some(&self.default_sources),
             self.author_sources.as_ref(),
@@ -218,7 +232,13 @@ impl ScraperConfig {
         ]
         .into_iter()
         .flatten()
-        .any(|sources| sources.iter().any(|source| !source.trim().is_empty()))
+        .flat_map(|sources| sources.iter())
+        .map(|source| source.trim())
+        .filter(|source| !source.is_empty())
+    }
+
+    pub fn has_scraper_sources(&self) -> bool {
+        self.scraper_sources().next().is_some()
     }
 }
 
@@ -258,12 +278,13 @@ fn default_extract_extra_chapters() -> bool {
     true
 }
 
+const DEFAULT_METADATA_PRIORITY: [&str; 3] = ["local_metadata", "audio_metadata", "scraper"];
+
 fn default_metadata_priority() -> Vec<String> {
-    vec![
-        "local_metadata".to_string(),
-        "audio_metadata".to_string(),
-        "scraper".to_string(),
-    ]
+    DEFAULT_METADATA_PRIORITY
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
 }
 
 fn default_scheduled_sync_interval() -> String {

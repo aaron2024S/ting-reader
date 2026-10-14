@@ -18,6 +18,12 @@ use uuid::Uuid;
 /// Main error type for the Ting Reader system
 #[derive(Debug, thiserror::Error)]
 pub enum TingError {
+    #[error("{context}: {source}")]
+    Context {
+        context: String,
+        #[source]
+        source: Box<TingError>,
+    },
     // System-level errors
     #[error("System initialization failed: {0}")]
     InitializationError(String),
@@ -75,6 +81,9 @@ pub enum TingError {
     #[error("Network error: {0}")]
     NetworkError(String),
 
+    #[error("Network error: {0}")]
+    NetworkFailure(#[source] Box<reqwest::Error>),
+
     // Serialization errors
     #[error("Serialization error: {0}")]
     SerializationError(String),
@@ -104,6 +113,7 @@ impl TingError {
     /// Get the HTTP status code for this error
     pub fn status_code(&self) -> StatusCode {
         match self {
+            TingError::Context { source, .. } => source.status_code(),
             // 400 Bad Request
             TingError::InvalidRequest(_)
             | TingError::SerializationError(_)
@@ -137,6 +147,7 @@ impl TingError {
             | TingError::DependencyError(_)
             | TingError::IoError(_)
             | TingError::NetworkError(_)
+            | TingError::NetworkFailure(_)
             | TingError::TaskError(_)
             | TingError::EventError(_)
             | TingError::ExternalError(_)
@@ -147,6 +158,7 @@ impl TingError {
     /// Get the error type name for API responses
     pub fn error_type(&self) -> &'static str {
         match self {
+            TingError::Context { source, .. } => source.error_type(),
             TingError::InitializationError(_) => "InitializationError",
             TingError::ConfigError(_) => "ConfigError",
             TingError::DatabaseError(_) => "DatabaseError",
@@ -164,6 +176,7 @@ impl TingError {
             TingError::Timeout(_) => "Timeout",
             TingError::IoError(_) => "IoError",
             TingError::NetworkError(_) => "NetworkError",
+            TingError::NetworkFailure(_) => "NetworkError",
             TingError::SerializationError(_) => "SerializationError",
             TingError::DeserializationError(_) => "DeserializationError",
             TingError::ValidationError(_) => "ValidationError",
@@ -176,10 +189,14 @@ impl TingError {
 
     /// Check if this error is retryable
     pub fn is_retryable(&self) -> bool {
+        if let TingError::Context { source, .. } = self {
+            return source.is_retryable();
+        }
         matches!(
             self,
             TingError::DatabaseError(_)
                 | TingError::NetworkError(_)
+                | TingError::NetworkFailure(_)
                 | TingError::Timeout(_)
                 | TingError::ResourceLimitExceeded(_)
         )
@@ -187,6 +204,10 @@ impl TingError {
 
     pub fn mark_plugin_execution_logged(self) -> Self {
         match self {
+            TingError::Context { context, source } => TingError::Context {
+                context,
+                source: Box::new(source.mark_plugin_execution_logged()),
+            },
             TingError::LoggedPluginExecutionError(_) => self,
             TingError::PluginExecutionError(message) => {
                 TingError::LoggedPluginExecutionError(message)
@@ -203,6 +224,28 @@ impl TingError {
             }
             error => TingError::PluginExecutionError(format!("{context}: {error}")),
         }
+    }
+
+    /// Attach diagnostic information without changing the HTTP/error category.
+    pub fn with_context(self, context: impl Into<String>) -> Self {
+        Self::Context {
+            context: context.into(),
+            source: Box::new(self),
+        }
+    }
+
+    fn root_error(&self) -> &Self {
+        match self {
+            Self::Context { source, .. } => source.root_error(),
+            error => error,
+        }
+    }
+}
+
+impl From<reqwest::Error> for TingError {
+    fn from(error: reqwest::Error) -> Self {
+        // URLs can contain user credentials, tokens and third-party signatures.
+        Self::NetworkFailure(Box::new(error.without_url()))
     }
 }
 
@@ -322,7 +365,7 @@ impl IntoResponse for TingError {
         });
 
         // Log the error with appropriate level based on error type
-        match &self {
+        match self.root_error() {
             // Authentication errors are warnings, not errors (expected failures)
             TingError::AuthenticationError(_) => {
                 tracing::warn!(
@@ -378,7 +421,8 @@ impl IntoResponse for TingError {
             // All other errors are actual system errors
             _ => {
                 // Check if it's a database lock error (should be warning, not error)
-                if let TingError::DatabaseError(rusqlite::Error::SqliteFailure(err, _)) = self
+                if let TingError::DatabaseError(rusqlite::Error::SqliteFailure(err, _)) =
+                    self.root_error()
                     && (err.code == rusqlite::ErrorCode::DatabaseBusy
                         || err.code == rusqlite::ErrorCode::DatabaseLocked)
                 {
@@ -426,22 +470,16 @@ pub trait ErrorContext<T> {
 
 impl<T, E> ErrorContext<T> for std::result::Result<T, E>
 where
-    E: std::fmt::Display,
+    E: Into<TingError>,
 {
     fn context(self, context: impl Into<String>) -> Result<T> {
-        self.map_err(|e| {
-            let context_str = context.into();
-            TingError::InitializationError(format!("{}: {}", context_str, e))
-        })
+        self.map_err(|e| e.into().with_context(context))
     }
 
     fn with_context<F>(self, f: F) -> Result<T>
     where
         F: FnOnce() -> String,
     {
-        self.map_err(|e| {
-            let context_str = f();
-            TingError::InitializationError(format!("{}: {}", context_str, e))
-        })
+        self.map_err(|e| e.into().with_context(f()))
     }
 }

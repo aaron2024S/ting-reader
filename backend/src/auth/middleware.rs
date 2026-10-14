@@ -9,7 +9,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
-fn bearer_token_from_headers(headers: &HeaderMap) -> Option<String> {
+pub(crate) fn bearer_token_from_headers(headers: &HeaderMap) -> Option<String> {
     headers
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
@@ -19,7 +19,7 @@ fn bearer_token_from_headers(headers: &HeaderMap) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
-fn cookie_token_from_headers(headers: &HeaderMap) -> Option<String> {
+pub(crate) fn cookie_token_from_headers(headers: &HeaderMap) -> Option<String> {
     headers
         .get(header::COOKIE)
         .and_then(|value| value.to_str().ok())

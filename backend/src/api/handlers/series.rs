@@ -400,62 +400,16 @@ pub async fn delete_series(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Helper function to update metadata.json for a book
 async fn update_book_metadata_series(state: &AppState, book_id: &str) -> Result<()> {
-    use crate::db::repository::Repository;
-
     if let Some(book) = state.book_repo.find_by_id(book_id).await? {
-        if let Some(library) = state.library_repo.find_by_id(&book.library_id).await? {
-            if library.library_type == "webdav" {
-                return super::books::save_webdav_metadata(state, &book).await;
-            }
-            if library.library_type == "rss" {
-                return Ok(());
-            }
-        }
-        let path = std::path::Path::new(&book.path);
-
-        // Read existing metadata
-        if let Ok(Some(mut metadata)) =
-            crate::core::books::metadata_writer::read_metadata_json(path)
-        {
-            // Fetch all series for this book
-            let series_list = state.series_repo.find_series_by_book(book_id).await?;
-            let mut series_titles = Vec::new();
-
-            for series in series_list {
-                // Find order of this book in this series
-                let formatted_title =
-                    if let Ok(books) = state.series_repo.find_books_by_series(&series.id).await {
-                        if let Some((_, order)) = books.iter().find(|(b, _)| b.id == book_id) {
-                            format!("{} #{}", series.title, order)
-                        } else {
-                            series.title.clone()
-                        }
-                    } else {
-                        series.title.clone()
-                    };
-
-                if !series_titles.contains(&formatted_title) {
-                    series_titles.push(formatted_title);
-                }
-            }
-
-            // Update series
-            metadata.series = series_titles;
-
-            // Write back
-            if let Err(e) =
-                crate::core::books::metadata_writer::write_metadata_json(path, &metadata)
-            {
-                tracing::warn!(
-                    error = %e,
-                    message_key = "metadata.json.write_failed",
-                    message_params = %serde_json::json!({ "error": e.to_string() }),
-                    "Failed to write metadata.json"
-                );
-            }
-        }
+        state
+            .metadata_service()
+            .sync(
+                &book,
+                crate::core::books::metadata::MetadataChange::Series,
+                &Default::default(),
+            )
+            .await?;
     }
     Ok(())
 }

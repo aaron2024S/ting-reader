@@ -13,6 +13,77 @@ struct CountingScraper {
     fail: AtomicBool,
 }
 
+#[tokio::test]
+async fn both_search_apis_normalize_title_separators_and_share_one_cache_entry() {
+    let directory = tempfile::tempdir().unwrap();
+    let manager = cache_test_manager(directory.path());
+    let plugin = add_scraper(&manager, "separator-source", false).await;
+    let source = plugin.metadata.instance_id();
+    let service = ScraperService::new(manager);
+    service
+        .search(" Book丨Author ", None, None, Some(&source), 1, 20)
+        .await
+        .unwrap();
+    service
+        .search_with_params(
+            &HashMap::from([("title".into(), " Book | Author ".into())]),
+            Some(&source),
+            1,
+            20,
+        )
+        .await
+        .unwrap();
+    assert_eq!(plugin.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(service.get_cache_stats(), 1);
+}
+
+#[tokio::test]
+async fn explicit_source_failures_do_not_invoke_a_different_source() {
+    let directory = tempfile::tempdir().unwrap();
+    let manager = cache_test_manager(directory.path());
+    let failed = add_scraper(&manager, "failed-source", false).await;
+    let other = add_scraper(&manager, "other-source", false).await;
+    failed.fail.store(true, Ordering::SeqCst);
+    let source = failed.metadata.instance_id();
+    let service = ScraperService::new(manager);
+    assert!(
+        service
+            .search("Book", None, None, Some(&source), 1, 20)
+            .await
+            .is_err()
+    );
+    assert!(
+        service
+            .search_with_params(
+                &HashMap::from([("title".into(), "Book".into())]),
+                Some(&source),
+                1,
+                20,
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(other.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(service.get_cache_stats(), 0);
+}
+
+#[tokio::test]
+async fn configured_sources_are_trimmed_deduplicated_and_used_for_field_merge() {
+    let directory = tempfile::tempdir().unwrap();
+    let manager = cache_test_manager(directory.path());
+    let plugin = add_scraper(&manager, "configured-source", false).await;
+    let source = plugin.metadata.instance_id();
+    let service = ScraperService::new(manager);
+    let config = crate::db::models::ScraperConfig {
+        default_sources: vec![format!(" {source} "), source.clone()],
+        author_sources: Some(vec![format!(" {source} ")]),
+        ..Default::default()
+    };
+    let detail = service.scrape_book_metadata("Book", &config).await.unwrap();
+    assert_eq!(detail.author, "Author");
+    assert_eq!(plugin.calls.load(Ordering::SeqCst), 1);
+}
+
 #[async_trait::async_trait]
 impl Plugin for CountingScraper {
     fn metadata(&self) -> &PluginMetadata {

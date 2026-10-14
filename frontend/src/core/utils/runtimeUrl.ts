@@ -13,7 +13,7 @@ export const getRuntimeBaseUrl = (activeUrl?: string | null) => {
 
   if (activeUrl) return activeUrl.replace(/\/$/, '');
 
-  return import.meta.env.VITE_API_BASE_URL || (import.meta.env.PROD ? '' : 'http://localhost:3000');
+  return import.meta.env?.VITE_API_BASE_URL || (import.meta.env?.PROD ? '' : 'http://localhost:3000');
 };
 
 export const getRuntimeUrl = (path: string, activeUrl?: string | null) => {
@@ -30,7 +30,7 @@ export const getRuntimeAssetUrl = (path: string) => {
   const gatewayBasePath = getGatewayBasePath();
   if (gatewayBasePath) return `${gatewayBasePath}${normalizedPath}`;
 
-  const configuredBase = import.meta.env.BASE_URL || '/';
+  const configuredBase = import.meta.env?.BASE_URL || '/';
   if (/^https?:\/\//i.test(configuredBase)) {
     return new URL(normalizedPath.slice(1), configuredBase).toString();
   }

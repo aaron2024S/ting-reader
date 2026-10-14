@@ -146,6 +146,18 @@ pub struct LibraryScanner {
 }
 
 impl LibraryScanner {
+    fn metadata_service(&self) -> crate::core::books::metadata::BookMetadataService<'_> {
+        use crate::core::books::metadata::BookMetadataService;
+        BookMetadataService {
+            chapters: &self.chapter_repo,
+            series: &self.series_repo,
+            libraries: &self.library_repo,
+            nfo: &self.nfo_manager,
+            // Automatic scanning must never write to the remote drive.
+            remote: None,
+        }
+    }
+
     /// Create a new library scanner
     pub fn new(dependencies: LibraryScannerDependencies) -> Self {
         let LibraryScannerDependencies {

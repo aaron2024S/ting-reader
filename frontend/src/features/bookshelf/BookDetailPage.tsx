@@ -1,10 +1,8 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { useParams, useNavigate, useSearchParams } from 'react-router';
-import apiClient from '../../core/api/client';
-import type { Book, Chapter, Progress } from '../../core/types';
+import type { Book, Chapter } from '../../core/types';
 import { usePlayerStore } from '../../core/stores/playerStore';
 import { useTranslation } from 'react-i18next';
-import { invalidateBookCover } from '../../core/utils/image';
 
 import ChapterManagerModal from '../../shared/modals/ChapterManagerModal';
 import ScrapeDiffModal from '../../shared/modals/ScrapeDiffModal';
@@ -16,63 +14,11 @@ import { useAuthStore } from '../../core/stores/authStore';
 import { setAlpha, isTooLight } from '../../core/utils/color';
 import LoadingSpinner from '../../shared/ui/LoadingSpinner';
 import EditBookModal from './bookDetail/EditBookModal';
-import DeleteBookModal from './bookDetail/DeleteBookModal';
+import DeleteLibraryItemModal from './bookDetail/DeleteLibraryItemModal';
 import BookHeaderSection from './bookDetail/BookHeaderSection';
 import ChapterListSection from './bookDetail/ChapterListSection';
-
-type ChapterGroupOrder = 'asc' | 'desc';
-
-interface ChapterGroupOrderEntry {
-  book_id: string;
-  order: ChapterGroupOrder;
-}
-
-const normalizeChapterGroupOrder = (value: unknown): ChapterGroupOrder | null => {
-  if (value === 'asc' || value === 'desc') {
-    return value;
-  }
-  return null;
-};
-
-const readChapterGroupOrders = (settings: Record<string, unknown>): ChapterGroupOrderEntry[] => {
-  const raw = settings.chapter_group_orders;
-
-  if (Array.isArray(raw)) {
-    return raw.flatMap((entry) => {
-      if (!entry || typeof entry !== 'object') return [];
-      const item = entry as Record<string, unknown>;
-      const bookId = typeof item.book_id === 'string' ? item.book_id : '';
-      const order = normalizeChapterGroupOrder(item.order);
-      return bookId && order ? [{ book_id: bookId, order }] : [];
-    });
-  }
-
-  if (raw && typeof raw === 'object') {
-    return Object.entries(raw as Record<string, unknown>).flatMap(([bookId, value]) => {
-      const order = normalizeChapterGroupOrder(value);
-      return order ? [{ book_id: bookId, order }] : [];
-    });
-  }
-
-  return [];
-};
-
-const findChapterGroupOrder = (
-  orders: ChapterGroupOrderEntry[],
-  bookId: string
-): ChapterGroupOrder | null => orders.find((item) => item.book_id === bookId)?.order ?? null;
-
-const upsertChapterGroupOrder = (
-  orders: ChapterGroupOrderEntry[],
-  bookId: string,
-  order: ChapterGroupOrder
-): ChapterGroupOrderEntry[] => {
-  const exists = orders.some((item) => item.book_id === bookId);
-  if (!exists) {
-    return [...orders, { book_id: bookId, order }];
-  }
-  return orders.map((item) => item.book_id === bookId ? { ...item, order } : item);
-};
+import { useBookDetails } from '../../core/hooks/useBooks';
+import type { ChapterGroupOrder, RegexGenerationResult } from '../../core/api/books';
 
 const BookDetailPage: React.FC = () => {
   const { t } = useTranslation();
@@ -81,15 +27,18 @@ const BookDetailPage: React.FC = () => {
   const [searchParams] = useSearchParams();
   const entryChapterId = searchParams.get('chapter_id');
   const { user } = useAuthStore();
-  const [book, setBook] = useState<Book | null>(null);
-  const [chapters, setChapters] = useState<Chapter[]>([]);
-  const [chapterTotals, setChapterTotals] = useState({ total: 0, main: 0, extra: 0 });
-  const [chapterPageLoading, setChapterPageLoading] = useState(false);
-  const [bookProgress, setBookProgress] = useState<Progress | null>(null);
+  const {
+    book, chapters, chapterTotals, chapterPageLoading, bookProgress, loading,
+    isFavorite, activeTab, setActiveTab, currentGroupIndex, setCurrentGroupIndex,
+    chapterAscending, setChapterAscending, chapterGroupsDescending, coverShape,
+    fetchChapterPage, fetchAllChaptersForPlayback, invalidateChapters,
+    operationsRef, toggleFavorite: saveFavorite, reloadBook, saveBook,
+  } = useBookDetails(id, entryChapterId);
+  const chapterScrollTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  useEffect(() => () => clearTimeout(chapterScrollTimer.current), [id]);
+
   const [chapterManagerChapters, setChapterManagerChapters] = useState<Chapter[]>([]);
   const [chapterManagerLoading, setChapterManagerLoading] = useState(false);
-  const [loading, setLoading] = useState(true);
-  const [isFavorite, setIsFavorite] = useState(false);
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
   const [isChapterManagerOpen, setIsChapterManagerOpen] = useState(false);
   const [isScrapeDiffOpen, setIsScrapeDiffOpen] = useState(false);
@@ -103,11 +52,6 @@ const BookDetailPage: React.FC = () => {
   const [editLockTouched, setEditLockTouched] = useState(false);
   const [isDescriptionExpanded, setIsDescriptionExpanded] = useState(false);
   const [isOverflowing, setIsOverflowing] = useState(false);
-  const [activeTab, setActiveTab] = useState<'main' | 'extra'>('main');
-  const [currentGroupIndex, setCurrentGroupIndex] = useState(0);
-  const [chapterAscending, setChapterAscending] = useState(true);
-  const [chapterGroupsDescending, setChapterGroupsDescending] = useState(false);
-  const [chapterGroupOrders, setChapterGroupOrders] = useState<ChapterGroupOrderEntry[]>([]);
   const [editChapterGroupOrder, setEditChapterGroupOrder] = useState<ChapterGroupOrder>('asc');
   const [themeColor, setThemeColor] = useState<string | null>(book?.theme_color ?? null);
   const [isTagsExpanded, setIsTagsExpanded] = useState(false);
@@ -119,28 +63,21 @@ const BookDetailPage: React.FC = () => {
   const [highlightedChapterId, setHighlightedChapterId] = useState<string | null>(null);
   const playButtonContainerRef = useRef<HTMLButtonElement>(null);
   const [isPlayButtonTextOverflowing, setIsPlayButtonTextOverflowing] = useState(false);
-  const allChaptersCacheRef = useRef<Chapter[] | null>(null);
-
   // User Settings
-  const [coverShape, setCoverShape] = useState<'rect' | 'square'>('square');
+
 
   // Regex Generator State
   const [showRegexGenerator, setShowRegexGenerator] = useState(false);
   const [genFilename, setGenFilename] = useState('');
   const [genNum, setGenNum] = useState('');
   const [genTitle, setGenTitle] = useState('');
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const [genResult, setGenResult] = useState<any>(null);
+  const [genResult, setGenResult] = useState<RegexGenerationResult | null>(null);
 
   const handleGenerateRegex = async () => {
     if (!genFilename || !genNum || !genTitle) return;
     try {
-      const res = await apiClient.post('/api/tools/regex/generate', {
-        filename: genFilename,
-        chapter_number: genNum,
-        chapter_title: genTitle
-      });
-      setGenResult(res.data);
+      const result = await operationsRef.current?.generateRegex(genFilename, genNum, genTitle);
+      setGenResult(result ?? null);
     } catch {
       alert(t('bookshelf.generateFailed'));
     }
@@ -157,17 +94,8 @@ const BookDetailPage: React.FC = () => {
   // Reset scroll state when book ID changes
   useEffect(() => {
     hasInitialScrolled.current = false;
-    allChaptersCacheRef.current = null;
     const timer = window.setTimeout(() => {
       setHighlightedChapterId(null);
-      setChapters([]);
-      setChapterTotals({ total: 0, main: 0, extra: 0 });
-      setBookProgress(null);
-      setActiveTab('main');
-      setCurrentGroupIndex(0);
-      setChapterAscending(true);
-      setChapterGroupsDescending(false);
-      setChapterGroupOrders([]);
       setEditChapterGroupOrder('asc');
     }, 0);
     return () => window.clearTimeout(timer);
@@ -218,134 +146,14 @@ const BookDetailPage: React.FC = () => {
 
   const isPlaying = usePlayerStore((state) => state.isPlaying);
   const playChapter = usePlayerStore((state) => state.playChapter);
-  const storeChapters = usePlayerStore((state) => state.chapters);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
-      if (book) setThemeColor(book.theme_color || null);
+      if (book) { setThemeColor(book.theme_color || null); setEditChapterGroupOrder(chapterGroupsDescending ? "desc" : "asc"); }
     }, 0);
     return () => window.clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [book?.theme_color]);
-
-  useEffect(() => {
-    const fetchBookDetails = async () => {
-      try {
-        setLoading(true);
-        const progressRequest = apiClient
-          .get(`/api/progress/${id}`)
-          .then(res => res.data as Progress)
-          .catch(() => null);
-        const [bookRes, progressRes, settingsRes] = await Promise.all([
-          apiClient.get(`/api/books/${id}`),
-          progressRequest,
-          apiClient.get('/api/settings')
-        ]);
-        const fetchedBook = bookRes.data;
-        const initialChapterId = entryChapterId || progressRes?.chapter_id || null;
-        const rssLibrary = fetchedBook.library_type === 'rss';
-        setBook(fetchedBook);
-        setBookProgress(progressRes);
-        setHighlightedChapterId(initialChapterId);
-        setIsFavorite(fetchedBook.is_favorite);
-        // Load user settings
-        const settings = settingsRes.data.settings_json || {};
-        const savedGroupOrders = readChapterGroupOrders(settings);
-        const effectiveGroupOrder = findChapterGroupOrder(savedGroupOrders, fetchedBook.id)
-          ?? (rssLibrary ? 'desc' : 'asc');
-        setChapterGroupOrders(savedGroupOrders);
-        setEditChapterGroupOrder(effectiveGroupOrder);
-        if (settings.bookshelf_cover_shape) {
-          setCoverShape(settings.bookshelf_cover_shape);
-        }
-        setActiveTab('main');
-        setCurrentGroupIndex(0);
-        setChapterGroupsDescending(effectiveGroupOrder === 'desc');
-        setChapterAscending(effectiveGroupOrder === 'asc');
-      } catch (err) {
-        console.error('Failed to fetch book details', err);
-      } finally {
-        setLoading(false);
-      }
-    };
-    fetchBookDetails();
-  }, [id, entryChapterId]);
-
-  const fetchChapterPage = React.useCallback(async (options?: {
-    tab?: 'main' | 'extra';
-    groupIndex?: number;
-    target_chapter_id?: string | null;
-    preferLastGroup?: boolean;
-  }) => {
-    if (!id) return;
-
-    const requestedTab = options?.tab ?? activeTab;
-    const requestedGroupIndex = options?.groupIndex ?? currentGroupIndex;
-    const params: Record<string, unknown> = {
-      limit: chaptersPerGroup,
-      offset: requestedGroupIndex * chaptersPerGroup,
-      order: 'asc',
-    };
-    if (!(options?.target_chapter_id && !options?.tab)) {
-      params.chapter_type = requestedTab;
-    }
-    if (options?.target_chapter_id) {
-      params.target_chapter_id = options.target_chapter_id;
-    }
-
-    setChapterPageLoading(true);
-    try {
-      const res = await apiClient.get(`/api/books/${id}/chapters`, { params });
-      const data = res.data;
-      setChapters(data.chapters || []);
-      setChapterTotals({
-        total: data.total ?? 0,
-        main: data.main_total ?? 0,
-        extra: data.extra_total ?? 0,
-      });
-
-      const resolvedTab = data.chapter_type === 'extra' ? 'extra' : 'main';
-      const resolvedGroupIndex = Math.floor((data.offset || 0) / chaptersPerGroup);
-      const filteredTotal = resolvedTab === 'extra'
-        ? (data.extra_total ?? 0)
-        : (data.main_total ?? 0);
-      const lastGroupIndex = Math.max(0, Math.ceil(filteredTotal / chaptersPerGroup) - 1);
-
-      if (options?.preferLastGroup && !options?.target_chapter_id && requestedGroupIndex !== lastGroupIndex) {
-        setChapterTotals({
-          total: data.total ?? 0,
-          main: data.main_total ?? 0,
-          extra: data.extra_total ?? 0,
-        });
-        if (resolvedTab !== activeTab) {
-          setActiveTab(resolvedTab);
-        }
-        setCurrentGroupIndex(lastGroupIndex);
-        setChapters([]);
-        return {
-          tab: resolvedTab,
-          groupIndex: lastGroupIndex,
-        };
-      }
-
-      if (resolvedTab !== activeTab) {
-        setActiveTab(resolvedTab);
-      }
-      if (resolvedGroupIndex !== currentGroupIndex) {
-        setCurrentGroupIndex(resolvedGroupIndex);
-      }
-      return {
-        tab: resolvedTab,
-        groupIndex: resolvedGroupIndex,
-      };
-    } catch (err) {
-      console.error('Failed to fetch chapter page', err);
-      setChapters([]);
-      return null;
-    } finally {
-      setChapterPageLoading(false);
-    }
-  }, [id, activeTab, currentGroupIndex]);
 
   const scrollToChapterNode = React.useCallback((chapterId: string, groupIndex: number) => {
     const el = document.getElementById(`chapter-${chapterId}`);
@@ -368,7 +176,7 @@ const BookDetailPage: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    if (!book) return;
+    if (!book || book.id !== id) return;
     const targetChapterId = !hasInitialScrolled.current
       ? entryChapterId
       : null;
@@ -380,8 +188,9 @@ const BookDetailPage: React.FC = () => {
         ? { target_chapter_id: targetChapterId }
         : { tab: activeTab, groupIndex: currentGroupIndex, preferLastGroup }
     ).then((page) => {
-      if (targetChapterId) {
-        setTimeout(() => scrollToChapterNode(targetChapterId, page?.groupIndex ?? currentGroupIndex), 120);
+      if (targetChapterId && page) {
+        clearTimeout(chapterScrollTimer.current);
+        chapterScrollTimer.current = setTimeout(() => scrollToChapterNode(targetChapterId, page?.groupIndex ?? currentGroupIndex), 120);
       }
     });
     hasInitialScrolled.current = true;
@@ -452,37 +261,28 @@ const BookDetailPage: React.FC = () => {
       doScroll(chapterId, groupIndex);
   };
 
-  const fetchAllChaptersForPlayback = async () => {
-    if (allChaptersCacheRef.current) return allChaptersCacheRef.current;
-    if (book && storeChapters.length > 0 && storeChapters.some(c => c.book_id === book.id)) {
-      allChaptersCacheRef.current = storeChapters;
-      return storeChapters;
-    }
-    const res = await apiClient.get(`/api/books/${id}/chapters`);
-    const allChapters = (res.data || []) as Chapter[];
-    allChaptersCacheRef.current = allChapters;
-    return allChapters;
-  };
-
   const playChapterWithFullQueue = async (chapter: Chapter) => {
-    if (!book) return;
+    if (!book || book.id !== id) return;
     const allChapters = await fetchAllChaptersForPlayback();
+    if (!allChapters) return;
     const resolvedChapter = allChapters.find(c => c.id === chapter.id) || chapter;
     playChapter(book, allChapters, resolvedChapter);
   };
 
   const openChapterManager = async () => {
     if (!id) return;
+    const operations = operationsRef.current;
     setChapterManagerLoading(true);
     setIsChapterManagerOpen(true);
     try {
       const allChapters = await fetchAllChaptersForPlayback();
-      setChapterManagerChapters(allChapters);
+      if (allChapters) setChapterManagerChapters(allChapters);
     } catch (err) {
+      if (operationsRef.current !== operations) return;
       console.error('Failed to fetch chapters for manager', err);
       setChapterManagerChapters([]);
     } finally {
-      setChapterManagerLoading(false);
+      if (operationsRef.current === operations) setChapterManagerLoading(false);
     }
   };
 
@@ -504,7 +304,9 @@ const BookDetailPage: React.FC = () => {
         scrollToChapterElement(targetChapter.id);
       } else {
         const page = await fetchChapterPage({ target_chapter_id: targetChapter.id });
-        setTimeout(() => doScroll(targetChapter.id, page?.groupIndex ?? currentGroupIndex), 120);
+        if (!page) return;
+        clearTimeout(chapterScrollTimer.current);
+        chapterScrollTimer.current = setTimeout(() => doScroll(targetChapter.id, page?.groupIndex ?? currentGroupIndex), 120);
       }
     } else {
       // No play history - play first main chapter
@@ -617,12 +419,7 @@ const BookDetailPage: React.FC = () => {
 
   const toggleFavorite = async () => {
     try {
-      if (isFavorite) {
-        await apiClient.delete(`/api/favorites/${id}`);
-      } else {
-        await apiClient.post(`/api/favorites/${id}`);
-      }
-      setIsFavorite(!isFavorite);
+      await saveFavorite();
     } catch (err) {
       console.error('Failed to toggle favorite', err);
     }
@@ -633,7 +430,7 @@ const BookDetailPage: React.FC = () => {
       if (!confirm(t('bookshelf.writeMetadataConfirm'))) {
         return;
       }
-      await apiClient.post(`/api/books/${id}/write-metadata`);
+      await operationsRef.current?.writeMetadata(id!);
       alert(t('bookshelf.writeMetadataStarted'));
     } catch (err) {
       console.error('Failed to write metadata', err);
@@ -646,8 +443,7 @@ const BookDetailPage: React.FC = () => {
     setEditSaving(true);
     setEditSaveError(null);
     try {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const payload: Record<string, any> = {
+      const payload: Partial<Book> = {
         title: editData.title,
         author: editData.author,
         narrator: editData.narrator,
@@ -664,57 +460,12 @@ const BookDetailPage: React.FC = () => {
         manual_corrected: editLockTouched ? editData.manual_corrected === true : true,
       };
       
-      let res;
-      if (editCoverFile) {
-        const form = new FormData();
-        form.append('file', editCoverFile);
-        form.append('metadata', JSON.stringify(payload));
-        res = await apiClient.post(`/api/books/${id}/cover`, form, {
-          headers: { 'Content-Type': 'multipart/form-data' },
-        });
-        invalidateBookCover(book!.id);
-      } else {
-        res = await apiClient.patch(`/api/books/${id}`, payload);
-      }
-      const updatedBookData = res.data;
-
-      if (book && findChapterGroupOrder(chapterGroupOrders, book.id) !== editChapterGroupOrder) {
-        const nextOrders = upsertChapterGroupOrder(chapterGroupOrders, book.id, editChapterGroupOrder);
-        await apiClient.post('/api/settings', { chapter_group_orders: nextOrders });
-        setChapterGroupOrders(nextOrders);
-      }
-
-      if (editChapterGroupOrder !== (chapterGroupsDescending ? 'desc' : 'asc')) {
-        const nextDescending = editChapterGroupOrder === 'desc';
-        setChapterGroupsDescending(nextDescending);
-        setChapterAscending(!nextDescending);
-        setCurrentGroupIndex(nextDescending ? lastGroupIndexFor(activeTab) : 0);
-      }
-      
-      // Update local state - merge the changes
-      const updatedBook = { ...book!, ...updatedBookData };
-      // Preserve existing auxiliary fields if not in response
-      if (book!.library_type) updatedBook.library_type = book!.library_type;
-      if (book!.is_favorite !== undefined) updatedBook.is_favorite = book!.is_favorite;
-      
-      setBook(updatedBook);
-      
-      // If the edited book is currently playing, update the player store
-      const currentPlayerState = usePlayerStore.getState();
-      if (currentPlayerState.currentBook?.id === updatedBook.id) {
-        usePlayerStore.setState({
-          currentBook: {
-            ...currentPlayerState.currentBook,
-            ...updatedBook
-          }
-        });
-      }
-      
-      // If chapterRegex changed, trigger a re-scan of this book
-      if (payload.chapter_regex) {
-          apiClient.post(`/api/libraries/${book!.library_id}/scan`);
-          alert(t('bookshelf.regexSavedRescanning'));
-      }
+      const operations = operationsRef.current;
+      if (!operations || !book) return;
+      const result = await saveBook(payload, editChapterGroupOrder, editCoverFile);
+      if (!result || operationsRef.current !== operations) return;
+      usePlayerStore.getState().updateBook(result.book);
+      if (result.rescanning) alert(t('bookshelf.regexSavedRescanning'));
 
       setIsEditModalOpen(false);
       setEditCoverFile(null);
@@ -729,7 +480,7 @@ const BookDetailPage: React.FC = () => {
   const handleDelete = async () => {
     try {
       setDeleting(true);
-      await apiClient.delete(`/api/books/${id}?delete_files=${deleteSourceFiles}`);
+      await operationsRef.current?.deleteBooks([id!], deleteSourceFiles);
       navigate('/', { replace: true });
     } catch (err) {
       console.error('Failed to delete book', err);
@@ -923,7 +674,7 @@ const BookDetailPage: React.FC = () => {
           initialChapters={chapterManagerChapters}
           onClose={() => setIsChapterManagerOpen(false)}
           onSave={() => {
-            allChaptersCacheRef.current = null;
+            invalidateChapters();
             setChapterManagerChapters([]);
             fetchChapterPage();
           }}
@@ -936,10 +687,7 @@ const BookDetailPage: React.FC = () => {
           bookId={book.id}
           onClose={() => setIsScrapeDiffOpen(false)}
           onSave={() => {
-            // Reload book details
-            apiClient.get(`/api/books/${id}`).then(res => setBook(res.data));
-            allChaptersCacheRef.current = null;
-            fetchChapterPage();
+            void reloadBook().catch(error => console.error('Failed to reload scraped book', error));
           }}
         />
       )}
@@ -984,7 +732,7 @@ const BookDetailPage: React.FC = () => {
 
       {/* Delete Confirmation Modal */}
       {isDeleteModalOpen && book && (
-        <DeleteBookModal
+        <DeleteLibraryItemModal
           book={book}
           deleting={deleting}
           deleteSourceFiles={deleteSourceFiles}

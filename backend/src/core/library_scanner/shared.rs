@@ -808,6 +808,27 @@ pub(crate) fn clean_or_preserve_chapter_title(
     text_cleaner.clean_chapter_title(title, book_title)
 }
 
+pub(crate) fn resolve_chapter_title(
+    cleaner: &crate::core::books::text_cleaner::TextCleaner,
+    raw: &str,
+    book_title: Option<&str>,
+    ai_title: Option<&str>,
+    clean: bool,
+    preserve_raw: bool,
+    extract_extra: bool,
+) -> (String, bool) {
+    let (title, extra) = if let Some(ai_title) = ai_title {
+        let (_, extra) = cleaner.clean_chapter_title(ai_title, book_title);
+        (ai_title.to_string(), extra)
+    } else if clean {
+        clean_or_preserve_chapter_title(cleaner, raw, book_title, preserve_raw)
+    } else {
+        let (_, extra) = cleaner.clean_chapter_title(raw, book_title);
+        (raw.to_string(), extra)
+    };
+    (title, extract_extra && extra)
+}
+
 pub(crate) fn apply_chapter_title_template(
     template: Option<&str>,
     book_title: Option<&str>,

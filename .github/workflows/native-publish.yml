@@ -18,7 +18,13 @@ env:
   TING_PLUGIN_STORE_VERSION: "2.0.2"
 
 jobs:
+  quality:
+    uses: ./.github/workflows/quality.yml
+    permissions:
+      contents: read
+
   native:
+    needs: quality
     runs-on: ${{ matrix.runner }}
     container: rust:bookworm
     defaults:

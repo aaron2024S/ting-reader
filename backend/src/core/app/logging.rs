@@ -22,6 +22,104 @@ use tracing_subscriber::{
 
 const PLUGIN_LOG_TARGET: &str = "ting_reader::plugin::logger";
 
+pub(crate) const MAX_LOG_PAGE_SIZE: usize = 500;
+
+pub(crate) fn normalized_log_pagination(page: usize, page_size: usize) -> (usize, usize) {
+    (page.max(1), page_size.clamp(1, MAX_LOG_PAGE_SIZE))
+}
+
+pub(crate) fn normalized_log_filter(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+/// Shared level/text/time rules for system logs and plugin logs.
+/// Module and plugin identity rules remain with their respective handlers.
+#[derive(Debug, Clone)]
+pub(crate) struct LogQueryFilter {
+    level: Option<String>,
+    query: Option<String>,
+    since: Option<chrono::DateTime<chrono::Utc>>,
+    until: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl LogQueryFilter {
+    pub(crate) fn new(
+        level: Option<&str>,
+        query: Option<&str>,
+        since: Option<&str>,
+        until: Option<&str>,
+    ) -> crate::core::app::error::Result<Self> {
+        use crate::core::app::error::TingError;
+        let parse = |name, value: Option<&str>| {
+            normalized_log_filter(value)
+                .map(|value| {
+                    chrono::DateTime::parse_from_rfc3339(&value)
+                        .map(|value| value.with_timezone(&chrono::Utc))
+                        .map_err(|_| {
+                            TingError::InvalidRequest(format!(
+                                "{name} must be an RFC 3339 timestamp"
+                            ))
+                        })
+                })
+                .transpose()
+        };
+        let since = parse("since", since)?;
+        let until = parse("until", until)?;
+        if since.zip(until).is_some_and(|(since, until)| since > until) {
+            return Err(TingError::InvalidRequest(
+                "since must not be later than until".into(),
+            ));
+        }
+        Ok(Self {
+            level: normalized_log_filter(level),
+            query: normalized_log_filter(query).map(|value| value.to_lowercase()),
+            since,
+            until,
+        })
+    }
+
+    pub(crate) fn matches(&self, log: &LogEntry) -> bool {
+        if self
+            .level
+            .as_ref()
+            .is_some_and(|level| !log.level.eq_ignore_ascii_case(level))
+        {
+            return false;
+        }
+        if let Some(query) = &self.query {
+            let fields = log
+                .fields
+                .as_ref()
+                .map(serde_json::Value::to_string)
+                .unwrap_or_default();
+            if ![
+                log.message.as_str(),
+                log.raw_message.as_deref().unwrap_or_default(),
+                log.message_key.as_deref().unwrap_or_default(),
+                log.module.as_str(),
+                fields.as_str(),
+            ]
+            .iter()
+            .any(|value| value.to_lowercase().contains(query))
+            {
+                return false;
+            }
+        }
+        if self.since.is_none() && self.until.is_none() {
+            return true;
+        }
+        let Ok(timestamp) = chrono::DateTime::parse_from_rfc3339(&log.timestamp) else {
+            return false;
+        };
+        let timestamp = timestamp.with_timezone(&chrono::Utc);
+        self.since.is_none_or(|since| timestamp >= since)
+            && self.until.is_none_or(|until| timestamp <= until)
+    }
+}
+
 /// In-memory log entry
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogEntry {
@@ -43,6 +141,80 @@ pub struct LogEntry {
     pub task_status: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub task_type: Option<String>,
+}
+
+impl LogEntry {
+    fn from_tracing_json(json: serde_json::Value) -> Self {
+        let text = |key| {
+            json.get(key)
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_owned()
+        };
+        let fields = json.get("fields");
+        let message = fields
+            .and_then(|fields| fields.get("message"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let message_key = fields
+            .and_then(|fields| fields.get("message_key"))
+            .and_then(serde_json::Value::as_str)
+            .map(ToOwned::to_owned);
+        let decode_value = |value: &serde_json::Value| {
+            if value.is_object() {
+                Some(value.clone())
+            } else {
+                value
+                    .as_str()
+                    .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())
+            }
+        };
+        let message_params = fields
+            .and_then(|fields| fields.get("message_params"))
+            .and_then(decode_value)
+            .filter(serde_json::Value::is_object);
+        let fields = fields
+            .and_then(serde_json::Value::as_object)
+            .and_then(|fields| {
+                let mut fields = fields.clone();
+                for key in ["message", "message_key", "message_params"] {
+                    fields.remove(key);
+                }
+                if let Some(value) = fields.get("plugin_fields").and_then(decode_value) {
+                    fields.insert("plugin_fields".into(), value);
+                }
+                (!fields.is_empty()).then_some(serde_json::Value::Object(fields))
+            });
+        Self {
+            timestamp: text("timestamp"),
+            level: text("level"),
+            module: text("target"),
+            raw_message: (!message.is_empty()).then(|| message.clone()),
+            message,
+            message_key,
+            message_params,
+            fields,
+            task_id: None,
+            task_status: None,
+            task_type: None,
+        }
+    }
+}
+
+pub(crate) fn read_log_file(path: &Path, logs: &mut Vec<LogEntry>) {
+    use std::io::{BufRead, BufReader};
+    let Ok(file) = std::fs::File::open(path) else {
+        return;
+    };
+    for line in BufReader::new(file)
+        .lines()
+        .map_while(std::result::Result::ok)
+    {
+        if let Ok(json) = serde_json::from_str(&line) {
+            logs.push(LogEntry::from_tracing_json(json));
+        }
+    }
 }
 
 /// Logger instance that manages the logging system

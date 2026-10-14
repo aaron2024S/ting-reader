@@ -4,13 +4,8 @@
 
 import React from 'react';
 import {
-  BadgeCheck,
   BookOpen,
-  Building2,
-  Calendar,
   FileText,
-  Globe2,
-  Hash,
   Image as ImageIcon,
   Mic2,
   Tags,
@@ -24,6 +19,7 @@ import type {
   ScraperSource,
 } from '../../core/types';
 import i18n from '../../core/i18n';
+import { BOOK_SCRAPE_FIELDS } from '../../core/api/books';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -84,18 +80,10 @@ export const FIELD_DEFINITIONS: Record<string, FieldDefinition> = {
   tags: { key: 'tags', label: 'Tags', labelKey: 'scrapeDiff.fields.tags', icon: <Tags size={15} />, wide: true },
   genre: { key: 'genre', label: 'Genre', labelKey: 'scrapeDiff.fields.genre', icon: <Tags size={15} /> },
   year: { key: 'year', label: 'Year', labelKey: 'scrapeDiff.fields.year', icon: <BookOpen size={15} /> },
-  subtitle: { key: 'subtitle', label: 'Subtitle', labelKey: 'scrapeDiff.fields.subtitle', icon: <FileText size={15} /> },
-  published_date: { key: 'published_date', label: 'Published Date', labelKey: 'scrapeDiff.fields.publishedDate', icon: <Calendar size={15} /> },
-  publisher: { key: 'publisher', label: 'Publisher', labelKey: 'scrapeDiff.fields.publisher', icon: <Building2 size={15} /> },
-  isbn: { key: 'isbn', label: 'ISBN', labelKey: 'scrapeDiff.fields.isbn', icon: <Hash size={15} /> },
-  asin: { key: 'asin', label: 'ASIN', labelKey: 'scrapeDiff.fields.asin', icon: <Hash size={15} /> },
-  language: { key: 'language', label: 'Language', labelKey: 'scrapeDiff.fields.language', icon: <Globe2 size={15} /> },
-  explicit: { key: 'explicit', label: 'Explicit', labelKey: 'scrapeDiff.fields.explicit', icon: <BadgeCheck size={15} /> },
-  abridged: { key: 'abridged', label: 'Abridged', labelKey: 'scrapeDiff.fields.abridged', icon: <BadgeCheck size={15} /> },
-  duration: { key: 'duration', label: 'Duration', labelKey: 'scrapeDiff.fields.duration', icon: <Hash size={15} /> },
+
 };
 
-export const FIELD_ORDER = Object.keys(FIELD_DEFINITIONS);
+export const FIELD_ORDER: readonly string[] = BOOK_SCRAPE_FIELDS;
 
 export type Translate = (key: string, options?: Record<string, unknown>) => string;
 
@@ -171,25 +159,7 @@ export const DEFAULT_SEARCH_FIELDS: ScraperSearchField[] = [
   { key: 'narrator', label: 'Narrator', required: false, default_from: 'book.narrator' },
 ];
 
-export const DEFAULT_RESULT_FIELDS = [
-  'title',
-  'author',
-  'narrator',
-  'cover_url',
-  'description',
-  'tags',
-  'genre',
-  'year',
-  'subtitle',
-  'published_date',
-  'publisher',
-  'isbn',
-  'asin',
-  'language',
-  'explicit',
-  'abridged',
-  'duration',
-];
+export const DEFAULT_RESULT_FIELDS = FIELD_ORDER;
 
 export const STEP_ITEMS: Array<{ key: ModalStep; label: string; labelKey: string }> = [
   { key: 'search', label: 'Search Conditions', labelKey: 'scrapeDiff.searchConditions' },
@@ -222,7 +192,7 @@ export const getSharedSearchFieldKind = (field: ScraperSearchField) => {
 
 export const getResultFields = (source?: ScraperSource | null) => {
   const fields = source?.result_fields?.length ? source.result_fields : DEFAULT_RESULT_FIELDS;
-  return Array.from(new Set(fields.map(normalizeFieldKey))).filter((key) => FIELD_DEFINITIONS[key]);
+  return Array.from(new Set(fields.map(normalizeFieldKey))).filter((key) => FIELD_ORDER.includes(key));
 };
 
 export const getBookDefaultValue = (book: Book, field: ScraperSearchField) => {

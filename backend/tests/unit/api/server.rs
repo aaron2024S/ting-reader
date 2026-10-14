@@ -54,6 +54,40 @@ async fn gateway_proxy_does_not_leak_outer_wildcard_path_param() {
 }
 
 #[tokio::test]
+async fn gateway_proxy_preserves_trusted_transport_for_auth_limits() {
+    let limiter = RateLimiter::new(1, 60);
+    let inner = Router::new()
+        .route("/api/auth/login", get(|| async { "OK" }))
+        .layer(
+            ServiceBuilder::new()
+                .layer(axum::Extension(limiter))
+                .layer(middleware::from_fn(rate_limit_middleware)),
+        );
+    let app = Router::new()
+        .route("/app/ting-reader/*path", any(gateway_proxy))
+        .with_state(GatewayProxyState {
+            router: inner,
+            prefix: "/app/ting-reader".into(),
+        });
+    for (user, expected) in [
+        (1000, StatusCode::OK),
+        (1000, StatusCode::TOO_MANY_REQUESTS),
+        (1001, StatusCode::OK),
+    ] {
+        let request = Request::builder()
+            .uri("/app/ting-reader/api/auth/login")
+            .extension(GatewayTransport)
+            .header("X-Trim-Userid", user.to_string())
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(request).await.unwrap().status(),
+            expected
+        );
+    }
+}
+
+#[tokio::test]
 async fn gateway_proxy_preserves_websocket_upgrade() {
     use axum::extract::ws::WebSocketUpgrade;
     use axum::http::StatusCode;

@@ -29,6 +29,33 @@ pub enum AudioFormat {
 }
 
 impl AudioFormat {
+    pub(crate) fn content_type(path: &str, transcode: Option<&str>) -> String {
+        match transcode {
+            Some("mp3") => return "audio/mpeg".into(),
+            Some("wav") => return "audio/wav".into(),
+            Some("hls") => return "application/vnd.apple.mpegurl".into(),
+            _ => {}
+        }
+        let extension = std::path::Path::new(path)
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        match extension.as_str() {
+            "mp3" => Self::Mp3.mime_type().into(),
+            "m4a" | "mp4" => Self::M4a.mime_type().into(),
+            "aac" => Self::Aac.mime_type().into(),
+            "flac" => Self::Flac.mime_type().into(),
+            "ogg" => Self::Ogg.mime_type().into(),
+            "opus" => Self::Opus.mime_type().into(),
+            "wma" => Self::Wma.mime_type().into(),
+            "wav" => "audio/wav".into(),
+            _ => mime_guess::from_path(path)
+                .first_or_octet_stream()
+                .to_string(),
+        }
+    }
+
     /// Get the MIME type for this audio format
     pub fn mime_type(&self) -> &'static str {
         match self {

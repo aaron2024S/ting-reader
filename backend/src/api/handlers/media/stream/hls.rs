@@ -104,11 +104,13 @@ async fn get_input(
         return Ok(HlsInput::Direct(cache_path.to_string_lossy().into_owned()));
     }
     if library.library_type == "webdav" {
-        Ok(HlsInput::Direct(build_webdav_url(
-            library,
-            &chapter.path,
-            Some(state.encryption_key.as_ref()),
-        )?))
+        Ok(HlsInput::Direct(
+            crate::core::StorageService::authenticated_media_url(
+                library,
+                &chapter.path,
+                Some(state.encryption_key.as_ref()),
+            )?,
+        ))
     } else {
         Ok(HlsInput::Direct(chapter.path.clone()))
     }
@@ -345,62 +347,6 @@ async fn wait_for_first_segment(
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-}
-
-/// 构建 WebDAV URL
-fn build_webdav_url(
-    library: &Library,
-    path: &str,
-    encryption_key: Option<&[u8; 32]>,
-) -> Result<String> {
-    // 构建 WebDAV URL
-    let mut webdav_url = if path.starts_with("http://") || path.starts_with("https://") {
-        url::Url::parse(path).map_err(|e| TingError::ValidationError(e.to_string()))?
-    } else {
-        let base_url =
-            url::Url::parse(&library.url).map_err(|e| TingError::ValidationError(e.to_string()))?;
-        let mut url = base_url.clone();
-
-        let root = library.root_path.as_str();
-        let root = if root.is_empty() { "/" } else { root };
-        let root_trimmed = root.trim_matches('/');
-        let rel_trimmed = path.trim_matches('/');
-        let full_path_str = if root_trimmed.is_empty() {
-            rel_trimmed.to_string()
-        } else {
-            format!("{}/{}", root_trimmed, rel_trimmed)
-        };
-
-        let decoded_path = urlencoding::decode(&full_path_str)
-            .map_err(|e| TingError::ValidationError(e.to_string()))?;
-
-        {
-            let mut segments = url
-                .path_segments_mut()
-                .map_err(|_| TingError::ValidationError("Invalid URL".to_string()))?;
-            for segment in decoded_path.split('/') {
-                if !segment.is_empty() {
-                    segments.push(segment);
-                }
-            }
-        }
-
-        url
-    };
-
-    // 添加认证信息
-    if let (Some(username), Some(password)) = (&library.username, &library.password) {
-        let decrypted_password = if let Some(key) = encryption_key {
-            crate::core::security::crypto::decrypt(password, key)
-                .unwrap_or_else(|_| password.clone())
-        } else {
-            password.clone()
-        };
-        webdav_url.set_username(username).ok();
-        webdav_url.set_password(Some(&decrypted_password)).ok();
-    }
-
-    Ok(webdav_url.to_string())
 }
 
 #[cfg(test)]

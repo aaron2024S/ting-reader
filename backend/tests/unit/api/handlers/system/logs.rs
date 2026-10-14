@@ -1,4 +1,5 @@
 use super::*;
+use crate::core::app::logging::MAX_LOG_PAGE_SIZE;
 
 fn query() -> LogsQuery {
     LogsQuery {

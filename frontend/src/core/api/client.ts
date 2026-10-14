@@ -1,4 +1,5 @@
-import axios, { type AxiosAdapter, type AxiosRequestConfig, type AxiosResponse } from 'axios';
+import axios, { type AxiosAdapter } from 'axios';
+import { createSingleFlightAdapter } from './mutations';
 import { useAuthStore } from '../stores/authStore';
 import i18n from '../i18n';
 import { safeStorage } from '../utils/storage';
@@ -18,58 +19,11 @@ const apiClient = axios.create({
 });
 
 const mutationMethods = new Set(['post', 'put', 'patch', 'delete']);
-const inFlightMutations = new Map<string, Promise<AxiosResponse>>();
 const defaultAdapter = axios.getAdapter(apiClient.defaults.adapter) as AxiosAdapter;
-
-const stableSerialize = (value: unknown): string => {
-  if (value === null || value === undefined) return '';
-  if (typeof FormData !== 'undefined' && value instanceof FormData) {
-    return JSON.stringify(
-      Array.from(value.entries()).map(([key, entry]) => [
-        key,
-        typeof entry === 'string' ? entry : `${entry.name}:${entry.size}:${entry.type}`,
-      ]),
-    );
-  }
-  if (Array.isArray(value)) return `[${value.map(stableSerialize).join(',')}]`;
-  if (typeof value === 'object') {
-    return `{${Object.entries(value as Record<string, unknown>)
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([key, entry]) => `${JSON.stringify(key)}:${stableSerialize(entry)}`)
-      .join(',')}}`;
-  }
-  return JSON.stringify(value);
-};
-
-const mutationFingerprint = (config: AxiosRequestConfig) => [
-  config.method?.toLowerCase(),
-  config.baseURL,
-  config.url,
-  stableSerialize(config.params),
-  stableSerialize(config.data),
-].join('|');
-
-const createIdempotencyKey = () => {
-  const now = Date.now();
-  return typeof crypto !== 'undefined' && crypto.randomUUID
-    ? crypto.randomUUID()
-    : `${now}-${Math.random().toString(36).slice(2)}`;
-};
-
-const singleFlightAdapter: AxiosAdapter = (config) => {
-  const fingerprint = mutationFingerprint(config);
-  const existing = inFlightMutations.get(fingerprint);
-  if (existing) return existing;
-
-  if (!config.headers.has('Idempotency-Key')) {
-    config.headers.set('Idempotency-Key', createIdempotencyKey());
-  }
-  const request = defaultAdapter(config).finally(() => {
-    inFlightMutations.delete(fingerprint);
-  });
-  inFlightMutations.set(fingerprint, request);
-  return request;
-};
+const singleFlightAdapter = createSingleFlightAdapter(
+  defaultAdapter,
+  () => useAuthStore.getState().token || '',
+);
 
 apiClient.interceptors.request.use((config) => {
   const { token, activeUrl } = useAuthStore.getState();
@@ -109,7 +63,7 @@ apiClient.interceptors.response.use(
     const originalRequest = error.config;
     
     // Handle 401 Unauthorized
-    if (error.response?.status === 401 && !originalRequest._retry) {
+    if (error.response?.status === 401 && !originalRequest?._retry) {
       useAuthStore.getState().logout();
       const gatewayBasePath = getGatewayBasePath();
       window.location.href = `${gatewayBasePath}/login`;
@@ -119,7 +73,7 @@ apiClient.interceptors.response.use(
     // Handle Network Error or Connection Refused (potentially redirect expired)
     // Only in Electron environment where we manage serverUrl/activeUrl
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    if (!error.response && !originalRequest._retry && (window as any).electronAPI) {
+    if (!error.response && originalRequest && !originalRequest._retry && (window as any).electronAPI) {
       const { serverUrl, setActiveUrl } = useAuthStore.getState();
 
       // If we have a serverUrl and it's different or we want to re-verify

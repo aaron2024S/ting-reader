@@ -19,7 +19,9 @@ import {
   STEP_ITEMS,
   editorValueForField,
   fieldValueForApi,
+  fieldValueForEditor,
   getBookDefaultValue,
+  getBookFieldValue,
   getDefaultEnabledSourceIds,
   getFieldLabel,
   getItemFieldValue,
@@ -355,6 +357,7 @@ const ScrapeDiffModal: React.FC<Props> = ({ bookId, onClose, onSave }) => {
   };
 
   const selectField = (result: ScrapeSearchResult, fieldKey: string) => {
+    if (!FIELD_ORDER.includes(fieldKey)) return;
     const item = result.item;
     const source = result.source;
 
@@ -414,15 +417,33 @@ const ScrapeDiffModal: React.FC<Props> = ({ bookId, onClose, onSave }) => {
   };
 
   const updateSelectedFieldValue = (fieldKey: string, value: string) => {
+    if (!book || !FIELD_ORDER.includes(fieldKey)) return;
+    const original = getBookFieldValue(book, fieldKey);
     setSelectedFields((prev) => {
       const current = prev[fieldKey];
-      if (!current) return prev;
+      const manual = current?.sourceId === '' || !current;
+      const nextValue = editorValueForField(fieldKey, value);
+      if (manual && original != null && JSON.stringify(nextValue) === JSON.stringify(
+        editorValueForField(fieldKey, fieldValueForEditor(original))
+      )) {
+        const next = { ...prev };
+        delete next[fieldKey];
+        return next;
+      }
 
       return {
         ...prev,
         [fieldKey]: {
-          ...current,
-          value: editorValueForField(fieldKey, value),
+          ...(current || {
+            key: fieldKey,
+            label: getFieldLabel(fieldKey, t),
+            sourceId: '',
+            sourceName: t('scrapeDiff.manualEdit'),
+            resultId: '',
+            resultKey: '',
+            resultTitle: '',
+          }),
+          value: nextValue,
         },
       };
     });
@@ -443,7 +464,7 @@ const ScrapeDiffModal: React.FC<Props> = ({ bookId, onClose, onSave }) => {
   const isStepEnabled = (target: ModalStep) => {
     if (target === step || target === 'search') return true;
     if (target === 'results') return results.length > 0 || error === t('scrapeDiff.searchFailed') || Object.keys(searchErrors).length > 0;
-    return selectedCount > 0;
+    return !searching;
   };
 
   const handleApply = async () => {
@@ -453,13 +474,13 @@ const ScrapeDiffModal: React.FC<Props> = ({ bookId, onClose, onSave }) => {
       setSaving(true);
       const fields = Object.fromEntries(
         Object.entries(selectedFields)
-          .filter(([, selection]) => hasFieldValue(selection.value))
+          .filter(([key, selection]) => FIELD_ORDER.includes(key) && hasFieldValue(selection.value))
           .map(([key, selection]) => [
             key,
             {
               value: fieldValueForApi(selection.value),
-              source: selection.sourceId,
-              external_id: selection.resultId,
+              ...(selection.sourceId ? { source: selection.sourceId } : {}),
+              ...(selection.resultId ? { external_id: selection.resultId } : {}),
             },
           ])
       );
@@ -606,7 +627,8 @@ const ScrapeDiffModal: React.FC<Props> = ({ bookId, onClose, onSave }) => {
 
           {step === 'review' ? (
             <ReviewStep
-              selectedFieldList={selectedFieldList}
+              book={book}
+              selectedFields={selectedFields}
               selectedCount={selectedCount}
               coverAspectClass={coverAspectClass}
               onClearSelectedFields={() => setSelectedFields({})}
@@ -658,7 +680,7 @@ const ScrapeDiffModal: React.FC<Props> = ({ bookId, onClose, onSave }) => {
                 </button>
                 <button
                   onClick={() => setStep('review')}
-                  disabled={selectedCount === 0}
+                  disabled={searching}
                   className="inline-flex items-center justify-center gap-2 rounded-xl bg-primary-600 px-6 py-2.5 font-bold text-white transition-colors hover:bg-primary-700 disabled:opacity-50"
                 >
                   {t('scrapeDiff.reviewApply')}

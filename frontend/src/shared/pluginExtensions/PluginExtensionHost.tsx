@@ -1,4 +1,3 @@
-import { X } from "lucide-react";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useClientExtensions } from "../../core/hooks/useClientExtensions";
@@ -6,7 +5,7 @@ import type { ClientExtensionDescriptor } from "../../core/pluginExtensions";
 import { usePlayerStore } from "../../core/stores/playerStore";
 import { useUiPreferencesStore } from "../../core/stores/uiPreferencesStore";
 import PluginExtensionIcon from "./PluginExtensionIcon";
-import { PluginExtensionContent } from "./PluginExtensionSlot";
+import { PluginExtensionContent, PluginExtensionPanel } from "./PluginExtensionSlot";
 
 const extensionLabel = (extension: ClientExtensionDescriptor) =>
   extension.title || extension.pluginName || extension.capability.id;
@@ -108,35 +107,9 @@ const PluginExtensionHost = () => {
       </div>
 
       {visibleActiveExtension ? (
-        <div className="fixed inset-0 z-[120] flex items-end justify-end bg-slate-950/30 p-3 backdrop-blur-sm sm:p-6">
-          <section className="flex h-[min(42rem,88vh)] w-full max-w-md flex-col overflow-hidden rounded-lg border border-slate-200 bg-white shadow-2xl dark:border-slate-700 dark:bg-slate-900">
-            <header className="flex h-14 shrink-0 items-center gap-3 border-b border-slate-200 px-4 dark:border-slate-800">
-              <div className="flex h-8 w-8 items-center justify-center rounded-md bg-primary-50 text-primary-700 dark:bg-primary-950/40 dark:text-primary-300">
-                <PluginExtensionIcon extension={visibleActiveExtension} size={17} />
-              </div>
-              <div className="min-w-0 flex-1">
-                <h2 className="truncate text-sm font-semibold text-slate-950 dark:text-white">
-                  {extensionLabel(visibleActiveExtension)}
-                </h2>
-                <p className="truncate text-xs text-slate-500 dark:text-slate-400">
-                  {visibleActiveExtension.pluginName}
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={() => setActiveExtension(null)}
-                className="flex h-9 w-9 items-center justify-center rounded-md text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-900 dark:hover:bg-slate-800 dark:hover:text-white"
-                title={t("common.close")}
-                aria-label={t("common.close")}
-              >
-                <X size={18} />
-              </button>
-            </header>
-            <div className="flex min-h-0 flex-1 flex-col text-sm leading-6 text-slate-500 dark:text-slate-400">
-              <PluginExtensionContent extension={visibleActiveExtension} />
-            </div>
-          </section>
-        </div>
+        <PluginExtensionPanel extension={visibleActiveExtension} onClose={() => setActiveExtension(null)}>
+          <PluginExtensionContent extension={visibleActiveExtension} />
+        </PluginExtensionPanel>
       ) : null}
     </>
   );

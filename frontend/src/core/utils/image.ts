@@ -2,9 +2,17 @@ import { useAuthStore } from '../stores/authStore';
 import { getRuntimeAssetUrl, getRuntimeBaseUrl, getRuntimeUrl } from './runtimeUrl';
 
 const coverRevisions = new Map<string, number>();
+let nextCoverRevision = 0;
+const coverRevisionKey = (bookId: string) => `${useAuthStore.getState().activeUrl}|${bookId}`;
 
 export const invalidateBookCover = (bookId: string) => {
-  coverRevisions.set(bookId, (coverRevisions.get(bookId) || 0) + 1);
+  const key = coverRevisionKey(bookId);
+  coverRevisions.delete(key);
+  coverRevisions.set(key, ++nextCoverRevision);
+  if (coverRevisions.size > 1024) {
+    const oldest = coverRevisions.keys().next().value;
+    if (oldest !== undefined) coverRevisions.delete(oldest);
+  }
 };
 
 export const getCoverUrl = (url?: string, libraryId?: string, bookId?: string) => {
@@ -53,7 +61,7 @@ export const getCoverUrl = (url?: string, libraryId?: string, bookId?: string) =
     
     if (bookId) {
       coverUrl += `&book_id=${encodeURIComponent(bookId)}`;
-      const revision = coverRevisions.get(bookId);
+      const revision = coverRevisions.get(coverRevisionKey(bookId));
       if (revision) coverUrl += `&v=${revision}`;
     }
     

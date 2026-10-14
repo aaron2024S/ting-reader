@@ -1,3 +1,4 @@
+import { useBookOperations } from '../../core/hooks/useBooks';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams, useNavigate } from 'react-router';
 import { useTranslation } from 'react-i18next';
@@ -13,12 +14,12 @@ import { localeCompare } from '../../core/utils/locale';
 import { usePlayerStore } from '../../core/stores/playerStore';
 import { useAuthStore } from '../../core/stores/authStore';
 import { getCoverAspectClass, useBookshelfCoverShape } from '../../core/hooks/useBookshelfCoverShape';
-import DeleteSeriesModal from './bookDetail/DeleteSeriesModal';
-import DeleteBookModal from './bookDetail/DeleteBookModal';
+import DeleteLibraryItemModal from './bookDetail/DeleteLibraryItemModal';
 
 type SeriesSortBy = 'default' | 'title' | 'author';
 
 const SeriesDetailPage: React.FC = () => {
+  const bookOperations = useBookOperations();
   const { t } = useTranslation();
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -211,7 +212,8 @@ const SeriesDetailPage: React.FC = () => {
   const handleDelete = async () => {
     try {
       setDeleting(true);
-      await apiClient.delete(`/api/v1/series/${id}`);
+      if (!id) return;
+      await bookOperations.current?.deleteSeries([id]);
       navigate('/bookshelf');
     } catch (err) {
       console.error('Failed to delete series', err);
@@ -250,17 +252,9 @@ const SeriesDetailPage: React.FC = () => {
     setIsOperationsOpen(false);
     try {
       if (action === 'delete') {
-        const results = await Promise.allSettled(ids.map((bookId) =>
-          apiClient.delete(`/api/books/${bookId}?delete_files=${deleteSourceFiles}`)));
-        const failure = results.find((result) => result.status === 'rejected');
-        if (failure?.status === 'rejected') throw failure.reason;
+        await bookOperations.current?.deleteBooks(ids, deleteSourceFiles);
       } else {
-        for (let offset = 0; offset < ids.length; offset += 200) {
-          await apiClient.post('/api/books/read-status', {
-            book_ids: ids.slice(offset, offset + 200),
-            read: action === 'read',
-          });
-        }
+        await bookOperations.current?.markRead(ids, action === 'read');
       }
       if (version !== pageVersion.current) return;
       setConfirmation(null);
@@ -615,7 +609,7 @@ const SeriesDetailPage: React.FC = () => {
       )}
 
       {confirmation === 'delete' && bookForDeletion && (
-        <DeleteBookModal
+        <DeleteLibraryItemModal
           book={bookForDeletion}
           deleting={batchBusy}
           deleteSourceFiles={deleteSourceFiles}
@@ -637,7 +631,7 @@ const SeriesDetailPage: React.FC = () => {
       )}
 
       {isDeleteModalOpen && series && (
-        <DeleteSeriesModal
+        <DeleteLibraryItemModal
           series={series}
           deleting={deleting}
           onClose={() => setIsDeleteModalOpen(false)}

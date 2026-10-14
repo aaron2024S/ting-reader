@@ -115,7 +115,7 @@ pub async fn upload_book_cover(
             }
             canonical
         }
-        "webdav" | "rss" => crate::core::books::metadata_writer::remote_metadata_dir(&book.path)?,
+        "webdav" | "rss" => crate::core::books::metadata::remote_metadata_dir(&book.path)?,
         _ => {
             return Err(TingError::InvalidRequest(
                 "This library does not support cover uploads".to_string(),

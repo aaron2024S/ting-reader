@@ -1,9 +1,8 @@
 use super::common::deserialize_tags_or_string;
 use crate::db::models::Book;
+pub use crate::plugin::types::scraper::ScraperSourceInfo;
 use crate::plugin::types::scraper::{BookDetail, BookItem};
-use crate::plugin::types::{LocalizedText, ScraperSearchField};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 
 // Search and Scraper API models
 
@@ -69,31 +68,6 @@ pub struct ScraperSearchRequest {
     pub author: Option<String>,
     /// Optional narrator name for filtering
     pub narrator: Option<String>,
-}
-
-/// Information about a scraper source
-#[derive(Debug, Serialize)]
-pub struct ScraperSourceInfo {
-    /// Plugin ID
-    pub id: String,
-    /// Plugin name
-    pub name: String,
-    /// Plugin description
-    pub description: Option<String>,
-    /// Plugin version
-    pub version: String,
-    /// Whether the plugin is enabled
-    pub enabled: bool,
-    /// Whether the plugin can be used by automatic library scraping
-    pub auto_scrape: bool,
-    /// Whether this source aggregates candidates from other scraper sources
-    pub aggregate_auto_scrape: bool,
-    /// Search fields declared by the plugin
-    pub search_fields: Vec<ScraperSearchField>,
-    /// Metadata fields this plugin can return
-    pub result_fields: Vec<String>,
-    /// Localized labels for result fields declared by the plugin
-    pub result_field_labels: BTreeMap<String, LocalizedText>,
 }
 
 // Book API models

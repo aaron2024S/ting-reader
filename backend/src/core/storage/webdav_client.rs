@@ -1,4 +1,4 @@
-use crate::core::app::error::{Result, TingError};
+use crate::core::app::error::{ErrorContext, Result, TingError};
 use reqwest::Client;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -23,7 +23,7 @@ impl WebDavClient {
             .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
             .timeout(Duration::from_secs(30))
             .build()
-            .map_err(|e| TingError::NetworkError(e.to_string()))?;
+            .context("Failed to build WebDAV client")?;
 
         Ok(Self {
             client,
@@ -73,16 +73,13 @@ impl WebDavClient {
             req = req.basic_auth(u, Some(p));
         }
 
-        let response = req
-            .send()
-            .await
-            .map_err(|e| TingError::NetworkError(format!("PROPFIND request failed: {}", e)))?;
+        let response = req.send().await.context("PROPFIND request failed")?;
 
         if response.status().is_success() || response.status().as_u16() == 207 {
             let xml = response
                 .text()
                 .await
-                .map_err(|e| TingError::NetworkError(format!("Failed to read response: {}", e)))?;
+                .context("Failed to read WebDAV response")?;
             Ok(xml)
         } else if response.status().as_u16() == 401 {
             Err(TingError::AuthenticationError(
@@ -145,10 +142,7 @@ impl WebDavClient {
             req = req.header("Range", range_header);
         }
 
-        let response = req
-            .send()
-            .await
-            .map_err(|e| TingError::NetworkError(format!("GET request failed: {}", e)))?;
+        let response = req.send().await.context("WebDAV GET request failed")?;
 
         if response.status().is_success() || response.status().as_u16() == 206 {
             Ok(response)

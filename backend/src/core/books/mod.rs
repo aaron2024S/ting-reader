@@ -3,12 +3,11 @@
 pub mod bookmarks;
 pub mod color;
 pub mod merge_service;
-pub mod metadata_writer;
+pub mod metadata;
 pub mod nfo_manager;
 pub mod scraper;
 pub mod service;
 pub mod text_cleaner;
-pub mod webdav_metadata;
 
 pub use bookmarks::{BookmarkService, CreateBookmark};
 pub use merge_service::MergeService;

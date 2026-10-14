@@ -1,6 +1,28 @@
 use super::*;
 
 #[test]
+fn playback_and_signed_resources_share_media_content_types() {
+    for (path, expected) in [
+        ("FILE.M4A", "audio/mp4"),
+        ("file.mp4", "audio/mp4"),
+        ("file.mp3", "audio/mpeg"),
+        ("file.wav", "audio/wav"),
+        ("file.flac", "audio/flac"),
+        ("file.unknown", "application/octet-stream"),
+    ] {
+        assert_eq!(AudioFormat::content_type(path, None), expected);
+    }
+    assert_eq!(
+        AudioFormat::content_type("file.wma", Some("mp3")),
+        "audio/mpeg"
+    );
+    assert_eq!(
+        AudioFormat::content_type("file.mp3", Some("hls")),
+        "application/vnd.apple.mpegurl"
+    );
+}
+
+#[test]
 fn reads_single_and_final_symphonia_metadata_revisions() {
     use symphonia::core::meta::{MetadataBuilder, MetadataLog, StandardTagKey, Tag, Value};
     let mut log = MetadataLog::default();

@@ -1,6 +1,33 @@
 //! Search-facing plugin DTOs. Wire DTOs are defined in ting-plugin-contract.
 
+use super::{LocalizedText, ScraperSearchField};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+
+/// Information about a scraper source
+#[derive(Debug, Serialize)]
+pub struct ScraperSourceInfo {
+    /// Plugin ID
+    pub id: String,
+    /// Plugin name
+    pub name: String,
+    /// Plugin description
+    pub description: Option<String>,
+    /// Plugin version
+    pub version: String,
+    /// Whether the plugin is enabled
+    pub enabled: bool,
+    /// Whether the plugin can be used by automatic library scraping
+    pub auto_scrape: bool,
+    /// Whether this source aggregates candidates from other scraper sources
+    pub aggregate_auto_scrape: bool,
+    /// Search fields declared by the plugin
+    pub search_fields: Vec<ScraperSearchField>,
+    /// Metadata fields this plugin can return
+    pub result_fields: Vec<String>,
+    /// Localized labels for result fields declared by the plugin
+    pub result_field_labels: BTreeMap<String, LocalizedText>,
+}
 
 /// Search result containing a list of books and pagination information
 #[derive(Debug, Clone, Serialize, Deserialize)]

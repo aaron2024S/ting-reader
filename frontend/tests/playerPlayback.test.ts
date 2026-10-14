@@ -1,11 +1,189 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { resolvePlaybackDuration } from '../src/core/utils/duration.ts';
+import { HlsPlaybackSession, PlaybackSleep } from '../src/features/player/playbackSession.ts';
+import type { HlsPlaybackInfo, HlsTransport } from '../src/features/player/playbackSession.ts';
+import { ChapterCatalogue } from '../src/core/api/books.ts';
+import type { ChapterPage } from '../src/core/api/books.ts';
+import type { Chapter } from '../src/core/types/index.ts';
 import {
   registerMediaSessionControls,
   updateMediaSessionMetadata,
   updateMediaSessionPlayback,
 } from '../src/features/player/mediaSession.ts';
+
+const deferred = <T>() => {
+  let resolve!: (value: T) => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+};
+
+test('sleep minutes pause, survive delayed ticks and expire exactly once', () => {
+  const sleep = new PlaybackSleep();
+  sleep.startSeconds(60, false, 0);
+  assert.equal(sleep.snapshot(100_000).seconds, 60);
+  assert.equal(sleep.expired(100_000), false);
+  sleep.setPlaying(true, 100_000);
+  assert.equal(sleep.snapshot(120_000).seconds, 40);
+  sleep.setPlaying(false, 120_000);
+  assert.equal(sleep.snapshot(200_000).seconds, 40);
+  sleep.setPlaying(true, 200_000);
+  assert.equal(sleep.expired(250_000), true);
+  assert.equal(sleep.expired(250_001), false);
+});
+
+test('minute and episode sleep share one mutually exclusive policy', () => {
+  const sleep = new PlaybackSleep();
+  sleep.startSeconds(60, true, 0);
+  sleep.startEpisodes(2);
+  assert.deepEqual(sleep.snapshot(0), { seconds: null, episodes: 2 });
+  assert.equal(sleep.chapterEnded(), false);
+  assert.equal(sleep.chapterEnded(), true);
+  assert.equal(sleep.chapterEnded(), false);
+  sleep.startEpisodes(3);
+  sleep.startSeconds(10, true, 0);
+  assert.equal(sleep.snapshot(0).episodes, null);
+  sleep.cancel();
+  assert.deepEqual(sleep.snapshot(20_000), { seconds: null, episodes: null });
+});
+
+const hlsFixture = () => {
+  const created = deferred<HlsPlaybackInfo>();
+  const released: string[] = [];
+  const requests: number[] = [];
+  const responses: ReturnType<typeof deferred<HlsPlaybackInfo>>[] = [];
+  const transport: HlsTransport = {
+    create: () => created.promise,
+    seek: async (_session, position) => {
+      requests.push(position);
+      const response = deferred<HlsPlaybackInfo>();
+      responses.push(response);
+      return response.promise;
+    },
+    touch: async () => {},
+    release: async (session) => { released.push(session); },
+  };
+  return { created, released, requests, responses, transport };
+};
+
+test('chapter paging cancels replaced requests and suppresses late results', async () => {
+  const responses: ReturnType<typeof deferred<ChapterPage>>[] = [];
+  const signals: AbortSignal[] = [];
+  const owner = new ChapterCatalogue(async (_params, signal) => {
+    signals.push(signal);
+    const response = deferred<ChapterPage>();
+    responses.push(response);
+    return response.promise;
+  });
+  const first = owner.page({ offset: 0 });
+  const second = owner.page({ offset: 100 });
+  assert.equal(signals[0].aborted, true);
+  const data: ChapterPage = { chapters: [], total: 200, main_total: 200,
+    extra_total: 0, chapter_type: 'main', offset: 100 };
+  responses[1].resolve(data);
+  assert.equal(await second, data);
+  responses[0].resolve({ ...data, offset: 0 });
+  assert.equal(await first, null);
+  owner.dispose();
+});
+
+test('playback and chapter editing share the catalogue and invalidation cancels stale loads', async () => {
+  const responses: ReturnType<typeof deferred<Chapter[]>>[] = [];
+  const signals: AbortSignal[] = [];
+  const owner = new ChapterCatalogue(async (_params, signal) => {
+    signals.push(signal);
+    const response = deferred<Chapter[]>();
+    responses.push(response);
+    return response.promise;
+  });
+  const playing = owner.all();
+  assert.equal(owner.all(), playing);
+  owner.invalidate();
+  assert.equal(signals[0].aborted, true);
+  const fresh = owner.all();
+  responses[0].resolve([]);
+  assert.equal(await playing, null);
+  responses[1].resolve([]);
+  assert.deepEqual(await fresh, []);
+  assert.deepEqual(await owner.all(), []);
+  assert.equal(responses.length, 2);
+  owner.dispose();
+  assert.equal(await owner.all(), null);
+});
+
+test('HLS opening is shared and a slow heartbeat cannot accumulate requests', async () => {
+  const fixture = hlsFixture();
+  let touches = 0;
+  const touching = deferred<void>();
+  fixture.transport.touch = async () => {
+    touches++;
+    await touching.promise;
+  };
+  const owner = new HlsPlaybackSession(fixture.transport, () => {}, 1);
+  const opening = owner.open();
+  assert.equal(owner.open(), opening);
+  fixture.created.resolve({ session_id: 'heartbeat', playlist_url: '/list.m3u8' });
+  await opening;
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(touches, 1);
+  owner.dispose();
+  touching.resolve();
+  await new Promise(resolve => setTimeout(resolve, 5));
+  assert.equal(touches, 1);
+  assert.deepEqual(fixture.released, ['heartbeat']);
+});
+
+test('HLS owners release a late creation result after chapter disposal exactly once', async () => {
+  const fixture = hlsFixture();
+  const owner = new HlsPlaybackSession(fixture.transport, () => {});
+  const opened = owner.open();
+  owner.dispose();
+  fixture.created.resolve({ session_id: 'late', playlist_url: '/playlist.m3u8' });
+  assert.equal(await opened, null);
+  owner.dispose();
+  assert.deepEqual(fixture.released, ['late']);
+});
+
+test('HLS seek serializes server operations and discards superseded responses', async () => {
+  const fixture = hlsFixture();
+  const owner = new HlsPlaybackSession(fixture.transport, () => {});
+  fixture.created.resolve({ session_id: 'current', playlist_url: '/playlist.m3u8' });
+  await owner.open();
+  const first = owner.seek(10);
+  await Promise.resolve();
+  const second = owner.seek(20);
+  assert.deepEqual(fixture.requests, [10]);
+  fixture.responses[0].resolve({ session_id: 'current', playlist_url: '/old.m3u8' });
+  assert.equal(await first, null);
+  await Promise.resolve();
+  assert.deepEqual(fixture.requests, [10, 20]);
+  fixture.responses[1].resolve({ session_id: 'current', playlist_url: '/new.m3u8', start_offset: 20 });
+  assert.equal((await second)?.start_offset, 20);
+  owner.dispose();
+});
+
+test('HLS invalid responses are released and failed seeks do not poison the queue', async () => {
+  const fixture = hlsFixture();
+  const owner = new HlsPlaybackSession(fixture.transport, () => {});
+  fixture.created.resolve({ session_id: 'invalid', playlist_url: '', start_offset: NaN });
+  await assert.rejects(owner.open());
+  assert.deepEqual(fixture.released, ['invalid']);
+  owner.dispose();
+  const next = hlsFixture();
+  const active = new HlsPlaybackSession(next.transport, () => {});
+  next.created.resolve({ session_id: 'session', playlist_url: '/playlist.m3u8' });
+  await active.open();
+  const failed = active.seek(10);
+  await Promise.resolve();
+  next.responses[0].reject(new Error('network'));
+  await assert.rejects(failed);
+  const retry = active.seek(20);
+  await Promise.resolve();
+  next.responses[1].resolve({ session_id: 'session', playlist_url: '/retry.m3u8' });
+  assert.equal((await retry)?.playlist_url, '/retry.m3u8');
+  active.dispose();
+});
 
 const createSession = (unsupported: MediaSessionAction[] = []) => {
   const actions = new Map<MediaSessionAction, MediaSessionActionHandler | null>();

@@ -5,58 +5,12 @@ use serde_json::Value;
 
 /// Encrypt a value using AES-256-GCM
 pub fn encrypt_value(encryption_key: &[u8; 32], value: &str) -> Result<String> {
-    use aes_gcm::{
-        Aes256Gcm, Nonce,
-        aead::{Aead, KeyInit, OsRng},
-    };
-    use base64::{Engine as _, engine::general_purpose};
-
-    let cipher = Aes256Gcm::new(encryption_key.into());
-
-    let mut nonce_bytes = [0u8; 12];
-    use aes_gcm::aead::rand_core::RngCore;
-    OsRng.fill_bytes(&mut nonce_bytes);
-    let nonce = Nonce::from_slice(&nonce_bytes);
-
-    let ciphertext = cipher
-        .encrypt(nonce, value.as_bytes())
-        .map_err(|e| TingError::ConfigError(format!("Encryption failed: {}", e)))?;
-
-    let mut combined = nonce_bytes.to_vec();
-    combined.extend_from_slice(&ciphertext);
-
-    Ok(general_purpose::STANDARD.encode(&combined))
+    crate::core::security::crypto::encrypt(value, encryption_key)
 }
 
 /// Decrypt a value using AES-256-GCM
 pub fn decrypt_value(encryption_key: &[u8; 32], encrypted: &str) -> Result<String> {
-    use aes_gcm::{
-        Aes256Gcm, Nonce,
-        aead::{Aead, KeyInit},
-    };
-    use base64::{Engine as _, engine::general_purpose};
-
-    let cipher = Aes256Gcm::new(encryption_key.into());
-
-    let combined = general_purpose::STANDARD
-        .decode(encrypted)
-        .map_err(|e| TingError::ConfigError(format!("Invalid encrypted data: {}", e)))?;
-
-    if combined.len() < 12 {
-        return Err(TingError::ConfigError(
-            "Invalid encrypted data length".to_string(),
-        ));
-    }
-
-    let (nonce_bytes, ciphertext) = combined.split_at(12);
-    let nonce = Nonce::from_slice(nonce_bytes);
-
-    let plaintext = cipher
-        .decrypt(nonce, ciphertext)
-        .map_err(|e| TingError::ConfigError(format!("Decryption failed: {}", e)))?;
-
-    String::from_utf8(plaintext)
-        .map_err(|e| TingError::ConfigError(format!("Invalid UTF-8 in decrypted data: {}", e)))
+    crate::core::security::crypto::decrypt(encrypted, encryption_key)
 }
 
 /// Extract encrypted field paths from schema.

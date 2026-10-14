@@ -91,10 +91,11 @@ async fn sdk_mjs_import_executes_declared_operation() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn official_javascript_plugins_load_the_sdk() {
-    let plugins = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../plugin")
+    let plugins = std::env::var_os("TING_TEST_JS_PLUGIN_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugin"))
         .canonicalize()
-        .unwrap();
+        .expect("official JavaScript plugin sources must exist in TING_TEST_JS_PLUGIN_DIR");
     for name in [
         "ai-scraper-js",
         "ai-cover-generator",

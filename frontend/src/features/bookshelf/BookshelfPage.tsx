@@ -1,3 +1,4 @@
+import { useBookOperations } from '../../core/hooks/useBooks';
 import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router';
 import { useTranslation } from 'react-i18next';
@@ -6,8 +7,7 @@ import type { Book, Library, Series } from '../../core/types';
 import BookCard from '../../shared/cards/BookCard';
 import SeriesCard from '../../shared/cards/SeriesCard';
 import SeriesModal from '../../shared/modals/SeriesModal';
-import DeleteBookModal from './bookDetail/DeleteBookModal';
-import DeleteSeriesModal from './bookDetail/DeleteSeriesModal';
+import DeleteLibraryItemModal from './bookDetail/DeleteLibraryItemModal';
 import DisplaySettingsMenu from '../../shared/widgets/DisplaySettingsMenu';
 import { Search, Database, Plus, Library as LibraryIcon, Layers, Check, X, CheckSquare, ChevronDown, Trash2, BookCheck, BookX } from 'lucide-react';
 import { usePlayerStore } from '../../core/stores/playerStore';
@@ -18,6 +18,7 @@ import { publishBookshelfCoverShape } from '../../core/hooks/useBookshelfCoverSh
 import BookshelfListItem from './BookshelfListItem';
 
 const BookshelfPage: React.FC = () => {
+  const bookOperations = useBookOperations();
   const { t } = useTranslation();
   const currentChapter = usePlayerStore((state) => state.currentChapter);
   const user = useAuthStore((state) => state.user);
@@ -275,9 +276,7 @@ const BookshelfPage: React.FC = () => {
     if (selectedBookIds.length === 0 || savingReadStatus) return;
     setSavingReadStatus(true);
     try {
-      for (let offset = 0; offset < selectedBookIds.length; offset += 200) {
-        await apiClient.post('/api/books/read-status', { book_ids: selectedBookIds.slice(offset, offset + 200), read });
-      }
+      await bookOperations.current?.markRead(selectedBookIds, read);
       setConfirmUnread(false);
       await fetchData();
       setSelectedBookIds([]);
@@ -301,11 +300,7 @@ const BookshelfPage: React.FC = () => {
   const handleDeleteBooks = async () => {
     try {
       setDeletingBooks(true);
-      await Promise.all(
-        selectedBookIds.map(id =>
-          apiClient.delete(`/api/books/${id}?delete_files=${deleteSourceFiles}`)
-        )
-      );
+      await bookOperations.current?.deleteBooks(selectedBookIds, deleteSourceFiles);
       exitSelectionMode();
       fetchData();
     } catch (err) {
@@ -320,11 +315,7 @@ const BookshelfPage: React.FC = () => {
   const handleDeleteSeries = async () => {
     try {
       setDeletingSeries(true);
-      await Promise.all(
-        selectedSeriesIds.map(id =>
-          apiClient.delete(`/api/v1/series/${id}`)
-        )
-      );
+      await bookOperations.current?.deleteSeries(selectedSeriesIds);
       setIsDeleteSeriesOpen(false);
       if (selectedBookIds.length > 0) {
         setDeleteSourceFiles(false);
@@ -872,7 +863,7 @@ const BookshelfPage: React.FC = () => {
       />
 
       {isDeleteBookOpen && mockBookForDeletion && (
-        <DeleteBookModal
+        <DeleteLibraryItemModal
           book={mockBookForDeletion}
           deleting={deletingBooks}
           deleteSourceFiles={deleteSourceFiles}
@@ -883,7 +874,7 @@ const BookshelfPage: React.FC = () => {
       )}
 
       {isDeleteSeriesOpen && mockSeriesForDeletion && (
-        <DeleteSeriesModal
+        <DeleteLibraryItemModal
           series={mockSeriesForDeletion}
           deleting={deletingSeries}
           onClose={() => setIsDeleteSeriesOpen(false)}

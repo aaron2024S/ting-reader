@@ -394,7 +394,7 @@ impl TaskQueue {
         let mut temp_cover_path = None;
 
         if let Some(ref url) = book.cover_url {
-            if crate::core::books::webdav_metadata::is_cover_url(url) {
+            if crate::core::books::metadata::is_cover_url(url) {
                 if remote {
                     // URL covers remain references; the explicit audio write
                     // only embeds file covers already held in the book cache.
@@ -471,7 +471,7 @@ impl TaskQueue {
                     cover_path_str = Some(url.clone());
                 } else {
                     let book_path = if remote {
-                        crate::core::books::metadata_writer::remote_metadata_dir(&book.path)?
+                        crate::core::books::metadata::remote_metadata_dir(&book.path)?
                     } else {
                         PathBuf::from(&book.path)
                     };

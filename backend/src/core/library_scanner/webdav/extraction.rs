@@ -234,7 +234,7 @@ impl LibraryScanner {
                     let parent = file_url
                         .rsplit_once('/')
                         .map_or(file_url, |(parent, _)| parent);
-                    crate::core::books::metadata_writer::remote_metadata_dir(parent)?
+                    crate::core::books::metadata::remote_metadata_dir(parent)?
                 })
             } else {
                 None

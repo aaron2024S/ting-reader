@@ -750,30 +750,7 @@ fn u64_param(params: &Value, name: &str) -> Option<u64> {
 }
 
 fn signed_media_content_type(path: &str, transcode: Option<&str>) -> String {
-    match transcode {
-        Some("mp3") => "audio/mpeg".to_string(),
-        Some("wav") => "audio/wav".to_string(),
-        Some("hls") => "application/vnd.apple.mpegurl".to_string(),
-        _ => {
-            let ext = std::path::Path::new(path)
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("")
-                .to_ascii_lowercase();
-            match ext.as_str() {
-                "m4a" | "mp4" => "audio/mp4".to_string(),
-                "mp3" => "audio/mpeg".to_string(),
-                "aac" => "audio/aac".to_string(),
-                "flac" => "audio/flac".to_string(),
-                "ogg" => "audio/ogg".to_string(),
-                "opus" => "audio/opus".to_string(),
-                "wav" => "audio/wav".to_string(),
-                _ => mime_guess::from_path(path)
-                    .first_or_octet_stream()
-                    .to_string(),
-            }
-        }
-    }
+    crate::core::audio::AudioFormat::content_type(path, transcode)
 }
 
 fn plugin_route_can_use_public_prefix(capability: &crate::plugin::types::PluginCapability) -> bool {

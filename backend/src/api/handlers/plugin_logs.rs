@@ -2,19 +2,18 @@ use crate::api::require_admin;
 use crate::api::state::AppState;
 use crate::auth::middleware::AuthUser;
 use crate::core::app::error::{Result, TingError};
-use crate::core::app::logging::LogEntry;
+use crate::core::app::logging::{
+    LogEntry, LogQueryFilter, normalized_log_filter as normalized_filter,
+    normalized_log_pagination as normalized_pagination, read_log_file as parse_plugin_log_file,
+};
 use axum::{
     Json,
     extract::{Path, Query, State},
     response::IntoResponse,
 };
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use std::fs::File;
-use std::io::{BufRead, BufReader};
 use std::path::Path as StdPath;
-
-const MAX_PLUGIN_LOG_PAGE_SIZE: usize = 500;
 
 #[derive(Debug, Deserialize)]
 pub struct PluginLogsQuery {
@@ -41,50 +40,32 @@ pub struct PluginLogsResponse {
 #[derive(Debug, Clone)]
 struct PluginLogFilters {
     plugin_id: Option<String>,
-    level: Option<String>,
+    common: LogQueryFilter,
     source: Option<String>,
-    query: Option<String>,
-    since: Option<DateTime<Utc>>,
-    until: Option<DateTime<Utc>>,
 }
 
 impl PluginLogFilters {
     fn from_query(plugin_id: Option<String>, query: &PluginLogsQuery) -> Result<Self> {
-        let since = parse_time_filter("since", query.since.as_deref())?;
-        let until = parse_time_filter("until", query.until.as_deref())?;
-        // The UI sends an empty plugin_id for the all-plugins option.
-        // Treat blank values as no plugin filter instead of matching an empty ID.
-        let plugin_id = plugin_id
-            .map(|value| value.trim().to_owned())
-            .filter(|value| !value.is_empty());
-        if since.zip(until).is_some_and(|(since, until)| since > until) {
-            return Err(TingError::InvalidRequest(
-                "since must not be later than until".to_string(),
-            ));
-        }
-
+        let common = LogQueryFilter::new(
+            query.level.as_deref(),
+            query.q.as_deref(),
+            query.since.as_deref(),
+            query.until.as_deref(),
+        )?;
+        let plugin_id = normalized_filter(plugin_id.as_deref());
         Ok(Self {
             plugin_id,
-            level: normalized_filter(query.level.as_deref()),
+            common,
             source: normalized_filter(query.source.as_deref()),
-            query: normalized_filter(query.q.as_deref()).map(|value| value.to_lowercase()),
-            since,
-            until,
         })
     }
 
     fn matches(&self, log: &LogEntry) -> bool {
-        self.plugin_matches(log)
-            && self
-                .level
-                .as_ref()
-                .is_none_or(|level| log.level.eq_ignore_ascii_case(level))
+        self.common.matches(log)
+            && self.plugin_matches(log)
             && self.source.as_ref().is_none_or(|source| {
-                log_field(log, "source")
-                    .is_some_and(|candidate| candidate.eq_ignore_ascii_case(source))
+                log_field(log, "source").is_some_and(|value| value.eq_ignore_ascii_case(source))
             })
-            && self.query_matches(log)
-            && self.time_matches(log)
     }
 
     fn plugin_matches(&self, log: &LogEntry) -> bool {
@@ -101,37 +82,6 @@ impl PluginLogFilters {
             plugin_id_without_version(candidate) == plugin_id_without_version(plugin_id)
         })
     }
-
-    fn query_matches(&self, log: &LogEntry) -> bool {
-        let Some(query) = self.query.as_deref() else {
-            return true;
-        };
-        let fields = log
-            .fields
-            .as_ref()
-            .map(serde_json::Value::to_string)
-            .unwrap_or_default();
-        [
-            log.message.as_str(),
-            log.raw_message.as_deref().unwrap_or_default(),
-            log.module.as_str(),
-            fields.as_str(),
-        ]
-        .iter()
-        .any(|value| value.to_lowercase().contains(query))
-    }
-
-    fn time_matches(&self, log: &LogEntry) -> bool {
-        if self.since.is_none() && self.until.is_none() {
-            return true;
-        }
-        let Ok(timestamp) = DateTime::parse_from_rfc3339(&log.timestamp) else {
-            return false;
-        };
-        let timestamp = timestamp.with_timezone(&Utc);
-        self.since.is_none_or(|since| timestamp >= since)
-            && self.until.is_none_or(|until| timestamp <= until)
-    }
 }
 
 fn default_page() -> usize {
@@ -140,26 +90,6 @@ fn default_page() -> usize {
 
 fn default_page_size() -> usize {
     100
-}
-
-fn normalized_pagination(page: usize, page_size: usize) -> (usize, usize) {
-    (page.max(1), page_size.clamp(1, MAX_PLUGIN_LOG_PAGE_SIZE))
-}
-
-fn normalized_filter(value: Option<&str>) -> Option<String> {
-    value
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
-}
-
-fn parse_time_filter(name: &str, value: Option<&str>) -> Result<Option<DateTime<Utc>>> {
-    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
-        return Ok(None);
-    };
-    DateTime::parse_from_rfc3339(value)
-        .map(|timestamp| Some(timestamp.with_timezone(&Utc)))
-        .map_err(|_| TingError::InvalidRequest(format!("{name} must be an RFC 3339 timestamp")))
 }
 
 fn plugin_id_without_version(plugin_id: &str) -> &str {
@@ -190,85 +120,6 @@ fn safe_filename_component(value: &str) -> String {
 
 fn log_field<'a>(log: &'a LogEntry, key: &str) -> Option<&'a str> {
     log.fields.as_ref()?.get(key)?.as_str()
-}
-
-fn parse_message_params(fields: &serde_json::Value) -> Option<serde_json::Value> {
-    let value = fields.get("message_params")?;
-    if value.is_object() {
-        return Some(value.clone());
-    }
-    value
-        .as_str()
-        .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())
-        .filter(|parsed| parsed.is_object())
-}
-
-fn parse_plugin_log_file(path: &StdPath, logs: &mut Vec<LogEntry>) {
-    let Ok(file) = File::open(path) else {
-        return;
-    };
-
-    for line in BufReader::new(file)
-        .lines()
-        .map_while(std::result::Result::ok)
-    {
-        let Ok(json) = serde_json::from_str::<serde_json::Value>(&line) else {
-            continue;
-        };
-        let fields = json.get("fields");
-        let raw_message = fields
-            .and_then(|value| value.get("message"))
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-        let message_key = fields
-            .and_then(|value| value.get("message_key"))
-            .and_then(serde_json::Value::as_str)
-            .map(ToOwned::to_owned);
-        let message_params = fields.and_then(parse_message_params);
-        let structured_fields = fields.and_then(|value| {
-            value.as_object().and_then(|fields| {
-                let mut map = fields.clone();
-                map.remove("message");
-                map.remove("message_key");
-                map.remove("message_params");
-                if let Some(plugin_fields) = map
-                    .get("plugin_fields")
-                    .and_then(serde_json::Value::as_str)
-                    .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())
-                {
-                    map.insert("plugin_fields".to_string(), plugin_fields);
-                }
-                (!map.is_empty()).then_some(serde_json::Value::Object(map))
-            })
-        });
-
-        logs.push(LogEntry {
-            timestamp: json
-                .get("timestamp")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
-            level: json
-                .get("level")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
-            module: json
-                .get("target")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
-            message: raw_message.clone(),
-            raw_message: (!raw_message.is_empty()).then_some(raw_message),
-            message_key,
-            message_params,
-            fields: structured_fields,
-            task_id: None,
-            task_status: None,
-            task_type: None,
-        });
-    }
 }
 
 fn read_plugin_logs(data_dir: &StdPath) -> Vec<LogEntry> {

@@ -8,7 +8,7 @@ use reqwest::header::{
 };
 use reqwest::{Method, StatusCode, Url};
 use serde_json::Value;
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
@@ -135,8 +135,10 @@ async fn validate_http_target(allowed_domains: &[String], url: &Url) -> Result<V
         anyhow::bail!("Network access denied: port 0 is not allowed");
     }
 
-    if let Ok(ip) = host.parse::<IpAddr>() {
-        return Ok(vec![SocketAddr::new(ip, port)]);
+    match url.host() {
+        Some(url::Host::Ipv4(ip)) => return Ok(vec![SocketAddr::new(ip.into(), port)]),
+        Some(url::Host::Ipv6(ip)) => return Ok(vec![SocketAddr::new(ip.into(), port)]),
+        _ => {}
     }
 
     let resolved = tokio::net::lookup_host((host.as_str(), port))

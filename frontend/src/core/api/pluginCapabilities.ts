@@ -120,10 +120,12 @@ export const invokePluginCapability = async <T = unknown>(
   params: unknown = {},
   uiCapabilityId?: string,
   uiGrant?: string,
+  signal?: AbortSignal,
 ) => {
   const response = await apiClient.post<PluginCapabilityInvokeResult<T>>(
     `/api/v1/plugins/${encodeURIComponent(pluginId)}/capabilities/${encodeURIComponent(capabilityId)}/invoke`,
     { params, ui_capability_id: uiCapabilityId, ui_grant: uiGrant },
+    { signal },
   );
   return response.data.result;
 };

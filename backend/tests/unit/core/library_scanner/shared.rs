@@ -1,5 +1,19 @@
 use super::*;
 
+#[test]
+fn shared_chapter_policy_preserves_ai_sidecar_and_raw_titles() {
+    let cleaner = crate::core::books::TextCleaner::new(Default::default());
+    let raw = "Original title.mp3";
+    let (title, extra) =
+        resolve_chapter_title(&cleaner, raw, None, Some("AI title"), true, false, false);
+    assert_eq!(title, "AI title");
+    assert!(!extra);
+    let (title, _) = resolve_chapter_title(&cleaner, raw, None, None, false, false, true);
+    assert_eq!(title, raw);
+    let (title, _) = resolve_chapter_title(&cleaner, raw, None, None, true, true, true);
+    assert_eq!(title, "Original title");
+}
+
 fn select_mergeable_range_group(
     parent_name: &str,
     ranges: &[ChapterRangeDir],

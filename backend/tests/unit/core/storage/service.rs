@@ -1,4 +1,40 @@
 use super::*;
+
+#[test]
+fn media_urls_join_encoded_segments_once_and_keep_credentials_inside_library() {
+    let mut library = metadata_library();
+    library.username = Some("user".into());
+    library.password = Some("p@ss:word".into());
+    for path in ["Book%20One/chapter%201.mp3", "Book One/chapter 1.mp3"] {
+        let url = StorageService::media_url(&library, path).unwrap();
+        assert_eq!(
+            url.as_str(),
+            "https://example.test/dav/books/Book%20One/chapter%201.mp3"
+        );
+        let authenticated =
+            Url::parse(&StorageService::authenticated_media_url(&library, path, None).unwrap())
+                .unwrap();
+        assert_eq!(authenticated.username(), "user");
+        assert_eq!(authenticated.host_str(), Some("example.test"));
+    }
+    for path in [
+        "https://outside.test/dav/books/a.mp3",
+        "https://example.test/dav/other/a.mp3",
+        "../outside.mp3",
+        "%2e%2e/outside.mp3",
+    ] {
+        assert!(
+            StorageService::authenticated_media_url(&library, path, None).is_err(),
+            "{path}"
+        );
+    }
+    assert_eq!(
+        StorageService::media_url(&library, "file%2Fpart.mp3")
+            .unwrap()
+            .path(),
+        "/dav/books/file%2Fpart.mp3"
+    );
+}
 use axum::{Router, body::Body, http::StatusCode, response::IntoResponse, routing::get};
 use tokio::io::AsyncReadExt;
 

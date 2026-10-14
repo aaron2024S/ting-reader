@@ -1,5 +1,6 @@
+mod chapters;
+mod extraction;
 mod listing;
-mod metadata;
 mod processing;
 
 use super::{LibraryScanner, ScanMode, ScanResult, ScanStatus};
@@ -205,7 +206,7 @@ impl LibraryScanner {
             let state_config_fingerprint =
                 format!("{}:lock={}", scan_config_fingerprint, existing_lock_state);
             let directory_fingerprint = webdav_directory_fingerprint(&file_entries);
-            let cache_dir = crate::core::books::metadata_writer::remote_metadata_dir(&dir_url)?;
+            let cache_dir = crate::core::books::metadata::remote_metadata_dir(&dir_url)?;
             let cache_complete = cache_dir.join("metadata.json").is_file()
                 && cache_dir.join("book.nfo").is_file()
                 && metadata_files

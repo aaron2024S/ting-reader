@@ -1,19 +1,24 @@
 import React from 'react';
 import { AlertTriangle, Loader2, Trash2, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
-import type { Book } from '../../../core/types';
+import type { Book, Series } from '../../../core/types';
 
-interface Props {
-  book: Book;
+interface CommonProps {
   deleting: boolean;
-  deleteSourceFiles: boolean;
-  onToggleDeleteSourceFiles: () => void;
+
+
   onClose: () => void;
   onConfirm: () => void;
 }
 
-const DeleteBookModal: React.FC<Props> = ({
+type Props = CommonProps & (
+  | { book: Book; series?: never; deleteSourceFiles: boolean; onToggleDeleteSourceFiles: () => void }
+  | { series: Series; book?: never; deleteSourceFiles?: never; onToggleDeleteSourceFiles?: never }
+);
+
+const DeleteLibraryItemModal: React.FC<Props> = ({
   book,
+  series,
   deleting,
   deleteSourceFiles,
   onToggleDeleteSourceFiles,
@@ -24,21 +29,25 @@ const DeleteBookModal: React.FC<Props> = ({
 
   return (
   <div className="fixed inset-0 z-[300] flex items-center justify-center p-4">
-    <div className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm" onClick={onClose}></div>
+    <div className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm" onClick={deleting ? undefined : onClose}></div>
     <div className="relative w-full max-w-md bg-white dark:bg-slate-900 rounded-3xl shadow-2xl overflow-hidden animate-in zoom-in-95 duration-200">
       <div className="p-8">
         <div className="w-16 h-16 bg-red-50 dark:bg-red-900/20 rounded-2xl flex items-center justify-center text-red-500 mx-auto mb-6">
           <AlertTriangle size={32} />
         </div>
 
-        <h3 className="text-xl font-bold text-center dark:text-white mb-2">{t('bookshelf.deleteBookTitle')}</h3>
+        <h3 className="text-xl font-bold text-center dark:text-white mb-2">{t(book ? 'bookshelf.deleteBookTitle' : 'bookshelf.deleteSeries')}</h3>
         <p className="text-slate-500 dark:text-slate-400 text-center mb-8">
-          {book.id === 'bulk'
-            ? t('bookshelf.deleteBooksMessageBulk', { count: book.title })
-            : t('bookshelf.deleteBookMessage', { title: book.title })}
+          {book
+            ? book.id === 'bulk'
+              ? t('bookshelf.deleteBooksMessageBulk', { count: book.title })
+              : t('bookshelf.deleteBookMessage', { title: book.title })
+            : series.id === 'bulk'
+              ? t('bookshelf.deleteSeriesConfirmBulk', { count: series.title })
+              : `${t('bookshelf.deleteSeriesConfirm')} (${series.title})`}
         </p>
 
-        {book.library_type === 'local' && (
+        {book?.library_type === 'local' && (
           <div
             className="flex items-center gap-3 p-4 bg-slate-50 dark:bg-slate-800 rounded-2xl mb-8 cursor-pointer group"
             onClick={onToggleDeleteSourceFiles}
@@ -59,7 +68,7 @@ const DeleteBookModal: React.FC<Props> = ({
 
         <div className="flex gap-4">
           <button
-            onClick={onClose}
+            onClick={deleting ? undefined : onClose}
             className="flex-1 py-3 font-bold text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-xl transition-all"
           >
             {t('common.cancel')}
@@ -79,4 +88,4 @@ const DeleteBookModal: React.FC<Props> = ({
   );
 };
 
-export default DeleteBookModal;
+export default DeleteLibraryItemModal;

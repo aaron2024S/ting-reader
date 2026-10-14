@@ -73,3 +73,19 @@ pub struct AppState {
     pub jwt_key_manager: Option<Arc<JwtKeyManager>>,
     pub encryption_key: Arc<[u8; 32]>,
 }
+
+impl AppState {
+    pub(crate) fn metadata_service(&self) -> crate::core::books::metadata::BookMetadataService<'_> {
+        use crate::core::books::metadata::{BookMetadataService, MetadataRemote};
+        BookMetadataService {
+            chapters: &self.chapter_repo,
+            series: &self.series_repo,
+            libraries: &self.library_repo,
+            nfo: &self.nfo_manager,
+            remote: Some(MetadataRemote {
+                storage: &self.storage_service,
+                key: &self.encryption_key,
+            }),
+        }
+    }
+}

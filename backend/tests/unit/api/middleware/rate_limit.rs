@@ -103,7 +103,7 @@ async fn test_rate_limiter_cleanup_expired() {
     {
         let state = limiter.state.read().await;
         assert_eq!(state.requests.len(), 1);
-        assert_eq!(state.requests.get(&ip).unwrap().len(), 3);
+        assert_eq!(state.requests.get(&ClientKey::Ip(ip)).unwrap().len(), 3);
     }
 
     // Wait for window to expire
@@ -133,7 +133,11 @@ async fn test_rate_limit_middleware_integration() {
                     rate_limit_middleware(req, next).await
                 }
             },
-        ));
+        ))
+        .layer(axum::Extension(ConnectInfo(SocketAddr::from((
+            [127, 0, 0, 1],
+            1234,
+        )))));
 
     // First 3 requests should succeed
     for i in 0..3 {
@@ -172,7 +176,11 @@ async fn test_rate_limit_error_response_format() {
                     rate_limit_middleware(req, next).await
                 }
             },
-        ));
+        ))
+        .layer(axum::Extension(ConnectInfo(SocketAddr::from((
+            [127, 0, 0, 1],
+            1234,
+        )))));
 
     // First request succeeds
     let request = Request::builder().uri("/test").body(Body::empty()).unwrap();
@@ -204,36 +212,109 @@ async fn test_rate_limit_error_response_format() {
 }
 
 #[tokio::test]
-async fn test_extract_client_ip_from_x_forwarded_for() {
+async fn test_forwarding_chain_uses_first_untrusted_hop() {
+    let peer = IpAddr::from([10, 0, 0, 2]);
     let request = Request::builder()
         .uri("/test")
-        .header("X-Forwarded-For", "192.168.1.100, 10.0.0.1")
+        .extension(ConnectInfo(SocketAddr::new(peer, 1234)))
+        .header("X-Forwarded-For", "1.2.3.4, 192.168.1.100, 10.0.0.1")
         .body(Body::empty())
         .unwrap();
 
-    let ip = extract_client_ip(&request).unwrap();
-    assert_eq!(ip, IpAddr::from([192, 168, 1, 100]));
+    let key = extract_client_key(&request, &[peer, IpAddr::from([10, 0, 0, 1])]).unwrap();
+    assert_eq!(key, ClientKey::Ip(IpAddr::from([192, 168, 1, 100])));
 }
 
 #[tokio::test]
 async fn test_extract_client_ip_from_x_real_ip() {
+    let peer = IpAddr::from([10, 0, 0, 1]);
     let request = Request::builder()
         .uri("/test")
+        .extension(ConnectInfo(SocketAddr::new(peer, 1234)))
         .header("X-Real-IP", "192.168.1.200")
         .body(Body::empty())
         .unwrap();
 
-    let ip = extract_client_ip(&request).unwrap();
-    assert_eq!(ip, IpAddr::from([192, 168, 1, 200]));
+    let key = extract_client_key(&request, &[peer]).unwrap();
+    assert_eq!(key, ClientKey::Ip(IpAddr::from([192, 168, 1, 200])));
 }
 
 #[tokio::test]
-async fn test_extract_client_ip_default() {
+async fn missing_connection_does_not_fall_back_to_localhost() {
     let request = Request::builder().uri("/test").body(Body::empty()).unwrap();
 
-    let ip = extract_client_ip(&request).unwrap();
-    // Should return default localhost IP
-    assert_eq!(ip, IpAddr::from([127, 0, 0, 1]));
+    assert!(matches!(
+        extract_client_key(&request, &[]),
+        Err(RateLimitError::MissingClientIp)
+    ));
+}
+
+#[test]
+fn tcp_clients_cannot_spoof_proxy_or_gateway_identity() {
+    let peer = SocketAddr::from(([192, 168, 1, 20], 1234));
+    let request = Request::builder()
+        .extension(ConnectInfo(peer))
+        .header("X-Forwarded-For", "1.2.3.4")
+        .header("X-Real-IP", "1.2.3.5")
+        .header("X-Trim-Userid", "1000")
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(
+        extract_client_key(&request, &[]).unwrap(),
+        ClientKey::Ip(peer.ip())
+    );
+}
+
+#[tokio::test]
+async fn gateway_users_have_separate_budgets() {
+    let limiter = RateLimiter::new(1, 60);
+    for user in [1000, 1001] {
+        let request = Request::builder()
+            .extension(GatewayTransport)
+            .header("X-Trim-Userid", user.to_string())
+            .body(Body::empty())
+            .unwrap();
+        let key = extract_client_key(&request, &[]).unwrap();
+        assert!(limiter.check_client(key.clone()).await.is_ok());
+        assert!(limiter.check_client(key).await.is_err());
+    }
+}
+
+#[tokio::test]
+async fn capacity_is_bounded_without_resetting_active_budgets() {
+    let mut limiter = RateLimiter::new(1, 60);
+    limiter.max_clients = 2;
+    let ip = IpAddr::from([192, 168, 1, 1]);
+    assert!(limiter.check_rate_limit(ip).await.is_ok());
+    assert!(
+        limiter
+            .check_rate_limit(IpAddr::from([192, 168, 1, 2]))
+            .await
+            .is_ok()
+    );
+    for last in 3..100 {
+        assert!(matches!(
+            limiter
+                .check_rate_limit(IpAddr::from([192, 168, 1, last]))
+                .await,
+            Err(RateLimitError::CapacityExceeded)
+        ));
+    }
+    assert_eq!(limiter.state.read().await.requests.len(), 2);
+    assert!(matches!(
+        limiter.check_rate_limit(ip).await,
+        Err(RateLimitError::LimitExceeded { .. })
+    ));
+}
+
+#[test]
+fn retry_after_rounds_up_to_the_actual_expiration() {
+    let limiter = RateLimiter::new(1, 60);
+    let start = Instant::now();
+    assert_eq!(
+        limiter.calculate_retry_after(&[start + Duration::from_millis(1500)], start),
+        2
+    );
 }
 
 #[tokio::test]

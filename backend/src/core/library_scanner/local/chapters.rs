@@ -20,8 +20,7 @@ pub(super) struct ChapterProcessingOptions<'a> {
     pub(super) extract_extra_chapters: bool,
     pub(super) cloud_mode: bool,
     pub(super) changed_file_paths: Option<&'a HashSet<PathBuf>>,
-    pub(super) json_chapters:
-        Option<Vec<crate::core::books::metadata_writer::AudiobookshelfChapter>>,
+    pub(super) json_chapters: Option<Vec<crate::core::books::metadata::AudiobookshelfChapter>>,
     pub(super) chapter_title_template: Option<&'a str>,
     pub(super) chapter_title_overrides: Option<&'a [String]>,
 }
@@ -80,7 +79,7 @@ impl LibraryScanner {
                 .collect();
             if let Some(chapters) = json_chapters.take() {
                 let (aligned, matched_by_title) =
-                    crate::core::books::metadata_writer::align_chapters_to_file_stems(
+                    crate::core::books::metadata::align_chapters_to_file_stems(
                         chapters,
                         &file_stems,
                     );
@@ -436,25 +435,15 @@ impl LibraryScanner {
                 (filename_str.clone(), true)
             };
 
-            let (final_title, detected_as_extra) = if let Some(ai_title) = ai_chapter_title {
-                let (_, is_extra) = self
-                    .text_cleaner
-                    .clean_chapter_title(ai_title, book.title.as_deref());
-                (ai_title.to_string(), is_extra)
-            } else if should_clean_title {
-                clean_or_preserve_chapter_title(
-                    self.text_cleaner.as_ref(),
-                    &raw_title,
-                    book.title.as_deref(),
-                    preserve_raw_chapter_titles,
-                )
-            } else {
-                let (_, is_extra) = self
-                    .text_cleaner
-                    .clean_chapter_title(&raw_title, book.title.as_deref());
-                (raw_title, is_extra)
-            };
-            let is_extra = extract_extra_chapters && detected_as_extra;
+            let (final_title, is_extra) = super::super::shared::resolve_chapter_title(
+                self.text_cleaner.as_ref(),
+                &raw_title,
+                book.title.as_deref(),
+                ai_chapter_title,
+                should_clean_title,
+                preserve_raw_chapter_titles,
+                extract_extra_chapters,
+            );
 
             // Calculate Index using counters
             let counter_idx = if is_extra {

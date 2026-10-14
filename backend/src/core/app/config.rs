@@ -502,10 +502,24 @@ pub struct SecurityConfig {
     pub api_key: String,
     pub jwt_secret: String,
     pub allowed_origins: Vec<String>,
+    #[serde(default = "rate_limit_enabled_default")]
+    pub rate_limit_enabled: bool,
     pub rate_limit_requests: usize,
     pub rate_limit_window: u64, // seconds
+    #[serde(default = "rate_limit_max_clients_default")]
+    pub rate_limit_max_clients: usize,
+    #[serde(default)]
+    pub trusted_proxies: Vec<std::net::IpAddr>,
     pub enable_hsts: bool,
     pub hsts_max_age: u64, // seconds
+}
+
+fn rate_limit_enabled_default() -> bool {
+    true
+}
+
+fn rate_limit_max_clients_default() -> usize {
+    10_000
 }
 
 impl SecurityConfig {
@@ -531,6 +545,12 @@ impl SecurityConfig {
         if self.rate_limit_window == 0 {
             return Err(ConfigError::InvalidSecurity(
                 "rate_limit_window must be greater than 0".to_string(),
+            ));
+        }
+
+        if self.rate_limit_max_clients == 0 {
+            return Err(ConfigError::InvalidSecurity(
+                "rate_limit_max_clients must be greater than 0".to_string(),
             ));
         }
 

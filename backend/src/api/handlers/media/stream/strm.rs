@@ -388,10 +388,7 @@ fn strm_resolve_error(error: reqwest::Error) -> TingError {
     if error.is_timeout() {
         TingError::Timeout("STRM redirect resolution timed out".into())
     } else {
-        TingError::NetworkError(format!(
-            "Failed to resolve STRM source: {}",
-            error.without_url()
-        ))
+        TingError::from(error).with_context("Failed to resolve STRM source")
     }
 }
 

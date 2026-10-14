@@ -1,6 +1,7 @@
 import { Loader2, MoreHorizontal, X } from "lucide-react";
 import type { ReactNode } from "react";
-import { useState } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
+import { useTranslation } from "react-i18next";
 import { invokePluginCapability } from "../../core/api/pluginCapabilities";
 import { useClientExtensions } from "../../core/hooks/useClientExtensions";
 import type {
@@ -47,10 +48,6 @@ const PluginExtensionSlot = ({
     typeof limit === "number" ? extensions.slice(0, limit) : extensions;
   const [activeExtension, setActiveExtension] =
     useState<ClientExtensionDescriptor | null>(null);
-  const [actionState, setActionState] = useState<
-    "idle" | "running" | "success" | "error"
-  >("idle");
-  const [actionMessage, setActionMessage] = useState<string>();
   const [menuOpen, setMenuOpen] = useState(false);
   const visibleActiveExtension = activeExtension
     ? visibleExtensions.find((extension) => extension.id === activeExtension.id) ||
@@ -61,52 +58,9 @@ const PluginExtensionSlot = ({
     return <>{empty}</>;
   }
 
-  const closePanel = () => {
-    setActiveExtension(null);
-    setActionState("idle");
-    setActionMessage(undefined);
-  };
-
-  const invokeAction = async (extension: ClientExtensionDescriptor) => {
-    setActiveExtension(extension);
-    setActionState("running");
-    setActionMessage(undefined);
-    try {
-      const result = await invokePluginCapability(
-        extension.pluginId,
-        extension.capability.id,
-        {
-          slot: extension.slot,
-          contexts: extension.contexts,
-          context: context || {},
-        },
-        extension.capability.id,
-        extension.clientGrant,
-      );
-      setActionState("success");
-      setActionMessage(
-        typeof result === "string"
-          ? result
-          : JSON.stringify(result ?? { ok: true }, null, 2),
-      );
-    } catch (err) {
-      setActionState("error");
-      setActionMessage(err instanceof Error ? err.message : String(err));
-    }
-  };
-
   const openExtension = (extension: ClientExtensionDescriptor) => {
     setMenuOpen(false);
-    if (
-      extension.renderMode === "web_container"
-    ) {
-      setActiveExtension(extension);
-      setActionState("idle");
-      setActionMessage(undefined);
-      return;
-    }
-
-    void invokeAction(extension);
+    setActiveExtension(extension);
   };
 
   return (
@@ -165,104 +119,90 @@ const PluginExtensionSlot = ({
       </div>
 
       {visibleActiveExtension ? (
-        <div className="fixed inset-0 z-[125] flex items-end justify-end bg-slate-950/30 p-3 backdrop-blur-sm sm:p-6">
-          <section className="flex h-[min(38rem,86vh)] w-full max-w-md flex-col overflow-hidden rounded-lg border border-slate-200 bg-white shadow-2xl dark:border-slate-700 dark:bg-slate-900">
-            <header className="flex h-14 shrink-0 items-center gap-3 border-b border-slate-200 px-4 dark:border-slate-800">
-              <div className="flex h-8 w-8 items-center justify-center rounded-md bg-primary-50 text-primary-700 dark:bg-primary-950/40 dark:text-primary-300">
-                <PluginExtensionIcon extension={visibleActiveExtension} size={17} />
-              </div>
-              <div className="min-w-0 flex-1">
-                <h2 className="truncate text-sm font-semibold text-slate-950 dark:text-white">
-                  {extensionLabel(visibleActiveExtension)}
-                </h2>
-                <p className="truncate text-xs text-slate-500 dark:text-slate-400">
-                  {visibleActiveExtension.pluginName}
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={closePanel}
-                className="flex h-9 w-9 items-center justify-center rounded-md text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-900 dark:hover:bg-slate-800 dark:hover:text-white"
-                title="Close"
-              >
-                <X size={18} />
-              </button>
-            </header>
-            <div
-              className={`flex flex-1 flex-col text-sm leading-6 text-slate-500 dark:text-slate-400 ${
-                visibleActiveExtension.renderMode === "web_container"
-                  ? "min-h-0"
-                  : "justify-center gap-4 px-6"
-              }`}
-            >
-              {visibleActiveExtension.renderMode === "web_container" ? (
-                <PluginWebContainer
-                  extension={visibleActiveExtension}
-                  context={context}
-                />
-              ) : actionState === "running" ? (
-                <div className="flex items-center justify-center gap-2 text-slate-500 dark:text-slate-400">
-                  <Loader2 size={16} className="animate-spin" />
-                  <span>Running...</span>
-                </div>
-              ) : actionMessage ? (
-                <pre
-                  className={`mx-6 max-h-72 overflow-auto rounded-md border px-3 py-2 text-left text-xs ${
-                    actionState === "error"
-                      ? "border-red-200 bg-red-50 text-red-700 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-300"
-                      : "border-slate-200 bg-slate-50 text-slate-700 dark:border-slate-800 dark:bg-slate-950 dark:text-slate-300"
-                  }`}
-                >
-                  {actionMessage}
-                </pre>
-              ) : null}
-            </div>
-          </section>
-        </div>
+        <PluginExtensionPanel extension={visibleActiveExtension} onClose={() => setActiveExtension(null)}>
+          <PluginExtensionContent extension={visibleActiveExtension} context={context} autoRun />
+        </PluginExtensionPanel>
       ) : null}
     </>
+  );
+};
+
+export const PluginExtensionPanel = ({ extension, onClose, children }: {
+  extension: ClientExtensionDescriptor;
+  onClose: () => void;
+  children: ReactNode;
+}) => {
+  const { t } = useTranslation();
+  return (
+    <div className="fixed inset-0 z-[125] flex items-end justify-end bg-slate-950/30 p-3 backdrop-blur-sm sm:p-6">
+      <section role="dialog" aria-modal="true" aria-label={extensionLabel(extension)} className="flex h-[min(42rem,88vh)] w-full max-w-md flex-col overflow-hidden rounded-lg border border-slate-200 bg-white shadow-2xl dark:border-slate-700 dark:bg-slate-900">
+        <header className="flex h-14 shrink-0 items-center gap-3 border-b border-slate-200 px-4 dark:border-slate-800">
+          <div className="flex h-8 w-8 items-center justify-center rounded-md bg-primary-50 text-primary-700 dark:bg-primary-950/40 dark:text-primary-300">
+            <PluginExtensionIcon extension={extension} size={17} />
+          </div>
+          <div className="min-w-0 flex-1">
+            <h2 className="truncate text-sm font-semibold text-slate-950 dark:text-white">{extensionLabel(extension)}</h2>
+            <p className="truncate text-xs text-slate-500 dark:text-slate-400">{extension.pluginName}</p>
+          </div>
+          <button type="button" onClick={onClose} title={t("common.close")} aria-label={t("common.close")} className="flex h-9 w-9 items-center justify-center rounded-md text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-900 dark:hover:bg-slate-800 dark:hover:text-white">
+            <X size={18} />
+          </button>
+        </header>
+        <div className="flex min-h-0 flex-1 flex-col text-sm leading-6 text-slate-500 dark:text-slate-400">{children}</div>
+      </section>
+    </div>
   );
 };
 
 const PluginActionView = ({
   extension,
   context,
+  autoRun = false,
 }: {
   extension: ClientExtensionDescriptor;
   context?: Record<string, unknown>;
+  autoRun?: boolean;
 }) => {
   const [running, setRunning] = useState(false);
   const [message, setMessage] = useState<string>();
   const [failed, setFailed] = useState(false);
 
-  const run = async () => {
+  const request = useRef<AbortController | null>(null);
+  const requestJson = JSON.stringify({ pluginId: extension.pluginId,
+    capabilityId: extension.capability.id, uiGrant: extension.clientGrant,
+    params: { slot: extension.slot, contexts: extension.contexts, context: context || {} } });
+  const run = useCallback(async () => {
+    const signal = request.current?.signal;
+    if (!signal || signal.aborted) return;
+    const args = JSON.parse(requestJson);
     setRunning(true);
     setMessage(undefined);
     setFailed(false);
     try {
-      const result = await invokePluginCapability(
-        extension.pluginId,
-        extension.capability.id,
-        {
-          slot: extension.slot,
-          contexts: extension.contexts,
-          context: context || {},
-        },
-        extension.capability.id,
-        extension.clientGrant,
-      );
-      setMessage(
-        typeof result === "string"
-          ? result
-          : JSON.stringify(result ?? { ok: true }, null, 2),
-      );
+      const result = await invokePluginCapability(args.pluginId, args.capabilityId,
+        args.params, args.capabilityId, args.uiGrant, signal);
+      if (signal.aborted) return;
+      setMessage(typeof result === "string" ? result : JSON.stringify(result ?? { ok: true }, null, 2));
     } catch (error) {
+      if (signal.aborted) return;
       setFailed(true);
       setMessage(error instanceof Error ? error.message : String(error));
     } finally {
-      setRunning(false);
+      if (!signal.aborted) setRunning(false);
     }
-  };
+  }, [requestJson]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    request.current = controller;
+    // The timer also lets StrictMode cancel its first setup before dispatch.
+    const timer = autoRun ? setTimeout(() => { void run(); }, 0) : undefined;
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+      if (request.current === controller) request.current = null;
+    };
+  }, [run, autoRun]);
 
   return (
     <div className="flex flex-1 flex-col gap-4 p-5">
@@ -293,14 +233,16 @@ const PluginActionView = ({
 export const PluginExtensionContent = ({
   extension,
   context,
+  autoRun = false,
 }: {
   extension: ClientExtensionDescriptor;
   context?: Record<string, unknown>;
+  autoRun?: boolean;
 }) => {
   if (extension.renderMode === "web_container") {
     return <PluginWebContainer extension={extension} context={context} />;
   }
-  return <PluginActionView extension={extension} context={context} />;
+  return <PluginActionView key={extension.id} extension={extension} context={context} autoRun={autoRun} />;
 };
 
 export default PluginExtensionSlot;

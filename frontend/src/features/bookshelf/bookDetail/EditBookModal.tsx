@@ -2,12 +2,7 @@ import React from 'react';
 import { FileSignature, Loader2, Save, Trash2, Upload, Wand2, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { Book } from '../../../core/types';
-
-interface RegexResult {
-  regex?: string;
-  captured_index?: string;
-  captured_title?: string;
-}
+import type { RegexGenerationResult } from '../../../core/api/books';
 
 interface Props {
   editData: Partial<Book>;
@@ -19,7 +14,7 @@ interface Props {
   genFilename: string;
   genNum: string;
   genTitle: string;
-  genResult: RegexResult | null;
+  genResult: RegexGenerationResult | null;
   chapterGroupOrder: 'asc' | 'desc';
   onChangeEditData: (next: Partial<Book>) => void;
   onChangeMetadataLock: (locked: boolean) => void;

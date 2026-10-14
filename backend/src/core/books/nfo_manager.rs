@@ -276,24 +276,7 @@ impl NfoManager {
 
         let nfo_path = dir.join("book.nfo");
 
-        // Serialize to XML
-        let xml = to_string(metadata).map_err(|e| {
-            TingError::SerializationError(format!("Failed to serialize book metadata: {}", e))
-        })?;
-
-        // Add XML declaration
-        let xml_with_declaration = format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n{}", xml);
-
-        // Write to file
-        fs::write(&nfo_path, xml_with_declaration).map_err(|e| {
-            TingError::IoError(std::io::Error::other(format!(
-                "Failed to write book NFO file {}: {}",
-                nfo_path.display(),
-                e
-            )))
-        })?;
-
-        Ok(nfo_path)
+        write_nfo_document(&nfo_path, metadata)
     }
 
     /// Write book NFO file
@@ -322,29 +305,8 @@ impl NfoManager {
     /// let nfo_path = manager.write_book_nfo(123, &metadata).unwrap();
     /// ```
     pub fn write_book_nfo(&self, book_id: i64, metadata: &BookMetadata) -> Result<PathBuf> {
-        // Ensure book directory exists
         self.ensure_book_dir(book_id)?;
-
-        let nfo_path = self.get_book_nfo_path(book_id);
-
-        // Serialize to XML
-        let xml = to_string(metadata).map_err(|e| {
-            TingError::SerializationError(format!("Failed to serialize book metadata: {}", e))
-        })?;
-
-        // Add XML declaration
-        let xml_with_declaration = format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n{}", xml);
-
-        // Write to file
-        fs::write(&nfo_path, xml_with_declaration).map_err(|e| {
-            TingError::IoError(std::io::Error::other(format!(
-                "Failed to write book NFO file {}: {}",
-                nfo_path.display(),
-                e
-            )))
-        })?;
-
-        Ok(nfo_path)
+        self.write_book_nfo_to_dir(&self.get_book_dir(book_id), metadata)
     }
 
     /// Read book NFO file
@@ -418,24 +380,7 @@ impl NfoManager {
 
         let nfo_path = self.get_chapter_nfo_path(book_id, chapter_index);
 
-        // Serialize to XML
-        let xml = to_string(metadata).map_err(|e| {
-            TingError::SerializationError(format!("Failed to serialize chapter metadata: {}", e))
-        })?;
-
-        // Add XML declaration
-        let xml_with_declaration = format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n{}", xml);
-
-        // Write to file
-        fs::write(&nfo_path, xml_with_declaration).map_err(|e| {
-            TingError::IoError(std::io::Error::other(format!(
-                "Failed to write chapter NFO file {}: {}",
-                nfo_path.display(),
-                e
-            )))
-        })?;
-
-        Ok(nfo_path)
+        write_nfo_document(&nfo_path, metadata)
     }
 
     /// Read chapter NFO file
@@ -565,6 +510,15 @@ impl NfoManager {
 
         Ok(())
     }
+}
+
+fn write_nfo_document(path: &Path, metadata: &impl Serialize) -> Result<PathBuf> {
+    let xml = to_string(metadata).map_err(|error| {
+        TingError::SerializationError(format!("Failed to serialize NFO metadata: {error}"))
+    })?;
+    let document = format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n{xml}");
+    fs::write(path, document)?;
+    Ok(path.to_path_buf())
 }
 
 #[cfg(test)]

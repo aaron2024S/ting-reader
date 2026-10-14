@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } from 'react';
 import { FastAverageColor } from 'fast-average-color';
 import apiClient from '../../core/api/client';
 import { usePlayerStore } from '../../core/stores/playerStore';
 import { getCoverUrl } from '../../core/utils/image';
-import type { Book } from '../../core/types';
+import { PlaybackSleep } from './playbackSession';
+import type { Book, Chapter } from '../../core/types';
 import type { CoverShape } from '../../core/hooks/useBookshelfCoverShape';
 
 // ─── useIsDarkMode ──────────────────────────────────────────────────────────
@@ -43,9 +44,11 @@ export const useThemeColorSync = (currentBook: Book | null | undefined) => {
 
     const coverUrl = getCoverUrl(currentBook.cover_url, currentBook.library_id, currentBook.id);
     const fac = new FastAverageColor();
+    let cancelled = false;
     fac
       .getColorAsync(coverUrl, { algorithm: 'dominant' })
       .then((extracted) => {
+        if (cancelled || usePlayerStore.getState().currentBook?.id !== currentBook.id) return;
         setThemeColor(extracted.hex);
         // 把提取出的颜色塞回 store 的 currentBook，避免本会话内重复提取。
         usePlayerStore.setState((state) => ({
@@ -54,7 +57,8 @@ export const useThemeColorSync = (currentBook: Book | null | undefined) => {
             : null,
         }));
       })
-      .catch((e) => console.warn('在播放器中从封面提取颜色失败', e));
+      .catch((e) => { if (!cancelled) console.warn('在播放器中从封面提取颜色失败', e); });
+    return () => { cancelled = true; fac.destroy(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentBook?.id, currentBook?.theme_color]);
 };
@@ -63,8 +67,7 @@ export const useThemeColorSync = (currentBook: Book | null | undefined) => {
 // 章节分组：按主线/番外划分，并切成每 100 章一组的页签数据。
 // 仅依赖 chapters 和当前 tab，是纯衍生 hook。
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type ChapterLike = any;
+type ChapterLike = Chapter;
 
 export interface ChapterGroup {
   start: number;
@@ -104,126 +107,34 @@ export const useChapterGroups = (
 // ─── useSleepTimer ──────────────────────────────────────────────────────────
 // 睡眠定时器：用 endTime 绝对时间戳驱动倒计时，避免标签页休眠导致计数失真。
 // 唯一与音频耦合的点是 onExpire（到期时通常用来 togglePlay）。
-export const useSleepTimer = (options: {
-  isPlaying: boolean;
-  onExpire: () => void;
-}) => {
-  const { isPlaying, onExpire } = options;
-  const [sleepTimer, setSleepTimer] = useState<number | null>(null);
-  const endTimeRef = useRef<number | null>(null);
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  // 记录播放被手动暂停的时刻，恢复播放时把暂停时长补回 endTime，让倒计时随播放暂停而暂停。
-  const pauseStartRef = useRef<number | null>(null);
-
-  // 按集数睡眠：剩余可播集数（含当前集），章节自然播完时递减，归零即停。
-  // 与按分钟定时互斥，开启一种会取消另一种。
-  const [sleepEpisodes, setSleepEpisodes] = useState<number | null>(null);
-  const sleepEpisodesRef = useRef<number | null>(null);
-
-  // 暂停/恢复时同步 endTime：暂停记录时刻，恢复时把暂停时长补回 endTime。
+export const useSleepTimer = (options: { isPlaying: boolean; onExpire: () => void }) => {
+  const policy = useRef(new PlaybackSleep());
+  const [snapshot, setSnapshot] = useState<{ seconds: number | null; episodes: number | null }>({ seconds: null, episodes: null });
+  const publish = useCallback(() => setSnapshot(policy.current.snapshot()), []);
+  const onExpire = useEffectEvent(options.onExpire);
+  const active = snapshot.seconds !== null;
   useEffect(() => {
-    if (endTimeRef.current === null) return;
-    if (!isPlaying) {
-      pauseStartRef.current = Date.now();
-    } else if (pauseStartRef.current !== null) {
-      endTimeRef.current += Date.now() - pauseStartRef.current;
-      pauseStartRef.current = null;
-    }
-  }, [isPlaying]);
-
-  // 倒计时：用 endTime 推导剩余秒数。
-  useEffect(() => {
-    if (sleepTimer === null || sleepTimer <= 0 || !isPlaying || !endTimeRef.current) return;
-
-    if (intervalRef.current) clearInterval(intervalRef.current);
-
-    const interval = setInterval(() => {
-      if (endTimeRef.current) {
-        const remaining = Math.max(0, Math.floor((endTimeRef.current - Date.now()) / 1000));
-        setSleepTimer(remaining);
-      }
+    policy.current.setPlaying(options.isPlaying);
+    if (!active) return;
+    const timer = setInterval(() => {
+      if (policy.current.expired()) onExpire();
+      publish();
     }, 1000);
-
-    intervalRef.current = interval;
-
-    return () => {
-      if (intervalRef.current) {
-        clearInterval(intervalRef.current);
-        intervalRef.current = null;
-      }
-    };
-    // 故意只依赖 sleepTimer 是否为 null 而不是它的具体值，否则每秒都会重建 interval。
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sleepTimer === null, isPlaying]);
-
-  // 到期处理。
-  useEffect(() => {
-    if (sleepTimer !== 0) return;
-    if (isPlaying) onExpire();
-    endTimeRef.current = null;
-    if (intervalRef.current) {
-      clearInterval(intervalRef.current);
-      intervalRef.current = null;
-    }
-    setTimeout(() => setSleepTimer(null), 0);
-    // 故意不依赖 onExpire，避免父组件每次渲染重跑此 effect。
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sleepTimer, isPlaying]);
-
-  const startSleepTimer = (durationSeconds: number) => {
-    endTimeRef.current = Date.now() + durationSeconds * 1000;
-    setSleepTimer(durationSeconds);
-  };
-
-  // 集数通过 ref 同步读写，handleSleepChapterEnded 才能保持稳定引用。
-  const setEpisodeCount = (value: number | null) => {
-    sleepEpisodesRef.current = value;
-    setSleepEpisodes(value);
-  };
-
-  const startEpisodeSleepTimer = (episodes: number) => {
-    if (episodes <= 0) return;
-    if (intervalRef.current) {
-      clearInterval(intervalRef.current);
-      intervalRef.current = null;
-    }
-    endTimeRef.current = null;
-    pauseStartRef.current = null;
-    setSleepTimer(null);
-    setEpisodeCount(episodes);
-  };
-
-  // 章节播完时调用；返回 true 表示已到设定集数，调用方应停止播放。
-  const handleSleepChapterEnded = useCallback((): boolean => {
-    const remaining = sleepEpisodesRef.current;
-    if (remaining === null) return false;
-    if (remaining <= 1) {
-      setEpisodeCount(null);
-      return true;
-    }
-    setEpisodeCount(remaining - 1);
-    return false;
-  }, []);
-
-  const cancelSleepTimer = () => {
-    setSleepTimer(null);
-    endTimeRef.current = null;
-    pauseStartRef.current = null;
-    if (intervalRef.current) {
-      clearInterval(intervalRef.current);
-      intervalRef.current = null;
-    }
-    sleepEpisodesRef.current = null;
-    setSleepEpisodes(null);
-  };
-
+    return () => clearInterval(timer);
+  }, [options.isPlaying, active, publish]);
   return {
-    sleepTimer,
-    sleepEpisodes,
-    startSleepTimer,
-    startEpisodeSleepTimer,
-    cancelSleepTimer,
-    handleSleepChapterEnded,
+    sleepTimer: snapshot.seconds,
+    sleepEpisodes: snapshot.episodes,
+    startSleepTimer: (seconds: number) => {
+      policy.current.startSeconds(seconds, options.isPlaying); publish();
+    },
+    startEpisodeSleepTimer: (episodes: number) => {
+      policy.current.startEpisodes(episodes); publish();
+    },
+    cancelSleepTimer: () => { policy.current.cancel(); publish(); },
+    handleSleepChapterEnded: () => {
+      const stop = policy.current.chapterEnded(); publish(); return stop;
+    },
   };
 };
 
@@ -441,46 +352,28 @@ export const useStuckDecodeDetector = (options: {
 // 调用方负责传 getNextStreamUrl，因为 URL 构建依赖 shouldTranscode / token 等本地状态。
 export const useNextChapterPreloader = (options: {
   autoPreload: boolean;
-  bookId: string | undefined;
+  chapters: import('../../core/types').Chapter[];
   chapterId: string | undefined;
   sourceKey: string;
   getNextStreamUrl: (chapterId: string) => string;
 }) => {
-  const { autoPreload, bookId, chapterId, sourceKey, getNextStreamUrl } = options;
+  const { autoPreload, chapters, chapterId, sourceKey, getNextStreamUrl } = options;
+  const streamUrl = useEffectEvent(getNextStreamUrl);
   useEffect(() => {
-    if (!autoPreload || !chapterId || !bookId) return;
-    const controller = new AbortController();
-    let preloadAudio: HTMLAudioElement | null = null;
-
-    apiClient.get(`/api/books/${bookId}/chapters`, { signal: controller.signal }).then(res => {
-      if (controller.signal.aborted) return;
-      const list = res.data as Array<{ id: string; title?: string; path?: string }>;
-      const currentIndex = list.findIndex((c) => c.id === chapterId);
-      if (currentIndex === -1 || currentIndex >= list.length - 1) return;
-      const next = list[currentIndex + 1];
-      const nextChapterId = next.id;
-      if (next.path?.toLowerCase().split('?')[0].endsWith('.strm')) return;
-
-      preloadAudio = new Audio();
-      preloadAudio.preload = 'metadata';
-      const nextSrc = getNextStreamUrl(nextChapterId);
-      preloadAudio.src = nextSrc;
-      preloadAudio.load();
-    }).catch(err => {
-      if (!controller.signal.aborted) console.error('预加载失败', err);
-    });
+    if (!autoPreload || !chapterId) return;
+    const index = chapters.findIndex(chapter => chapter.id === chapterId);
+    const next = index < 0 ? undefined : chapters[index + 1];
+    if (!next || next.path?.toLowerCase().split('?')[0].endsWith('.strm')) return;
+    const preloadAudio = new Audio();
+    preloadAudio.preload = 'metadata';
+    preloadAudio.src = streamUrl(next.id);
+    preloadAudio.load();
     return () => {
-      controller.abort();
-      if (preloadAudio) {
-        preloadAudio.pause();
-        preloadAudio.removeAttribute('src');
-        preloadAudio.load();
-        preloadAudio = null;
-      }
+      preloadAudio.pause();
+      preloadAudio.removeAttribute('src');
+      preloadAudio.load();
     };
-    // getNextStreamUrl 是组件内闭包，每次渲染都新建，故意不进依赖避免抖动。
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [chapterId, autoPreload, bookId, sourceKey]);
+  }, [chapterId, autoPreload, chapters, sourceKey]);
 };
 
 // ─── useProgressSync ────────────────────────────────────────────────────────
@@ -489,82 +382,34 @@ export const useNextChapterPreloader = (options: {
 // 同时暂停瞬间立即 flush 一次，避免丢最后几秒进度。
 // currentTime 用 ref 间接读，效避免每次时间变化都重建定时器。
 export const useProgressSync = (options: {
-  isPlaying: boolean;
-  bookId: string | undefined;
-  chapterId: string | undefined;
-  currentTime: number;
-  isWsConnected: boolean;
-  wsSendProgress: (
-    bookId: string,
-    chapterId: string,
-    position: number,
-    playbackStart?: number,
-  ) => void;
+  isPlaying: boolean; bookId: string | undefined; chapterId: string | undefined;
+  currentTime: number; isWsConnected: boolean;
+  wsSendProgress: (bookId: string, chapterId: string, position: number, playbackStart?: number) => void;
 }) => {
-  const { isPlaying, bookId, chapterId, currentTime, isWsConnected, wsSendProgress } = options;
-
-  const currentTimeRef = useRef(0);
-  useEffect(() => {
-    currentTimeRef.current = currentTime;
-  }, [currentTime]);
-
-  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const playbackStartSentRef = useRef(false);
-
-  useEffect(() => {
-    if (isPlaying && bookId && chapterId) {
-      const saveWs = (playbackStart?: number) => {
-        wsSendProgress(bookId, chapterId, Math.floor(currentTimeRef.current), playbackStart);
-      };
-      const saveHttp = (playbackStart?: number) => {
-        apiClient.post('/api/progress', {
-          book_id: bookId,
-          chapter_id: chapterId,
-          position: Math.floor(currentTimeRef.current),
-          ...(playbackStart !== undefined ? { playback_start: playbackStart } : {}),
-        }).catch(err => console.error('HTTP进度同步失败', err));
-      };
-
-      const start = Math.floor(currentTimeRef.current);
-      const playbackStart = playbackStartSentRef.current ? undefined : start;
-      playbackStartSentRef.current = true;
-      if (isWsConnected) {
-        saveWs(playbackStart);
-        timerRef.current = setInterval(saveWs, 2000);
-      } else {
-        saveHttp(playbackStart);
-        timerRef.current = setInterval(saveHttp, 15000);
-      }
-    } else {
-      playbackStartSentRef.current = false;
-      if (timerRef.current) {
-        clearInterval(timerRef.current);
-        timerRef.current = null;
-      }
+  const { bookId, chapterId, isWsConnected, wsSendProgress } = options;
+  const save = useCallback((position: number, playbackStart?: number, durable = false) => {
+    if (!bookId || !chapterId) return;
+    const value = Math.max(0, Math.floor(position));
+    if (isWsConnected) wsSendProgress(bookId, chapterId, value, playbackStart);
+    if (!isWsConnected || durable) {
+      void apiClient.post('/api/progress', { book_id: bookId, chapter_id: chapterId,
+        position: value, ...(playbackStart !== undefined ? { playback_start: playbackStart } : {}),
+      }).catch((error: unknown) => console.error('Failed to persist playback progress', error));
     }
-
-    return () => {
-      if (timerRef.current) {
-        clearInterval(timerRef.current);
-        timerRef.current = null;
-      }
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isPlaying, bookId, chapterId, isWsConnected]);
-
-  // 暂停瞬间 flush
-  const prevIsPlayingRef = useRef(isPlaying);
+  }, [bookId, chapterId, isWsConnected, wsSendProgress]);
+  const saveLatest = useEffectEvent((start = false) =>
+    save(options.currentTime, start ? options.currentTime : undefined));
+  const lastPlaying = useRef(false);
   useEffect(() => {
-    if (prevIsPlayingRef.current && !isPlaying && bookId && chapterId) {
-      const pos = Math.floor(currentTimeRef.current);
-      if (isWsConnected) {
-        wsSendProgress(bookId, chapterId, pos);
-      } else {
-        apiClient.post('/api/progress', { book_id: bookId, chapter_id: chapterId, position: pos })
-          .catch(err => console.error('暂停时保存进度失败', err));
-      }
+    if (!options.isPlaying || !options.bookId || !options.chapterId) {
+      if (lastPlaying.current) saveLatest();
+      lastPlaying.current = false;
+      return;
     }
-    prevIsPlayingRef.current = isPlaying;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isPlaying, isWsConnected]);
+    lastPlaying.current = true;
+    saveLatest(true);
+    const timer = setInterval(() => saveLatest(), options.isWsConnected ? 2000 : 15000);
+    return () => clearInterval(timer);
+  }, [options.isPlaying, options.bookId, options.chapterId, options.isWsConnected]);
+  return { flush: (position: number) => save(position, undefined, true) };
 };

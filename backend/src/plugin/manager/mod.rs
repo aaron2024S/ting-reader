@@ -1,10 +1,12 @@
 //! Plugin manager - core orchestration for the plugin system
 
 pub mod capabilities;
+mod compatibility;
 pub mod discovery;
 pub mod dispatch;
 pub mod event_bus;
 pub mod formats;
+mod installation;
 pub mod lifecycle;
 
 use serde::{Deserialize, Serialize};

@@ -3,6 +3,7 @@
 use crate::api::state::AppState;
 use crate::api::utils::{RequestInfo, request_info_from_headers};
 use crate::auth::jwt::{generate_token, validate_token, validate_token_with_secrets};
+use crate::auth::middleware::{bearer_token_from_headers, cookie_token_from_headers};
 use crate::auth::models::{
     LoginRequest, LoginResponse, RegisterRequest, SessionRestoreRequest, SuccessResponse,
     TokenLoginRequest, UpdateUserRequest, UserInfo,
@@ -16,7 +17,7 @@ use crate::db::repository::Repository;
 use axum::{
     Json,
     extract::{ConnectInfo, State},
-    http::{HeaderMap, StatusCode, header},
+    http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
 use std::{
@@ -83,33 +84,6 @@ fn record_login_success(
             }),
         ),
     );
-}
-
-fn bearer_token_from_headers(headers: &HeaderMap) -> Option<String> {
-    headers
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .map(str::trim)
-        .filter(|token| !token.is_empty())
-        .map(ToOwned::to_owned)
-}
-
-fn cookie_token_from_headers(headers: &HeaderMap) -> Option<String> {
-    headers
-        .get(header::COOKIE)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|cookies| {
-            cookies.split(';').find_map(|cookie| {
-                let (name, value) = cookie.trim().split_once('=')?;
-                if name == "ting_reader_token" || name == "auth_token" {
-                    Some(value.trim().to_string())
-                } else {
-                    None
-                }
-            })
-        })
-        .filter(|token| !token.is_empty())
 }
 
 async fn user_from_token(

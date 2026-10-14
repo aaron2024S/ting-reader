@@ -30,6 +30,7 @@ interface PlayerState {
   prevChapter: () => void;
   playChapter: (book: Book, chapters: Chapter[], chapter: Chapter, resumePosition?: number) => void;
   setIsPlaying: (isPlaying: boolean) => void;
+  updateBook: (book: Book) => void;
   setIsExpanded: (isExpanded: boolean) => void;
   setIsCollapsed: (isCollapsed: boolean) => void;
   setIsSeriesEditing: (isSeriesEditing: boolean) => void;
@@ -56,6 +57,8 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
       isSeriesEditing: false,
 
       setIsPlaying: (isPlaying) => set({ isPlaying }),
+      updateBook: (book) => set(state => state.currentBook?.id === book.id
+        ? { currentBook: { ...state.currentBook, ...book } } : {}),
       setIsExpanded: (isExpanded) => set({ isExpanded }),
       setIsCollapsed: (isCollapsed) => set({ isCollapsed }),
       setIsSeriesEditing: (isSeriesEditing) => set({ isSeriesEditing }),

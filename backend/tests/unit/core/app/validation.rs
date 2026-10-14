@@ -142,6 +142,99 @@ mod error {
         let err = contexted.unwrap_err();
         assert!(err.to_string().contains("Failed to read plugin metadata"));
         assert!(err.to_string().contains("file not found"));
+        assert_eq!(err.error_type(), "IoError");
+        assert!(std::error::Error::source(&err).is_some());
+    }
+
+    #[test]
+    fn context_preserves_http_classification_and_retryability() {
+        let cases = [
+            (
+                TingError::InvalidRequest("bad input".into()),
+                StatusCode::BAD_REQUEST,
+                false,
+            ),
+            (
+                TingError::AuthenticationError("expired".into()),
+                StatusCode::UNAUTHORIZED,
+                false,
+            ),
+            (
+                TingError::NotFound("book".into()),
+                StatusCode::NOT_FOUND,
+                false,
+            ),
+            (
+                TingError::Timeout("upstream".into()),
+                StatusCode::REQUEST_TIMEOUT,
+                true,
+            ),
+            (
+                TingError::DatabaseError(rusqlite::Error::InvalidQuery),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                true,
+            ),
+        ];
+        for (error, status, retryable) in cases {
+            let category = error.error_type();
+            let result: Result<()> = Err(error);
+            let error = result
+                .context("operation")
+                .with_context(|| "request".into())
+                .unwrap_err();
+            assert_eq!(error.status_code(), status);
+            assert_eq!(error.error_type(), category);
+            assert_eq!(error.is_retryable(), retryable);
+            assert!(error.to_string().contains("request: operation:"));
+        }
+    }
+
+    #[tokio::test]
+    async fn network_context_retains_source_without_credentials_or_query_tokens() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let error = reqwest::Client::new()
+            .get(format!(
+                "http://user:private-password@{address}/media?token=private-token"
+            ))
+            .timeout(std::time::Duration::from_secs(1))
+            .send()
+            .await
+            .context("WebDAV request failed")
+            .unwrap_err();
+        assert_eq!(error.error_type(), "NetworkError");
+        assert_eq!(error.status_code(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(error.is_retryable());
+        let diagnostic = error.to_string();
+        assert!(!diagnostic.contains("private-password"));
+        assert!(!diagnostic.contains("private-token"));
+        assert!(std::error::Error::source(&error).is_some());
+    }
+}
+
+mod security_config {
+    use crate::core::app::config::SecurityConfig;
+
+    #[test]
+    fn existing_configuration_gets_bounded_auth_limits_without_trusting_proxies() {
+        let mut value = serde_json::json!({
+            "enable_auth": false, "api_key": "", "jwt_secret": "",
+            "allowed_origins": ["*"], "rate_limit_requests": 100,
+            "rate_limit_window": 60, "enable_hsts": false, "hsts_max_age": 31536000,
+        });
+        let config: SecurityConfig = serde_json::from_value(value.clone()).unwrap();
+        assert!(config.rate_limit_enabled);
+        assert_eq!(config.rate_limit_max_clients, 10000);
+        assert!(config.trusted_proxies.is_empty());
+        config.validate().unwrap();
+        value["rate_limit_max_clients"] = serde_json::json!(0);
+        assert!(
+            serde_json::from_value::<SecurityConfig>(value)
+                .unwrap()
+                .validate()
+                .is_err()
+        );
     }
 }
 

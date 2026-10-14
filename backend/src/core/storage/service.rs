@@ -20,6 +20,67 @@ impl Default for StorageService {
 }
 
 impl StorageService {
+    pub(crate) fn media_url(library: &Library, path: &str) -> Result<Url> {
+        let url = if let Ok(url) = Url::parse(path) {
+            url
+        } else {
+            let mut url = Url::parse(&library.url)
+                .map_err(|error| TingError::ValidationError(error.to_string()))?;
+            let mut segments = url
+                .path_segments_mut()
+                .map_err(|_| TingError::ValidationError("Invalid WebDAV library URL".into()))?;
+            segments.pop_if_empty();
+            // Decode individual segments; an encoded slash is a filename
+            // character and must not become another directory boundary.
+            for segment in library
+                .root_path
+                .trim_matches('/')
+                .split('/')
+                .chain(path.trim_matches('/').split('/'))
+                .filter(|segment| !segment.is_empty())
+            {
+                let segment = urlencoding::decode(segment)
+                    .map_err(|error| TingError::ValidationError(error.to_string()))?;
+                if matches!(segment.as_ref(), "." | "..") {
+                    return Err(TingError::PermissionDenied(
+                        "Media path contains a directory traversal".into(),
+                    ));
+                }
+                segments.push(&segment);
+            }
+            drop(segments);
+            url
+        };
+        if !matches!(url.scheme(), "http" | "https") {
+            return Err(TingError::ValidationError(
+                "Unsupported media URL scheme".into(),
+            ));
+        }
+        if library.library_type == "webdav" {
+            webdav_book_url(library, url.as_str())
+        } else {
+            Ok(url)
+        }
+    }
+
+    pub(crate) fn authenticated_media_url(
+        library: &Library,
+        path: &str,
+        key: Option<&[u8; 32]>,
+    ) -> Result<String> {
+        let mut url = Self::media_url(library, path)?;
+        if let (Some(username), Some(password)) = (&library.username, &library.password) {
+            let password = key
+                .and_then(|key| crate::core::security::crypto::decrypt(password, key).ok())
+                .unwrap_or_else(|| password.clone());
+            url.set_username(username)
+                .map_err(|_| TingError::ValidationError("Invalid media URL username".into()))?;
+            url.set_password(Some(&password))
+                .map_err(|_| TingError::ValidationError("Invalid media URL password".into()))?;
+        }
+        Ok(url.to_string())
+    }
+
     pub(crate) fn webdav_metadata_input(
         &self,
         library: &Library,
@@ -27,31 +88,7 @@ impl StorageService {
         key: &[u8; 32],
     ) -> Result<crate::core::audio::metadata::AudioInput> {
         use base64::Engine;
-        let url = if Url::parse(file_path).is_ok() {
-            webdav_book_url(library, file_path)?
-        } else {
-            let mut url = Url::parse(&library.url)
-                .map_err(|error| TingError::ValidationError(error.to_string()))?;
-            {
-                let mut segments = url
-                    .path_segments_mut()
-                    .map_err(|_| TingError::ValidationError("Invalid WebDAV library URL".into()))?;
-                segments.pop_if_empty();
-                for segment in library
-                    .root_path
-                    .trim_matches('/')
-                    .split('/')
-                    .chain(file_path.trim_matches('/').split('/'))
-                    .filter(|part| !part.is_empty())
-                {
-                    segments.push(
-                        &urlencoding::decode(segment)
-                            .map_err(|error| TingError::ValidationError(error.to_string()))?,
-                    );
-                }
-            }
-            webdav_book_url(library, url.as_str())?
-        };
+        let url = Self::media_url(library, file_path)?;
         let authorization = library.username.as_ref().map(|username| {
             let password = library.password.as_deref().unwrap_or_default();
             let password = crate::core::security::crypto::decrypt(password, key)
@@ -103,60 +140,7 @@ impl StorageService {
         range: Option<(u64, u64)>,
         decryption_key: &[u8; 32],
     ) -> Result<(Box<dyn AsyncRead + Send + Unpin>, u64)> {
-        // Handle case where relative_path is actually an absolute URL (legacy/bug fix)
-        // If it starts with the library URL, we strip it to get the relative path
-        // OR we just use it as is if it matches the base.
-
-        let base_url =
-            Url::parse(&library.url).map_err(|e| TingError::ValidationError(e.to_string()))?;
-        let mut url = base_url.clone();
-
-        if relative_path.starts_with("http://") || relative_path.starts_with("https://") {
-            // It's a full URL. Check if it belongs to this library.
-            // We blindly trust it for now but ideally should verify host.
-            // If it's a full URL, we parse it directly.
-            url =
-                Url::parse(relative_path).map_err(|e| TingError::ValidationError(e.to_string()))?;
-        } else {
-            // Construct from components
-            let root = library.root_path.as_str();
-            let root = if root.is_empty() { "/" } else { root };
-
-            // Ensure paths are joined correctly without double slashes
-            let root_trimmed = root.trim_matches('/');
-            let rel_trimmed = relative_path.trim_matches('/');
-            let full_path_str = if root_trimmed.is_empty() {
-                rel_trimmed.to_string()
-            } else {
-                format!("{}/{}", root_trimmed, rel_trimmed)
-            };
-
-            // Mutate the URL to append path segments
-            // IMPORTANT: We must NOT manually encode segments if we use push().
-            // Url::push() automatically percent-encodes the segment.
-            // If `full_path_str` is already encoded (e.g. "foo%20bar"), push() will make it "foo%2520bar".
-            // So we must decode first if it is encoded.
-            // BUT, detecting if it is encoded is hard.
-            // Assumption: `relative_path` coming from internal logic (like scanner) might be encoded or not.
-            // If it comes from DB `path` column, and we store decoded path in DB, we are good.
-            // If we store encoded path in DB (current state), we need to decode here.
-
-            // Try to decode percent-encoded string
-            let decoded_path = urlencoding::decode(&full_path_str)
-                .map_err(|e| TingError::ValidationError(e.to_string()))?;
-
-            {
-                let mut segments = url
-                    .path_segments_mut()
-                    .map_err(|_| TingError::ValidationError("Invalid URL".to_string()))?;
-                for segment in decoded_path.split('/') {
-                    let s: &str = segment;
-                    if !s.is_empty() {
-                        segments.push(s);
-                    }
-                }
-            }
-        }
+        let url = Self::media_url(library, relative_path)?;
 
         let mut req = self.client.get(url.clone());
 

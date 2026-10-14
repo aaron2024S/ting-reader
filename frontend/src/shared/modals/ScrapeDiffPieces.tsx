@@ -18,10 +18,12 @@ import type {
 import { getCoverUrl } from '../../core/utils/image';
 import {
   FIELD_DEFINITIONS,
+  FIELD_ORDER,
   fieldValueForEditor,
   formatCurrentValue,
   formatFieldValue,
   getDraftBookFieldValue,
+  getBookFieldValue,
   getFieldLabel,
   getItemFieldValue,
   getResultExternalId,
@@ -545,7 +547,8 @@ export const ResultsStep: React.FC<ResultsStepProps> = ({
 // Step 3: review, edit, clear, or remove selected fields.
 
 interface ReviewStepProps {
-  selectedFieldList: SelectedField[];
+  book: Book;
+  selectedFields: Record<string, SelectedField>;
   selectedCount: number;
   coverAspectClass: string;
   onClearSelectedFields: () => void;
@@ -554,7 +557,8 @@ interface ReviewStepProps {
 }
 
 export const ReviewStep: React.FC<ReviewStepProps> = ({
-  selectedFieldList,
+  book,
+  selectedFields,
   selectedCount,
   coverAspectClass,
   onClearSelectedFields,
@@ -571,6 +575,7 @@ export const ReviewStep: React.FC<ReviewStepProps> = ({
           <div>
             <h3 className="text-lg font-bold text-slate-950 dark:text-white">{t('scrapeDiff.reviewTitle')}</h3>
             <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">{t('scrapeDiff.fieldCount', { count: selectedCount })}</p>
+            <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">{t('scrapeDiff.reviewHint')}</p>
           </div>
           {selectedCount > 0 ? (
             <button
@@ -584,46 +589,46 @@ export const ReviewStep: React.FC<ReviewStepProps> = ({
         </div>
       </section>
 
-      {selectedFieldList.length === 0 ? (
-        <div className="flex h-72 items-center justify-center rounded-xl border border-dashed border-slate-200 bg-white text-sm font-bold text-slate-400 dark:border-slate-800 dark:bg-slate-900">
-          {t('scrapeDiff.noSelectedFields')}
-        </div>
-      ) : (
-        selectedFieldList.map((selection) => {
-          const definition = FIELD_DEFINITIONS[selection.key];
-          const editorValue = fieldValueForEditor(selection.value);
-          const isLongText = selection.key === 'description' || selection.key === 'tags';
-          const isBooleanField = selection.key === 'explicit' || selection.key === 'abridged';
+      {FIELD_ORDER.map((key) => {
+          const selection = selectedFields[key];
+          const value = selection?.value ?? getBookFieldValue(book, key);
+          const definition = FIELD_DEFINITIONS[key];
+          const editorValue = fieldValueForEditor(value);
+          const isLongText = key === 'description' || key === 'tags';
+          const isBooleanField = key === 'explicit' || key === 'abridged';
 
           return (
-            <section key={selection.key} className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900">
+            <section key={key} className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900">
               <div className="mb-3 flex items-start justify-between gap-3">
                 <div>
                   <div className="flex items-center gap-2 font-bold text-slate-950 dark:text-white">
                     <span className="text-slate-400">{definition.icon}</span>
-                    {selection.label || getFieldLabel(selection.key, t)}
+                    {selection?.label || getFieldLabel(key, t)}
                   </div>
                   <div className="mt-1 text-xs text-slate-400">
-                    {selection.sourceName} · {selection.resultTitle}
+                    {selection
+                      ? [selection.sourceName, selection.resultTitle].filter(Boolean).join(' · ')
+                      : t('scrapeDiff.unchanged')}
                   </div>
                 </div>
-                <button
-                  onClick={() => onRemoveSelectedField(selection.key)}
+                {selection && <button
+                  onClick={() => onRemoveSelectedField(key)}
+                  aria-label={t('scrapeDiff.resetField', { field: getFieldLabel(key, t) })}
                   className="rounded-lg p-2 text-slate-400 transition-colors hover:bg-red-50 hover:text-red-500 dark:hover:bg-red-900/20"
                 >
                   <Trash2 size={16} />
-                </button>
+                </button>}
               </div>
 
               {definition.cover ? (
                 <div className="grid grid-cols-1 gap-4 md:grid-cols-[10rem_1fr]">
-                  <CoverFrame value={selection.value} alt={t('scrapeDiff.pendingCover')} className={`${coverAspectClass} w-40 max-w-full`} />
+                  <CoverFrame value={value} book={book} alt={t('scrapeDiff.pendingCover')} className={`${coverAspectClass} w-40 max-w-full`} />
                   <div>
                     <label className="mb-1.5 block text-xs font-bold text-primary-500">{t('scrapeDiff.coverUrl')}</label>
                     <input
                       type="url"
                       value={editorValue}
-                      onChange={(event) => onUpdateSelectedFieldValue(selection.key, event.target.value)}
+                      onChange={(event) => onUpdateSelectedFieldValue(key, event.target.value)}
                       placeholder="https://example.com/cover.jpg"
                       className="w-full rounded-xl border border-slate-200 bg-primary-50 px-3 py-3 text-sm font-medium text-slate-950 outline-none transition focus:ring-2 focus:ring-primary-500 dark:border-slate-800 dark:bg-primary-950/25 dark:text-white"
                     />
@@ -632,29 +637,30 @@ export const ReviewStep: React.FC<ReviewStepProps> = ({
               ) : (
                 <div>
                   <label className="mb-1.5 block text-xs font-bold text-primary-500">
-                    {selection.key === 'tags' ? t('scrapeDiff.appliedTagsValue') : t('scrapeDiff.appliedValue')}
+                    {key === 'tags' ? t('scrapeDiff.appliedTagsValue') : t('scrapeDiff.appliedValue')}
                   </label>
                   {isBooleanField ? (
                     <select
-                      value={String(Boolean(selection.value))}
-                      onChange={(event) => onUpdateSelectedFieldValue(selection.key, event.target.value)}
+                      value={value == null ? '' : String(Boolean(value))}
+                      onChange={(event) => onUpdateSelectedFieldValue(key, event.target.value)}
                       className="w-full rounded-xl border border-slate-200 bg-primary-50 px-3 py-3 text-sm font-medium text-slate-950 outline-none transition focus:ring-2 focus:ring-primary-500 dark:border-slate-800 dark:bg-primary-950/25 dark:text-white"
                     >
+                      <option value="" disabled>{t('scrapeDiff.unknown')}</option>
                       <option value="true">{t('scrapeDiff.yes')}</option>
                       <option value="false">{t('scrapeDiff.no')}</option>
                     </select>
                   ) : isLongText ? (
                     <textarea
                       value={editorValue}
-                      onChange={(event) => onUpdateSelectedFieldValue(selection.key, event.target.value)}
-                      rows={selection.key === 'description' ? 6 : 3}
+                      onChange={(event) => onUpdateSelectedFieldValue(key, event.target.value)}
+                      rows={key === 'description' ? 6 : 3}
                       className="w-full resize-y rounded-xl border border-slate-200 bg-primary-50 px-3 py-3 text-sm font-medium leading-relaxed text-slate-950 outline-none transition focus:ring-2 focus:ring-primary-500 dark:border-slate-800 dark:bg-primary-950/25 dark:text-white"
                     />
                   ) : (
                     <input
-                      type={selection.key === 'year' ? 'number' : 'text'}
+                      type={key === 'year' || key === 'duration' ? 'number' : 'text'}
                       value={editorValue}
-                      onChange={(event) => onUpdateSelectedFieldValue(selection.key, event.target.value)}
+                      onChange={(event) => onUpdateSelectedFieldValue(key, event.target.value)}
                       className="w-full rounded-xl border border-slate-200 bg-primary-50 px-3 py-3 text-sm font-medium text-slate-950 outline-none transition focus:ring-2 focus:ring-primary-500 dark:border-slate-800 dark:bg-primary-950/25 dark:text-white"
                     />
                   )}
@@ -662,8 +668,7 @@ export const ReviewStep: React.FC<ReviewStepProps> = ({
               )}
             </section>
           );
-        })
-      )}
+        })}
     </div>
   </div>
   );

@@ -26,7 +26,7 @@ fn cloud_library() -> crate::db::models::Library {
 #[test]
 fn cloud_mode_disables_all_audio_probes_independently_of_cover_and_write_settings() {
     let mut library = cloud_library();
-    assert!(super::metadata::audio_metadata_enabled(&library));
+    assert!(super::extraction::audio_metadata_enabled(&library));
     for cloud_mode in [true, false] {
         let config = crate::db::models::ScraperConfig {
             cloud_mode,
@@ -36,7 +36,7 @@ fn cloud_mode_disables_all_audio_probes_independently_of_cover_and_write_setting
         };
         library.scraper_config = Some(serde_json::to_string(&config).unwrap());
         assert_eq!(
-            super::metadata::audio_metadata_enabled(&library),
+            super::extraction::audio_metadata_enabled(&library),
             !cloud_mode
         );
         assert!(library.can_write_metadata_files());

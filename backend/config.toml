@@ -36,8 +36,11 @@ max_backups = 5
 enable_auth = false
 api_key = ""
 allowed_origins = ["*"]
+rate_limit_enabled = true  # Authentication endpoints only; media and static assets are excluded
 rate_limit_requests = 100
 rate_limit_window = 60  # seconds
+rate_limit_max_clients = 10000  # Bound the number of tracked clients
+trusted_proxies = []  # Exact proxy IPs allowed to supply forwarding headers; e.g. ["127.0.0.1"]
 enable_hsts = false  # Enable HTTPS Strict Transport Security (set to true in production with HTTPS)
 hsts_max_age = 31536000  # 1 year in seconds
 

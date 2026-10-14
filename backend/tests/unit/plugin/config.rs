@@ -5,6 +5,49 @@ fn test_encryption_key() -> [u8; 32] {
     [0u8; 32]
 }
 
+#[test]
+fn plugin_and_core_ciphertexts_are_cross_compatible() {
+    let key = test_encryption_key();
+    let plaintext = "配置密码 密钥";
+    let plugin = encryption::encrypt_value(&key, plaintext).unwrap();
+    let core = crate::core::security::crypto::encrypt(plaintext, &key).unwrap();
+    assert_eq!(
+        crate::core::security::crypto::decrypt(&plugin, &key).unwrap(),
+        plaintext
+    );
+    assert_eq!(encryption::decrypt_value(&key, &core).unwrap(), plaintext);
+    assert!(encryption::decrypt_value(&[1; 32], &core).is_err());
+}
+
+#[test]
+fn upgrade_migration_preserves_known_secrets_and_defaults_but_drops_removed_fields() {
+    let (manager, directory) = test_config_manager();
+    let schema = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "password": {"type": "string", "format": "password"},
+            "enabled": {"type": "boolean", "default": true},
+        },
+        "additionalProperties": false,
+    });
+    let previous = serde_json::json!({"password": "old-secret", "removed": "unused"});
+    manager
+        .migrate_config("new@2".into(), "New".into(), &schema, &previous)
+        .unwrap();
+    assert_eq!(
+        manager.get_config(&"new@2".into()).unwrap(),
+        serde_json::json!({"password": "old-secret", "enabled": true})
+    );
+    let bytes = std::fs::read_to_string(directory.path().join("new@2.json")).unwrap();
+    assert!(!bytes.contains("old-secret"));
+    let incompatible = serde_json::json!({"password": false});
+    assert!(
+        manager
+            .migrate_config("bad@2".into(), "Bad".into(), &schema, &incompatible)
+            .is_err()
+    );
+}
+
 fn test_config_manager() -> (PluginConfigManager, TempDir) {
     let temp_dir = TempDir::new().unwrap();
     let manager =

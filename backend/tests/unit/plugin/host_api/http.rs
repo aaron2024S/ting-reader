@@ -47,15 +47,22 @@ fn http_urls_are_redacted_before_logging() {
 #[tokio::test]
 async fn http_target_validation_allows_private_addresses_with_permission() {
     let allowed_domains = vec!["*".to_string()];
-    for raw_url in [
-        "http://127.0.0.1/private",
-        "http://169.254.169.254/latest/meta-data",
-        "http://[::1]/private",
+    for (raw_url, expected_address) in [
+        ("http://127.0.0.1/private", "127.0.0.1:80"),
+        (
+            "http://169.254.169.254/latest/meta-data",
+            "169.254.169.254:80",
+        ),
+        ("http://[::1]/private", "[::1]:80"),
+        ("https://[fd00::1]:8443/private", "[fd00::1]:8443"),
     ] {
-        assert!(
-            validate_http_target(&allowed_domains, &Url::parse(raw_url).unwrap())
-                .await
-                .is_ok()
+        let resolved = validate_http_target(&allowed_domains, &Url::parse(raw_url).unwrap())
+            .await
+            .unwrap_or_else(|error| panic!("{raw_url}: {error}"));
+        assert_eq!(
+            resolved,
+            vec![expected_address.parse::<SocketAddr>().unwrap()],
+            "{raw_url}"
         );
     }
 

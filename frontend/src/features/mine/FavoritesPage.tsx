@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import apiClient from '../../core/api/client';
+import { getBookshelfGridClass, useBookshelfDisplaySettings } from '../../core/hooks/useBookshelfCoverShape';
 import type { Book } from '../../core/types';
 import BookCard from '../../shared/cards/BookCard';
 import { Heart } from 'lucide-react';
@@ -14,8 +15,7 @@ const FavoritesPage: React.FC = () => {
   const currentChapter = usePlayerStore((state) => state.currentChapter);
   const [books, setBooks] = useState<Book[]>([]);
   const [loading, setLoading] = useState(true);
-  const [coverShape, setCoverShape] = useState<'rect' | 'square'>('square');
-  const [iconSize, setIconSize] = useState<'small' | 'medium' | 'large'>('medium');
+  const { coverShape, iconSize } = useBookshelfDisplaySettings();
 
   useEffect(() => {
     const fetchFavorites = async () => {
@@ -31,34 +31,7 @@ const FavoritesPage: React.FC = () => {
     fetchFavorites();
   }, []);
 
-  useEffect(() => {
-    const loadSettings = async () => {
-      try {
-        const settingsRes = await apiClient.get('/api/settings');
-        const settings = settingsRes.data.settings_json || {};
-        if (settings.bookshelf_cover_shape) {
-          setCoverShape(settings.bookshelf_cover_shape);
-        }
-        if (settings.bookshelf_icon_size) {
-          setIconSize(settings.bookshelf_icon_size);
-        }
-      } catch (err) {
-        console.error('加载设置失败', err);
-      }
-    };
-    loadSettings();
-  }, []);
 
-  const getGridCols = () => {
-    switch (iconSize) {
-      case 'small':
-        return 'grid-cols-4 sm:grid-cols-6 md:grid-cols-7 lg:grid-cols-8 xl:grid-cols-8 2xl:grid-cols-10 gap-x-3 gap-y-7';
-      case 'large':
-        return 'grid-cols-2 sm:grid-cols-4 md:grid-cols-4 lg:grid-cols-4 xl:grid-cols-4 2xl:grid-cols-6 gap-x-6 gap-y-10';
-      default: // medium
-        return 'grid-cols-3 sm:grid-cols-5 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-6 2xl:grid-cols-7 gap-x-5 gap-y-9';
-    }
-  };
 
   if (loading) {
     return (
@@ -80,7 +53,7 @@ const FavoritesPage: React.FC = () => {
         </div>
 
       {books.length > 0 ? (
-        <div className={`grid ${getGridCols()}`}>
+        <div className={`grid ${getBookshelfGridClass(iconSize)}`}>
           {books.map((book) => (
             <BookCard key={book.id} book={book} coverShape={coverShape} />
           ))}

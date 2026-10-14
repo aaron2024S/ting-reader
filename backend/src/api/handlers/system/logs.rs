@@ -1,15 +1,16 @@
 use crate::api::state::AppState;
 use crate::core::app::error::{Result, TingError};
-use crate::core::app::logging::LogEntry;
+use crate::core::app::logging::{
+    LogEntry, LogQueryFilter, normalized_log_filter as normalized_filter,
+    normalized_log_pagination as normalized_pagination, read_log_file as parse_log_file,
+};
 use axum::{
     Json,
     extract::{Query, State},
     response::IntoResponse,
 };
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use std::fs::File;
-use std::io::{BufRead, BufReader};
 use std::path::Path as StdPath;
 
 #[derive(Debug, Deserialize)]
@@ -32,47 +33,28 @@ fn default_page_size() -> usize {
     50
 }
 
-const MAX_LOG_PAGE_SIZE: usize = 500;
-
-fn normalized_pagination(page: usize, page_size: usize) -> (usize, usize) {
-    (page.max(1), page_size.clamp(1, MAX_LOG_PAGE_SIZE))
-}
-
 #[derive(Debug, Clone)]
 struct LogFilters {
-    level: Option<String>,
+    common: LogQueryFilter,
     module: Option<String>,
-    query: Option<String>,
-    since: Option<DateTime<Utc>>,
-    until: Option<DateTime<Utc>>,
 }
 
 impl LogFilters {
     fn from_query(query: &LogsQuery) -> Result<Self> {
-        let since = parse_time_filter("since", query.since.as_deref())?;
-        let until = parse_time_filter("until", query.until.as_deref())?;
-        if since.zip(until).is_some_and(|(since, until)| since > until) {
-            return Err(TingError::InvalidRequest(
-                "since must not be later than until".to_string(),
-            ));
-        }
-
+        let common = LogQueryFilter::new(
+            query.level.as_deref(),
+            query.q.as_deref(),
+            query.since.as_deref(),
+            query.until.as_deref(),
+        )?;
         Ok(Self {
-            level: normalized_filter(query.level.as_deref()),
+            common,
             module: normalized_filter(query.module.as_deref()),
-            query: normalized_filter(query.q.as_deref()).map(|value| value.to_lowercase()),
-            since,
-            until,
         })
     }
 
     fn matches(&self, log: &LogEntry) -> bool {
-        self.level
-            .as_ref()
-            .is_none_or(|level| log.level.eq_ignore_ascii_case(level))
-            && self.module_matches(log)
-            && self.query_matches(log)
-            && self.time_matches(log)
+        self.common.matches(log) && self.module_matches(log)
     }
 
     fn module_matches(&self, log: &LogEntry) -> bool {
@@ -94,54 +76,6 @@ impl LogFilters {
             }
         }
     }
-
-    fn query_matches(&self, log: &LogEntry) -> bool {
-        let Some(query) = self.query.as_deref() else {
-            return true;
-        };
-        let fields = log
-            .fields
-            .as_ref()
-            .map(serde_json::Value::to_string)
-            .unwrap_or_default();
-        [
-            log.message.as_str(),
-            log.raw_message.as_deref().unwrap_or_default(),
-            log.message_key.as_deref().unwrap_or_default(),
-            log.module.as_str(),
-            fields.as_str(),
-        ]
-        .iter()
-        .any(|value| value.to_lowercase().contains(query))
-    }
-
-    fn time_matches(&self, log: &LogEntry) -> bool {
-        if self.since.is_none() && self.until.is_none() {
-            return true;
-        }
-        let Ok(timestamp) = DateTime::parse_from_rfc3339(&log.timestamp) else {
-            return false;
-        };
-        let timestamp = timestamp.with_timezone(&Utc);
-        self.since.is_none_or(|since| timestamp >= since)
-            && self.until.is_none_or(|until| timestamp <= until)
-    }
-}
-
-fn normalized_filter(value: Option<&str>) -> Option<String> {
-    value
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
-}
-
-fn parse_time_filter(name: &str, value: Option<&str>) -> Result<Option<DateTime<Utc>>> {
-    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
-        return Ok(None);
-    };
-    DateTime::parse_from_rfc3339(value)
-        .map(|timestamp| Some(timestamp.with_timezone(&Utc)))
-        .map_err(|_| TingError::InvalidRequest(format!("{} must be an RFC 3339 timestamp", name)))
 }
 
 #[derive(Debug, Serialize)]
@@ -150,90 +84,6 @@ pub struct LogsResponse {
     pub total: usize,
     pub page: usize,
     pub page_size: usize,
-}
-
-fn parse_message_params(fields: &serde_json::Value) -> Option<serde_json::Value> {
-    let value = fields.get("message_params")?;
-    if value.is_object() {
-        return Some(value.clone());
-    }
-    value
-        .as_str()
-        .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())
-        .filter(|parsed| parsed.is_object())
-}
-
-fn parse_log_file(path: &StdPath, logs: &mut Vec<LogEntry>) {
-    let file = match File::open(path) {
-        Ok(f) => f,
-        Err(_) => return,
-    };
-    let reader = BufReader::new(file);
-
-    for line in reader.lines().map_while(std::result::Result::ok) {
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&line) {
-            let timestamp = json
-                .get("timestamp")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let level = json
-                .get("level")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let module = json
-                .get("target")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-
-            let (message, raw_message, message_key, message_params) =
-                if let Some(fields) = json.get("fields") {
-                    let raw_message = fields.get("message").and_then(|v| v.as_str()).unwrap_or("");
-                    let message_key = fields
-                        .get("message_key")
-                        .and_then(|v| v.as_str())
-                        .map(ToOwned::to_owned);
-                    let message_params = parse_message_params(fields);
-                    (
-                        raw_message.to_string(),
-                        Some(raw_message.to_string()).filter(|value| !value.is_empty()),
-                        message_key,
-                        message_params,
-                    )
-                } else {
-                    (String::new(), None, None, None)
-                };
-            let fields = json.get("fields").and_then(|value| {
-                value.as_object().and_then(|fields| {
-                    let mut map = fields.clone();
-                    map.remove("message");
-                    map.remove("message_key");
-                    map.remove("message_params");
-                    if map.is_empty() {
-                        None
-                    } else {
-                        Some(serde_json::Value::Object(map))
-                    }
-                })
-            });
-
-            logs.push(LogEntry {
-                timestamp,
-                level,
-                module,
-                message,
-                raw_message,
-                message_key,
-                message_params,
-                fields,
-                task_id: None,
-                task_status: None,
-                task_type: None,
-            });
-        }
-    }
 }
 
 fn read_api_logs(data_dir: &StdPath) -> Vec<LogEntry> {
@@ -261,11 +111,7 @@ pub async fn get_system_logs(
     user: crate::auth::middleware::AuthUser,
     Query(query): Query<LogsQuery>,
 ) -> Result<impl IntoResponse> {
-    if user.role != "admin" {
-        return Err(TingError::PermissionDenied(
-            "Admin access required".to_string(),
-        ));
-    }
+    crate::api::require_admin(&user)?;
 
     let config = state.config.read().await;
     let data_dir = config.storage.data_dir.clone();
@@ -399,11 +245,7 @@ pub async fn export_system_logs(
     user: crate::auth::middleware::AuthUser,
     Query(query): Query<LogsQuery>,
 ) -> Result<impl IntoResponse> {
-    if user.role != "admin" {
-        return Err(TingError::PermissionDenied(
-            "Admin access required".to_string(),
-        ));
-    }
+    crate::api::require_admin(&user)?;
 
     let config = state.config.read().await;
     let data_dir = config.storage.data_dir.clone();
@@ -470,11 +312,7 @@ pub async fn clear_system_logs(
     State(state): State<AppState>,
     user: crate::auth::middleware::AuthUser,
 ) -> Result<impl IntoResponse> {
-    if user.role != "admin" {
-        return Err(TingError::PermissionDenied(
-            "Admin access required".to_string(),
-        ));
-    }
+    crate::api::require_admin(&user)?;
 
     let config = state.config.read().await;
     let data_dir = config.storage.data_dir.clone();

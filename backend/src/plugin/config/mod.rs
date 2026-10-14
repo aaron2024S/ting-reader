@@ -48,6 +48,28 @@ pub struct PluginConfigManager {
 pub const SECRET_UNCHANGED_PLACEHOLDER: &str = "__TING_READER_SECRET_UNCHANGED__";
 
 impl PluginConfigManager {
+    pub(crate) fn migrate_config(
+        &self,
+        plugin_id: PluginId,
+        plugin_name: String,
+        schema: &Value,
+        previous: &Value,
+    ) -> Result<()> {
+        let mut merged = schema_defaults(schema);
+        if let (Some(merged), Some(previous), Some(properties)) = (
+            merged.as_object_mut(),
+            previous.as_object(),
+            schema.get("properties").and_then(Value::as_object),
+        ) {
+            for (key, value) in previous {
+                if properties.contains_key(key) {
+                    merged.insert(key.clone(), value.clone());
+                }
+            }
+        }
+        self.initialize_config(plugin_id, plugin_name, Some(schema.clone()), merged)
+    }
+
     pub fn new(config_dir: PathBuf, encryption_key: [u8; 32]) -> Result<Self> {
         std::fs::create_dir_all(&config_dir).map_err(|e| {
             TingError::ConfigError(format!("Failed to create config directory: {}", e))

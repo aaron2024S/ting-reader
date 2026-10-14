@@ -1,30 +1,10 @@
-use super::super::shared::{
-    apply_chapter_title_template, chapter_title_template_preserves_raw,
-    clean_or_preserve_chapter_title,
-};
 use super::super::{LibraryScanner, MetadataSource, ScanStatus};
+use super::chapters::WebDavChapterContext;
 use crate::core::app::error::Result;
 use crate::db::repository::Repository;
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
-use tracing::{info, warn};
+use tracing::warn;
 use uuid::Uuid;
-
-fn configured_metadata_rank(config: &crate::db::models::ScraperConfig, source: &str) -> usize {
-    let default_priority = ["local_metadata", "audio_metadata", "scraper"];
-    if config.metadata_priority.is_empty() {
-        default_priority
-            .iter()
-            .position(|candidate| *candidate == source)
-            .unwrap_or(usize::MAX - 1)
-    } else {
-        config
-            .metadata_priority
-            .iter()
-            .position(|candidate| candidate == source)
-            .unwrap_or(usize::MAX - 1)
-    }
-}
 
 fn choose_metadata_value<T>(
     local: Option<T>,
@@ -96,7 +76,7 @@ impl LibraryScanner {
 
         // Prepare temp directory for WebDAV book metadata and cover
         // Structure: temp/{book_hash}/
-        let temp_book_dir = crate::core::books::metadata_writer::remote_metadata_dir(&path)?;
+        let temp_book_dir = crate::core::books::metadata::remote_metadata_dir(&path)?;
         if !temp_book_dir.exists() {
             std::fs::create_dir_all(&temp_book_dir).ok();
         }
@@ -218,7 +198,7 @@ impl LibraryScanner {
                     if manual_corrected && temp_path.is_file() {
                         continue;
                     }
-                    if let Err(error) = crate::core::books::webdav_metadata::cache_remote_file(
+                    if let Err(error) = crate::core::books::metadata::cache_remote_file(
                         storage,
                         library,
                         meta_url,
@@ -235,74 +215,37 @@ impl LibraryScanner {
         }
 
         // Read metadata.json if downloaded
-        let mut json_chapters: Option<
-            Vec<crate::core::books::metadata_writer::AudiobookshelfChapter>,
-        > = None;
+        let mut json_chapters: Option<Vec<crate::core::books::metadata::AudiobookshelfChapter>> =
+            None;
         if has_metadata_json
             && let Ok(Some(json_meta)) =
-                crate::core::books::metadata_writer::read_metadata_json(&temp_book_dir)
+                crate::core::books::metadata::read_metadata_json(&temp_book_dir)
         {
-            if let Some(t) = json_meta.title
-                && !t.trim().is_empty()
-            {
-                local_album = Some(t);
-            }
-            if !json_meta.authors.is_empty() {
-                local_author = Some(json_meta.authors[0].clone());
-            }
-            if !json_meta.narrators.is_empty() {
-                local_narrator = Some(json_meta.narrators[0].clone());
-            }
-            if !json_meta.series.is_empty() {
-                json_series = json_meta.series;
-            }
-            if !json_meta.tags.is_empty() {
-                json_tags = json_meta.tags;
-            }
-            if !json_meta.genres.is_empty() {
-                local_genre = Some(json_meta.genres.join(","));
-            }
-            local_description = json_meta.description;
-
-            // Store chapters for later use
-            if !json_meta.chapters.is_empty() {
-                json_chapters = Some(json_meta.chapters);
-            }
-
-            published_year = json_meta.published_year;
-            local_cover_url = ["cover", "coverUrl", "cover_url"].iter().find_map(|field| {
-                json_meta
-                    .extra
-                    .get(*field)
-                    .and_then(|value| value.as_str())
-                    .filter(|value| !value.is_empty())
-                    .map(ToOwned::to_owned)
-            });
+            let metadata = crate::core::books::metadata::BookMetadataFields::from(json_meta);
+            local_album = metadata.title.filter(|title| !title.trim().is_empty());
+            local_author = metadata.author;
+            local_narrator = metadata.narrator;
+            json_series = metadata.json_series;
+            json_tags = metadata.json_tags;
+            local_genre = metadata.genre;
+            local_description = metadata.description;
+            json_chapters = metadata.json_chapters;
+            published_year = metadata.published_year;
+            local_cover_url = metadata.cover_url;
         }
 
-        // Read book.nfo if downloaded (merge, lower priority than json usually, but let's check)
-        // If metadata.json was present, we prefer it.
-        // If not, we check nfo.
-        let nfo_path = temp_book_dir.join("book.nfo");
-        if has_nfo && let Ok(nfo_meta) = self.nfo_manager.read_book_nfo(&nfo_path) {
-            if local_album.is_none() && !nfo_meta.title.is_empty() {
-                local_album = Some(nfo_meta.title);
-            }
-            if local_author.is_none() && nfo_meta.author.is_some() {
-                local_author = nfo_meta.author;
-            }
-            if local_narrator.is_none() && nfo_meta.narrator.is_some() {
-                local_narrator = nfo_meta.narrator;
-            }
-            if local_cover_url.is_none() && nfo_meta.cover_url.is_some() {
-                local_cover_url = nfo_meta.cover_url;
-            }
-            if local_description.is_none() {
-                local_description = nfo_meta.intro;
-            }
-            if local_genre.is_none() && !nfo_meta.genre.items.is_empty() {
-                local_genre = Some(nfo_meta.genre.items.join(","));
-            }
+        if has_nfo
+            && let Ok(nfo) = self
+                .nfo_manager
+                .read_book_nfo(&temp_book_dir.join("book.nfo"))
+        {
+            let metadata = crate::core::books::metadata::BookMetadataFields::from(nfo);
+            local_album = local_album.or(metadata.title);
+            local_author = local_author.or(metadata.author);
+            local_narrator = local_narrator.or(metadata.narrator);
+            local_cover_url = local_cover_url.or(metadata.cover_url);
+            local_description = local_description.or(metadata.description);
+            local_genre = local_genre.or(metadata.genre.filter(|value| !value.is_empty()));
         }
 
         // Also check if there's a local cover image directly in the webdav folder
@@ -329,7 +272,7 @@ impl LibraryScanner {
                     let original_ext = meta_url.split('.').next_back().unwrap_or("jpg");
                     let temp_cover_path = temp_book_dir.join(format!("cover.{}", original_ext));
                     if !(manual_corrected && temp_cover_path.is_file())
-                        && let Err(error) = crate::core::books::webdav_metadata::cache_remote_file(
+                        && let Err(error) = crate::core::books::metadata::cache_remote_file(
                             storage,
                             library,
                             meta_url,
@@ -343,8 +286,7 @@ impl LibraryScanner {
                     }
                     if temp_cover_path.is_file()
                         && local_cover_url.as_deref().is_none_or(|cover| {
-                            !crate::core::books::webdav_metadata::is_cover_url(cover)
-                                || cover == meta_url
+                            !crate::core::books::metadata::is_cover_url(cover) || cover == meta_url
                         })
                     {
                         local_cover_url =
@@ -356,9 +298,10 @@ impl LibraryScanner {
         }
 
         let local_rank = 0;
-        let audio_rank =
-            configured_metadata_rank(scraper_config, "audio_metadata").saturating_add(1);
-        let scraper_rank = configured_metadata_rank(scraper_config, "scraper").saturating_add(1);
+        let audio_rank = scraper_config
+            .metadata_rank("audio_metadata")
+            .saturating_add(1);
+        let scraper_rank = scraper_config.metadata_rank("scraper").saturating_add(1);
         let sidecar_title = local_album.clone().filter(|title| !title.trim().is_empty());
         let (selected_album, title_rank) =
             choose_metadata_value(local_album, audio_album, local_rank, audio_rank);
@@ -617,378 +560,26 @@ impl LibraryScanner {
             self.book_repo.create(&book).await?;
         }
 
-        // Create chapters
-        let mut main_counter = 0;
-        let mut extra_counter = 0;
+        let chapters_changed = self
+            .process_webdav_chapters(WebDavChapterContext {
+                library,
+                book: &book,
+                file_urls,
+                scraper_config,
+                full_scan,
+                manual_corrected,
+                json_chapters,
+                chapter_title_template: chapter_title_template.as_deref(),
+                ai_chapter_titles: &ai_chapter_titles,
+            })
+            .await?;
 
-        // Fetch book to check for regex rule
-        let regex_pattern = if manual_corrected {
-            self.book_repo
-                .find_by_id(&book_id)
-                .await?
-                .and_then(|b| b.chapter_regex)
-        } else {
-            book.chapter_regex.clone()
-        };
+        self.metadata_service()
+            .import_series(&book, &json_series)
+            .await?;
 
-        let chapter_regex = regex_pattern.and_then(|p| regex::Regex::new(&p).ok());
-
-        // Track processed chapter IDs to find deleted ones
-        let mut processed_chapter_ids = HashSet::new();
-        let mut chapters_changed = false;
-
-        // Check if we can use JSON chapters
-        let use_json_chapters = if let Some(ref chapters) = json_chapters {
-            if chapters.len() == file_urls.len() {
-                info!(
-                    "Using metadata.json chapters for WebDAV book: {}",
-                    book_title
-                );
-                true
-            } else {
-                if !chapters.is_empty() {
-                    warn!(
-                        "metadata.json chapter count ({}) does not match file count ({}) for WebDAV book {}. Ignoring JSON chapters.",
-                        chapters.len(),
-                        file_urls.len(),
-                        book_title
-                    );
-                }
-                false
-            }
-        } else {
-            false
-        };
-        if use_json_chapters {
-            let file_stems: Vec<String> = file_urls
-                .iter()
-                .map(|file_url| {
-                    let decoded_file_url = self.decode_url_path(file_url);
-                    let filename = decoded_file_url.split('/').next_back().unwrap_or_default();
-                    std::path::Path::new(filename)
-                        .file_stem()
-                        .and_then(|stem| stem.to_str())
-                        .unwrap_or(filename)
-                        .to_string()
-                })
-                .collect();
-            if let Some(chapters) = json_chapters.take() {
-                let (aligned, matched_by_title) =
-                    crate::core::books::metadata_writer::align_chapters_to_file_stems(
-                        chapters,
-                        &file_stems,
-                    );
-                if matched_by_title {
-                    info!(
-                        "Aligned metadata.json chapters to WebDAV files by title for book: {}",
-                        book_title
-                    );
-                }
-                json_chapters = Some(aligned);
-            }
-        }
-        let preserve_raw_chapter_titles =
-            chapter_title_template_preserves_raw(chapter_title_template.as_deref());
-
-        for (index, file_url) in file_urls.iter().enumerate() {
-            // Decode filename for title
-            let decoded_file_url = self.decode_url_path(file_url);
-            let filename = decoded_file_url
-                .split('/')
-                .next_back()
-                .unwrap_or("chapter")
-                .to_string();
-            let ai_chapter_title = ai_chapter_titles
-                .get(index)
-                .map(|title| title.trim())
-                .filter(|title| !title.is_empty());
-
-            // Regex extraction
-            let mut regex_idx = None;
-            let mut regex_title = None;
-
-            if let Some(re) = &chapter_regex
-                && let Some(caps) = re.captures(&filename)
-            {
-                if let Some(m) = caps.get(1)
-                    && let Ok(idx) = m.as_str().parse::<i32>()
-                {
-                    regex_idx = Some(idx);
-                }
-                if let Some(m) = caps.get(2) {
-                    regex_title = Some(m.as_str().to_string());
-                }
-            }
-
-            // Check if chapter exists to avoid duplicates
-            let mut ch_hasher = Sha256::new();
-            ch_hasher.update(file_url.as_bytes());
-            let ch_hash = format!("{:x}", ch_hasher.finalize());
-
-            // Read standard containers through the core audio metadata service.
-            // In cloud mode we avoid probing WebDAV audio files and rely solely on scraped/sidecar metadata
-            let (meta_title, meta_duration) = if use_json_chapters {
-                if let Some(ref chapters) = json_chapters {
-                    if index < chapters.len() {
-                        let chapter = &chapters[index];
-                        let duration = ((chapter.end - chapter.start).round() as i32).max(0);
-                        (chapter.title.clone(), duration)
-                    } else if is_cloud_mode {
-                        // Cloud mode: fallback to filename only, no remote probing
-                        (filename.clone(), 0)
-                    } else {
-                        // Fallback (should not happen)
-                        let (_, t, _, _, _, d) = self
-                            .extract_webdav_metadata(
-                                library,
-                                file_url,
-                                None,
-                                scraper_config.extract_audio_cover,
-                            )
-                            .await;
-                        (t, d)
-                    }
-                } else if is_cloud_mode {
-                    (filename.clone(), 0)
-                } else {
-                    // Fallback (should not happen)
-                    let (_, t, _, _, _, d) = self
-                        .extract_webdav_metadata(
-                            library,
-                            file_url,
-                            None,
-                            scraper_config.extract_audio_cover,
-                        )
-                        .await;
-                    (t, d)
-                }
-            } else if is_cloud_mode {
-                // Cloud/WebDAV mode without JSON chapters: use filename as title and duration 0
-                (filename.clone(), 0)
-            } else {
-                // Extract from WebDAV file
-                let (_, t, _, _, _, d) = self
-                    .extract_webdav_metadata(
-                        library,
-                        file_url,
-                        None,
-                        scraper_config.extract_audio_cover,
-                    )
-                    .await;
-                (t, d)
-            };
-
-            // Explicit chapter rules override sidecar titles; otherwise use
-            // the sidecar before audio tags and filename fallbacks.
-            let (raw_title, should_clean_title) = if let Some(rt) = regex_title {
-                (rt, true)
-            } else if use_json_chapters {
-                (meta_title, false)
-            } else if scraper_config.use_filename_as_title {
-                (filename.clone(), true)
-            } else if !meta_title.trim().is_empty()
-                && !meta_title.to_lowercase().starts_with("track")
-            {
-                (meta_title, true)
-            } else {
-                (filename, true)
-            };
-
-            let (final_title, detected_as_extra) = if let Some(ai_title) = ai_chapter_title {
-                let (_, is_extra) = self
-                    .text_cleaner
-                    .clean_chapter_title(ai_title, book.title.as_deref());
-                (ai_title.to_string(), is_extra)
-            } else if should_clean_title {
-                clean_or_preserve_chapter_title(
-                    self.text_cleaner.as_ref(),
-                    &raw_title,
-                    book.title.as_deref(),
-                    preserve_raw_chapter_titles,
-                )
-            } else {
-                let (_, is_extra) = self
-                    .text_cleaner
-                    .clean_chapter_title(&raw_title, book.title.as_deref());
-                (raw_title, is_extra)
-            };
-            let is_extra = scraper_config.extract_extra_chapters && detected_as_extra;
-
-            let counter_idx = if is_extra {
-                extra_counter += 1;
-                extra_counter
-            } else {
-                main_counter += 1;
-                main_counter
-            };
-
-            let chapter_idx = regex_idx.unwrap_or(counter_idx);
-            let final_title = apply_chapter_title_template(
-                chapter_title_template.as_deref(),
-                book.title.as_deref(),
-                chapter_idx,
-                &final_title,
-            );
-
-            let chapter = crate::db::models::Chapter {
-                id: Uuid::new_v4().to_string(),
-                book_id: book_id.clone(),
-                title: Some(final_title),
-                path: file_url.clone(),
-                duration: Some(meta_duration),
-                chapter_index: Some(chapter_idx),
-                is_extra: if is_extra { 1 } else { 0 },
-                hash: Some(ch_hash.clone()),
-                created_at: chrono::Utc::now().to_rfc3339(),
-                manual_corrected: 0,
-            };
-
-            // Check if chapter exists by hash (Deduplication)
-            if let Ok(Some(mut existing)) = self.chapter_repo.find_by_hash(&ch_hash).await {
-                // Update existing chapter
-                // Check Lock
-                if existing.manual_corrected == 0 {
-                    existing.title = chapter.title;
-                    existing.chapter_index = chapter.chapter_index;
-                    existing.is_extra = chapter.is_extra;
-                }
-                existing.duration = chapter.duration;
-                existing.book_id = book_id.clone(); // Ensure it belongs to this book
-                self.chapter_repo.update(&existing).await?;
-                processed_chapter_ids.insert(existing.id.clone());
-                chapters_changed = true;
-            } else {
-                self.chapter_repo.create(&chapter).await?;
-                processed_chapter_ids.insert(chapter.id.clone());
-                chapters_changed = true;
-            }
-        }
-
-        // Only a full scan has enough information to prove a remote chapter was deleted.
-        if full_scan && let Ok(existing_chapters) = self.chapter_repo.find_by_book(&book_id).await {
-            for ch in existing_chapters {
-                if !processed_chapter_ids.contains(&ch.id) {
-                    info!("Removing missing chapter from DB: {:?}", ch.path);
-                    if let Err(e) = self.chapter_repo.delete(&ch.id).await {
-                        warn!("Failed to delete missing chapter {}: {}", ch.id, e);
-                    } else {
-                        chapters_changed = true;
-                    }
-                }
-            }
-        }
-
-        // Process Series
-        if !json_series.is_empty() {
-            for series_title_raw in json_series {
-                let series_title_raw = series_title_raw.trim();
-                if series_title_raw.is_empty() {
-                    continue;
-                }
-
-                // Parse series title and optional sequence number
-                let mut series_title = series_title_raw.to_string();
-                let mut explicit_order = None;
-
-                if let Some(idx) = series_title_raw.rfind(" #") {
-                    let (name_part, num_part) = series_title_raw.split_at(idx);
-                    let num_str = num_part[2..].trim();
-                    if let Ok(order) = num_str.parse::<i32>() {
-                        series_title = name_part.trim().to_string();
-                        explicit_order = Some(order);
-                    }
-                }
-
-                // Find or create the series within this library.
-                let new_series = crate::db::models::Series {
-                    id: Uuid::new_v4().to_string(),
-                    library_id: library.id.clone(),
-                    title: series_title.clone(),
-                    author: book.author.clone(), // Initial author from first found book
-                    narrator: book.narrator.clone(),
-                    cover_url: book.cover_url.clone(),
-                    description: None,
-                    created_at: chrono::Utc::now().to_rfc3339(),
-                    updated_at: chrono::Utc::now().to_rfc3339(),
-                };
-                let series = self.series_repo.find_or_create_by_title(new_series).await?;
-
-                // Link book to series if not already linked
-                let books = self.series_repo.find_books_by_series(&series.id).await?;
-                if let Some((_, current_order)) = books.iter().find(|(b, _)| b.id == book_id) {
-                    // Already linked, update order if explicit order changed
-                    if let Some(o) = explicit_order
-                        && *current_order != o
-                    {
-                        self.series_repo
-                            .add_book(crate::db::models::SeriesBook {
-                                series_id: series.id.clone(),
-                                book_id: book_id.clone(),
-                                book_order: o,
-                            })
-                            .await?;
-                    }
-                } else {
-                    // Not linked, insert it
-                    let order = if let Some(o) = explicit_order {
-                        o
-                    } else {
-                        books.len() as i32 + 1
-                    };
-
-                    self.series_repo
-                        .add_book(crate::db::models::SeriesBook {
-                            series_id: series.id.clone(),
-                            book_id: book_id.clone(),
-                            book_order: order,
-                        })
-                        .await?;
-
-                    // If no explicit order, resort all books in series by natural order of title
-                    if explicit_order.is_none() {
-                        let mut all_books =
-                            self.series_repo.find_books_by_series(&series.id).await?;
-                        all_books.sort_by(|a, b| {
-                            let t1 = a.0.title.as_deref().unwrap_or("");
-                            let t2 = b.0.title.as_deref().unwrap_or("");
-                            natord::compare(t1, t2)
-                        });
-
-                        let new_orders: Vec<(String, i32)> = all_books
-                            .into_iter()
-                            .enumerate()
-                            .map(|(i, (b, _))| (b.id, (i + 1) as i32))
-                            .collect();
-
-                        self.series_repo
-                            .update_book_orders(&series.id, new_orders)
-                            .await?;
-                    }
-
-                    // DO NOT update series metadata based on subsequent books to avoid instability
-                    // Series metadata should only be set on creation or manual update
-                }
-            }
-        }
-
-        // Keep both sidecars locally even when the drive has none. Initial
-        // scanning never uploads files; remote writes follow explicit edits.
-        if !temp_book_dir.join("metadata.json").is_file()
-            || !temp_book_dir.join("book.nfo").is_file()
-        {
-            let mut metadata =
-                crate::core::books::metadata_writer::read_metadata_json(&temp_book_dir)?
-                    .unwrap_or_default();
-            metadata.update_book_fields(&book);
-            metadata.chapters = crate::core::books::metadata_writer::build_audiobookshelf_chapters(
-                self.chapter_repo.find_by_book(&book_id).await?,
-            );
-            crate::core::books::webdav_metadata::ensure_cached_sidecars(
-                &book,
-                &metadata,
-                &self.nfo_manager,
-            )?;
-        }
+        // Scans populate the cache only; remote uploads are reserved for explicit edits.
+        self.metadata_service().ensure_remote_cache(&book).await?;
 
         let final_status = match status {
             ScanStatus::Created => ScanStatus::Created,

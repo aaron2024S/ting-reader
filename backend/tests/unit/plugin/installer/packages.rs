@@ -62,7 +62,10 @@ mod official_packages {
         let package = Path::new(&package);
         let contents = read_tr_package(package).unwrap();
         assert_eq!(contents.manifest.plugin_id, "ting-reader-plugin-store");
-        assert_eq!(contents.manifest.plugin_version, env!("CARGO_PKG_VERSION"));
+        let manifest: ting_plugin_contract::manifest::PluginManifest =
+            serde_yaml::from_slice(contents.files.get("plugin.yml").unwrap()).unwrap();
+        manifest.validate().unwrap();
+        assert_eq!(contents.manifest.plugin_version, manifest.version);
         assert!(matches!(
             verify_tr_package_signature(package).unwrap(),
             TrPackageSignatureStatus::Trusted { .. }
@@ -71,10 +74,10 @@ mod official_packages {
 
     /// Point TING_TEST_OFFICIAL_PACKAGES at the signed current release directory.
     #[test]
+    #[ignore = "requires signed official packages in TING_TEST_OFFICIAL_PACKAGES"]
     fn signed_official_packages_are_trusted_and_have_matching_v2_manifests() {
-        let Ok(root) = std::env::var("TING_TEST_OFFICIAL_PACKAGES") else {
-            return;
-        };
+        let root = std::env::var("TING_TEST_OFFICIAL_PACKAGES")
+            .expect("TING_TEST_OFFICIAL_PACKAGES must point to signed official .tr packages");
         let mut total = 0;
         for entry in fs::read_dir(root).unwrap() {
             let path = entry.unwrap().path();
@@ -82,10 +85,10 @@ mod official_packages {
                 continue;
             }
             let archive = read_tr_package(&path).unwrap();
-            assert_eq!(archive.manifest.plugin_version, env!("CARGO_PKG_VERSION"));
             let manifest: ting_plugin_contract::manifest::PluginManifest =
                 serde_yaml::from_slice(archive.files.get("plugin.yml").unwrap()).unwrap();
             manifest.validate().unwrap();
+            assert_eq!(archive.manifest.plugin_version, manifest.version);
             assert_eq!(archive.manifest.plugin_id, manifest.id);
             assert!(archive.files.contains_key(&archive.manifest.entry_point));
             assert!(

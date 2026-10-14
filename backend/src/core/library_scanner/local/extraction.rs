@@ -2,103 +2,7 @@ use super::super::{LibraryScanner, MetadataSource, STANDARD_EXTENSIONS};
 use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
 
-#[derive(Debug, Default, Clone, serde::Serialize)]
-pub(crate) struct ScannedMetadata {
-    pub(crate) title: Option<String>,
-    pub(crate) author: Option<String>,
-    pub(crate) narrator: Option<String>,
-    pub(crate) description: Option<String>,
-    pub(crate) tags: Option<String>,
-    pub(crate) genre: Option<String>,
-    pub(crate) cover_url: Option<String>,
-    pub(crate) subtitle: Option<String>,
-    pub(crate) published_year: Option<String>,
-    pub(crate) published_date: Option<String>,
-    pub(crate) publisher: Option<String>,
-    pub(crate) isbn: Option<String>,
-    pub(crate) asin: Option<String>,
-    pub(crate) language: Option<String>,
-    pub(crate) explicit: bool,
-    pub(crate) abridged: bool,
-    pub(crate) json_tags: Vec<String>,
-    pub(crate) json_series: Vec<String>,
-    pub(crate) json_chapters:
-        Option<Vec<crate::core::books::metadata_writer::AudiobookshelfChapter>>,
-    pub(crate) chapter_title_template: Option<String>,
-    pub(crate) chapter_titles: Vec<String>,
-}
-
-impl ScannedMetadata {
-    fn merge(&mut self, other: ScannedMetadata) {
-        if let Some(t) = other.title
-            && !t.trim().is_empty()
-        {
-            self.title = Some(t);
-        }
-        if other.author.is_some() {
-            self.author = other.author;
-        }
-        if other.narrator.is_some() {
-            self.narrator = other.narrator;
-        }
-        if other.description.is_some() {
-            self.description = other.description;
-        }
-        if other.tags.is_some() {
-            self.tags = other.tags;
-        }
-        if other.genre.is_some() {
-            self.genre = other.genre;
-        }
-        if let Some(c) = other.cover_url
-            && !c.trim().is_empty()
-        {
-            self.cover_url = Some(c);
-        }
-        if other.subtitle.is_some() {
-            self.subtitle = other.subtitle;
-        }
-        if other.published_year.is_some() {
-            self.published_year = other.published_year;
-        }
-        if other.published_date.is_some() {
-            self.published_date = other.published_date;
-        }
-        if other.publisher.is_some() {
-            self.publisher = other.publisher;
-        }
-        if other.isbn.is_some() {
-            self.isbn = other.isbn;
-        }
-        if other.asin.is_some() {
-            self.asin = other.asin;
-        }
-        if other.language.is_some() {
-            self.language = other.language;
-        }
-        if other.explicit {
-            self.explicit = true;
-        }
-        if other.abridged {
-            self.abridged = true;
-        }
-        if !other.json_tags.is_empty() {
-            self.json_tags = other.json_tags;
-        }
-        if !other.json_series.is_empty() {
-            self.json_series = other.json_series;
-        }
-        if other.json_chapters.is_some() {
-            self.json_chapters = other.json_chapters;
-        }
-        if other.chapter_title_template.is_some() {
-            self.chapter_title_template = other.chapter_title_template;
-        }
-        if !other.chapter_titles.is_empty() {
-            self.chapter_titles = other.chapter_titles;
-        }
-    }
-}
+use crate::core::books::metadata::BookMetadataFields as ScannedMetadata;
 
 impl LibraryScanner {
     pub(super) async fn extract_final_metadata(
@@ -142,49 +46,23 @@ impl LibraryScanner {
             dir, scraper_config
         );
 
-        // 2. Iterate Priority List
-        let default_priority = vec![
-            "scraper".to_string(),
-            "audio_metadata".to_string(),
-            "local_metadata".to_string(),
-        ];
-
-        let priority_list = if scraper_config.metadata_priority.is_empty() {
-            &default_priority
-        } else {
-            &scraper_config.metadata_priority
-        };
-
-        for source_type in priority_list.iter().rev() {
-            match source_type.as_str() {
+        // Read lower-priority sources first, using the same config policy as WebDAV.
+        for source_type in scraper_config.metadata_sources().rev() {
+            match source_type {
                 "local_metadata" => {
-                    // Try to find local cover image first, so it gets merged
                     if let Some(path) = self.find_cover_image(dir) {
                         final_meta.cover_url = Some(path);
                     }
-
-                    if let Some(meta) = self.extract_from_nfo(dir) {
+                    for mut metadata in [self.extract_from_nfo(dir), self.extract_from_json(dir)]
+                        .into_iter()
+                        .flatten()
+                    {
                         if scraper_config.use_filename_as_title {
-                            let mut m = meta.clone();
-                            m.title = None;
-                            final_meta.merge(m);
-                        } else {
-                            final_meta.merge(meta);
-                            if final_meta.title.is_some() {
-                                final_source = MetadataSource::Nfo;
-                            }
+                            metadata.title = None;
                         }
-                    }
-                    if let Some(meta) = self.extract_from_json(dir) {
-                        if scraper_config.use_filename_as_title {
-                            let mut m = meta.clone();
-                            m.title = None;
-                            final_meta.merge(m);
-                        } else {
-                            final_meta.merge(meta);
-                            if final_meta.title.is_some() {
-                                final_source = MetadataSource::Nfo;
-                            }
+                        final_meta.merge(metadata);
+                        if !scraper_config.use_filename_as_title && final_meta.title.is_some() {
+                            final_source = MetadataSource::Nfo;
                         }
                     }
                 }
@@ -193,29 +71,17 @@ impl LibraryScanner {
                         .extract_from_audio(dir, files, scraper_config.extract_audio_cover)
                         .await
                     {
-                        if scraper_config.use_filename_as_title {
-                            let mut m = meta.clone();
-                            m.title = None;
-                            final_meta.merge(m);
-                        } else {
-                            // Bugfix: If the audio metadata title is empty, or if we want to preserve the folder title as fallback,
-                            // we should still keep the extracted cover. The issue was that a bad title from audio metadata
-                            // was completely overwriting everything else.
-
-                            // Only merge title if it's considered valid (not empty and not a generic track name)
-                            let mut m = meta.clone();
-                            if let Some(ref title) = m.title {
-                                let lower_title = title.to_lowercase();
-                                if lower_title.starts_with("track") || lower_title.trim().is_empty()
-                                {
-                                    m.title = None; // Ignore bad embedded titles
-                                }
-                            }
-
-                            final_meta.merge(m);
-                            if final_meta.title.is_some() {
-                                final_source = MetadataSource::FileMetadata;
-                            }
+                        let mut metadata = meta;
+                        if scraper_config.use_filename_as_title
+                            || metadata.title.as_ref().is_some_and(|title| {
+                                title.trim().is_empty() || title.to_lowercase().starts_with("track")
+                            })
+                        {
+                            metadata.title = None;
+                        }
+                        final_meta.merge(metadata);
+                        if !scraper_config.use_filename_as_title && final_meta.title.is_some() {
+                            final_source = MetadataSource::FileMetadata;
                         }
                     }
                 }
@@ -237,13 +103,11 @@ impl LibraryScanner {
                             )
                             .await
                         {
+                            let mut metadata = meta;
                             if scraper_config.use_filename_as_title {
-                                let mut m = meta.clone();
-                                m.title = None;
-                                final_meta.merge(m);
-                            } else {
-                                final_meta.merge(meta);
+                                metadata.title = None;
                             }
+                            final_meta.merge(metadata);
                         }
                     }
                 }
@@ -299,65 +163,17 @@ impl LibraryScanner {
     }
 
     fn extract_from_nfo(&self, dir: &Path) -> Option<ScannedMetadata> {
-        let nfo_path = dir.join("book.nfo");
-        if let Ok(meta) = self.nfo_manager.read_book_nfo(&nfo_path) {
-            return Some(ScannedMetadata {
-                title: if meta.title.is_empty() {
-                    None
-                } else {
-                    Some(meta.title)
-                },
-                author: meta.author,
-                narrator: meta.narrator,
-                description: meta.intro,
-                tags: Some(meta.tags.items.join(",")),
-                genre: Some(meta.genre.items.join(",")),
-                cover_url: meta.cover_url,
-                ..Default::default()
-            });
-        }
-        None
+        self.nfo_manager
+            .read_book_nfo(&dir.join("book.nfo"))
+            .ok()
+            .map(Into::into)
     }
 
     fn extract_from_json(&self, dir: &Path) -> Option<ScannedMetadata> {
-        match crate::core::books::metadata_writer::read_metadata_json(dir) {
-            Ok(Some(meta)) => {
-                let mut m = ScannedMetadata {
-                    title: meta.title,
-                    ..Default::default()
-                };
-                if !meta.authors.is_empty() {
-                    m.author = Some(meta.authors[0].clone());
-                }
-                if !meta.narrators.is_empty() {
-                    m.narrator = Some(meta.narrators[0].clone());
-                }
-                m.description = meta.description;
-                if !meta.genres.is_empty() {
-                    m.genre = Some(meta.genres.join(","));
-                }
-                if !meta.tags.is_empty() {
-                    m.json_tags = meta.tags.clone();
-                    m.tags = Some(meta.tags.join(","));
-                }
-                m.json_series = meta.series;
-                m.subtitle = meta.subtitle;
-                m.published_year = meta.published_year;
-                m.published_date = meta.published_date;
-                m.publisher = meta.publisher;
-                m.isbn = meta.isbn;
-                m.asin = meta.asin;
-                m.language = meta.language;
-                m.explicit = meta.explicit;
-                m.abridged = meta.abridged;
-                if !meta.chapters.is_empty() {
-                    m.json_chapters = Some(meta.chapters);
-                }
-                Some(m)
-            }
-            Ok(None) => None,
-            Err(e) => {
-                warn!("Failed to read metadata.json in {:?}: {}", dir, e);
+        match crate::core::books::metadata::read_metadata_json(dir) {
+            Ok(metadata) => metadata.map(Into::into),
+            Err(error) => {
+                warn!(path = %dir.display(), %error, "Failed to read metadata.json");
                 None
             }
         }
