@@ -14,6 +14,132 @@ impl Drop for WebDavTestCache {
 }
 
 #[tokio::test]
+async fn webdav_series_inherit_parent_people_and_sort_decoded_chinese_chapters() {
+    use crate::core::library_scanner::{ScanMode, test_support};
+    use axum::{extract::State, http::StatusCode, response::IntoResponse};
+    use std::{collections::HashMap, sync::Arc};
+    type Listings = Arc<HashMap<String, Vec<(String, bool)>>>;
+    let directory = tempfile::tempdir().unwrap();
+    let scanner = test_support::scanner(directory.path());
+    let mut library = test_support::library(&scanner, directory.path()).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    library.url = format!("{origin}/dav");
+    library.library_type = "webdav".into();
+    let config = crate::db::models::ScraperConfig {
+        cloud_mode: true,
+        extract_audio_cover: false,
+        metadata_priority: vec!["local_metadata".into()],
+        ..Default::default()
+    };
+    library.scraper_config = Some(serde_json::to_string(&config).unwrap());
+    scanner.library_repo.update(&library).await.unwrap();
+    let child = |parent: &str, name: &str| {
+        let mut url = url::Url::parse(parent).unwrap();
+        url.path_segments_mut().unwrap().push(name);
+        url.to_string()
+    };
+    let parent = child(&library.url, "示例系列 - 示例作者 ／ 示例演播");
+    let mut listing: HashMap<String, Vec<(String, bool)>> = HashMap::new();
+    let mut add = |parent: &str, url: &str, is_dir| {
+        listing
+            .entry(url::Url::parse(parent).unwrap().path().into())
+            .or_default()
+            .push((url::Url::parse(url).unwrap().path().into(), is_dir));
+    };
+    add(&library.url, &parent, true);
+    let mut caches = Vec::new();
+    for name in ["示例系列第一部", "示例系列第二部", "示例系列第三部"] {
+        let volume = child(&parent, name);
+        let cache = crate::core::books::metadata::remote_metadata_dir(&volume).unwrap();
+        assert!(!cache.exists());
+        caches.push(WebDavTestCache(cache));
+        add(&parent, &volume, true);
+        for (range, files) in [
+            ("1-50", vec!["10", "2", "1"]),
+            (
+                "51-100任意说明",
+                vec!["第四百七十章 示例", "第十章 示例", "第三章 示例"],
+            ),
+        ] {
+            let range = child(&volume, range);
+            add(&volume, &range, true);
+            for file in files {
+                add(&range, &child(&range, &format!("{file}.mp3")), false);
+            }
+        }
+    }
+    let app = axum::Router::new().fallback(
+        |State(listing): State<Listings>,
+         request: axum::extract::Request| async move {
+            if request.method().as_str() != "PROPFIND" {
+                return StatusCode::NOT_FOUND.into_response();
+            }
+            let Some(entries) = listing.get(request.uri().path().trim_end_matches('/')) else {
+                return StatusCode::NOT_FOUND.into_response();
+            };
+            let responses: String = entries.iter().map(|(path, is_dir)| format!(
+                "<d:response><d:href>{path}</d:href><d:propstat><d:prop><d:resourcetype>{}</d:resourcetype><d:getetag>v1</d:getetag><d:getlastmodified>Thu, 15 Oct 2026 00:00:00 GMT</d:getlastmodified></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>",
+                if *is_dir { "<d:collection/>" } else { "" },
+            )).collect();
+            (StatusCode::MULTI_STATUS, [("content-type", "application/xml")],
+             format!("<d:multistatus xmlns:d=\"DAV:\">{responses}</d:multistatus>")).into_response()
+        }
+    ).with_state(Arc::new(listing));
+    let _server = WebDavTestServer(tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap()
+    }));
+    for _ in 0..2 {
+        let result = scanner
+            .scan_webdav_library(&library, None, &config, ScanMode::Full)
+            .await
+            .unwrap();
+        assert_eq!(result.failed_count, 0, "{:?}", result.errors);
+        assert_eq!(result.books_skipped, 0);
+        let books = scanner
+            .book_repo
+            .find_by_library(&library.id)
+            .await
+            .unwrap();
+        assert_eq!(books.len(), 3);
+        for book in books {
+            assert!(book.title.as_deref().unwrap().starts_with("示例系列第"));
+            assert_eq!(book.author.as_deref(), Some("示例作者"));
+            assert_eq!(book.narrator.as_deref(), Some("示例演播"));
+            let chapters = scanner.chapter_repo.find_by_book(&book.id).await.unwrap();
+            let names: Vec<_> = chapters
+                .iter()
+                .map(|chapter| {
+                    let url = url::Url::parse(&chapter.path).unwrap();
+                    urlencoding::decode(url.path_segments().unwrap().next_back().unwrap())
+                        .unwrap()
+                        .into_owned()
+                })
+                .collect();
+            assert_eq!(
+                names,
+                [
+                    "1.mp3",
+                    "2.mp3",
+                    "10.mp3",
+                    "第三章 示例.mp3",
+                    "第十章 示例.mp3",
+                    "第四百七十章 示例.mp3"
+                ]
+            );
+            let series = scanner
+                .series_repo
+                .find_series_by_book(&book.id)
+                .await
+                .unwrap();
+            assert_eq!(series.len(), 1);
+            assert_eq!(series[0].title, "示例系列");
+        }
+    }
+    drop(caches);
+}
+
+#[tokio::test]
 async fn webdav_saves_clean_titles_and_merges_completed_range_directories() {
     use crate::core::library_scanner::test_support;
     use crate::db::repository::Repository;

@@ -1,7 +1,7 @@
 use super::super::{LibraryScanner, MetadataSource, ScanStatus};
 use super::chapters::WebDavChapterContext;
 use crate::core::app::error::Result;
-use crate::core::books::text_cleaner::BookName;
+use crate::core::library_scanner::shared::directory_book_name;
 use crate::db::repository::Repository;
 use sha2::{Digest, Sha256};
 use tracing::warn;
@@ -61,7 +61,10 @@ impl LibraryScanner {
             .filter(|value| !value.trim().is_empty())
             .unwrap_or(&dir_name_title);
         let directory_title = self.text_cleaner.clean_book_directory_title(directory_name);
-        let directory_metadata = BookName::parse(directory_name);
+        let parent_name = super::webdav_parent_url(dir_url)
+            .map(|parent| self.webdav_url_name(&parent))
+            .unwrap_or_default();
+        let directory_metadata = directory_book_name(directory_name, &parent_name);
 
         // No local path, use URL as path
         // We use the original URL as path to ensure connectivity, but StorageService needs to handle it correctly

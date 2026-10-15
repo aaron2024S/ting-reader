@@ -4,6 +4,109 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 #[tokio::test]
+async fn parent_series_people_reach_saved_volumes_and_numeric_chapter_indexes() {
+    use crate::core::library_scanner::{LocalLibraryScanContext, ScanMode, test_support};
+    let directory = tempfile::tempdir().unwrap();
+    let scanner = test_support::scanner(directory.path());
+    let root = directory.path().join("library");
+    let parent = root.join("示例书名 - 示例作者 ／ 示例演播");
+    let chapters = [
+        "10",
+        "2",
+        "1",
+        "第四百七十章 示例",
+        "第十章 示例",
+        "第三章 示例",
+    ];
+    for volume in ["示例书名第一部", "示例书名第二部", "示例书名第三部"] {
+        for (range, files) in [("1-50", &chapters[..3]), ("51-100任意文字", &chapters[3..])] {
+            let path = parent.join(volume).join(range);
+            std::fs::create_dir_all(&path).unwrap();
+            for name in files {
+                std::fs::write(
+                    path.join(format!("{name}.strm")),
+                    "https://example.test/audio",
+                )
+                .unwrap();
+            }
+        }
+    }
+    let library = test_support::library(&scanner, &root).await;
+    let config = crate::db::models::ScraperConfig {
+        cloud_mode: true,
+        extract_audio_cover: false,
+        metadata_priority: vec!["local_metadata".into()],
+        ..Default::default()
+    };
+    // A second full scan exercises updates and cached paths as well as new rows.
+    for _ in 0..2 {
+        let result = scanner
+            .scan_local_library(LocalLibraryScanContext {
+                library_id: &library.id,
+                path: &root,
+                task_id: None,
+                last_scanned: None,
+                scraper_config: &config,
+                mode: ScanMode::Full,
+                scan_paths: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(result.failed_count, 0, "{:?}", result.errors);
+        let books = scanner
+            .book_repo
+            .find_by_library(&library.id)
+            .await
+            .unwrap();
+        assert_eq!(books.len(), 3);
+        for book in books {
+            assert!(book.title.as_deref().unwrap().starts_with("示例书名第"));
+            assert_eq!(book.author.as_deref(), Some("示例作者"));
+            assert_eq!(book.narrator.as_deref(), Some("示例演播"));
+            let chapters = scanner.chapter_repo.find_by_book(&book.id).await.unwrap();
+            let names: Vec<_> = chapters
+                .iter()
+                .map(|chapter| {
+                    Path::new(&chapter.path)
+                        .file_stem()
+                        .unwrap()
+                        .to_str()
+                        .unwrap()
+                })
+                .collect();
+            assert_eq!(
+                names,
+                [
+                    "1",
+                    "2",
+                    "10",
+                    "第三章 示例",
+                    "第十章 示例",
+                    "第四百七十章 示例"
+                ]
+            );
+            let series = scanner
+                .series_repo
+                .find_series_by_book(&book.id)
+                .await
+                .unwrap();
+            assert_eq!(series.len(), 1);
+            assert_eq!(series[0].title, "示例书名");
+            let members = scanner
+                .series_repo
+                .find_books_by_series(&series[0].id)
+                .await
+                .unwrap();
+            assert_eq!(members.len(), 3);
+            assert_eq!(
+                members.iter().map(|(_, order)| *order).collect::<Vec<_>>(),
+                [1, 2, 3]
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn full_scan_saves_clean_directory_titles_and_all_completed_range_chapters() {
     use crate::core::library_scanner::{LocalLibraryScanContext, ScanMode, test_support};
     let directory = tempfile::tempdir().unwrap();

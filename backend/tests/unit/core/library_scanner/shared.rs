@@ -40,6 +40,20 @@ fn parses_author_and_narrator_roles_and_empty_slots_from_book_names() {
         ),
         ("示例书名 | 示例作者／示例演播", "示例书名", None, None),
         ("示例书名-2", "示例书名-2", None, None),
+        ("示例书名-S01", "示例书名-S01", None, None),
+        ("示例书名-第一部", "示例书名-第一部", None, None),
+        (
+            "示例书名-S01-示例作者",
+            "示例书名-S01",
+            Some("示例作者"),
+            None,
+        ),
+        (
+            "示例书名 - 第一部 - 示例作者 ／ 示例演播",
+            "示例书名 - 第一部",
+            Some("示例作者"),
+            Some("示例演播"),
+        ),
         ("示例书名", "示例书名", None, None),
     ] {
         let parsed = BookName::parse(name);
@@ -52,6 +66,151 @@ fn parses_author_and_narrator_roles_and_empty_slots_from_book_names() {
             },
             "{name}"
         );
+    }
+}
+
+#[test]
+fn chapters_sort_by_numeric_ordinals_for_local_and_encoded_webdav_names() {
+    use crate::core::books::text_cleaner::{chapter_order_key, parse_ordinal};
+    let cleaner = crate::core::books::TextCleaner::new(Default::default());
+    for (name, expected) in [
+        ("1.mp3", 1),
+        ("10.mp3", 10),
+        ("第十章 示例", 10),
+        ("第四百七十章 示例", 470),
+        ("第４７１章 示例", 471),
+        ("第两百零三集 示例", 203),
+        ("第〇一二章 示例", 12),
+        ("第一万零一章 示例", 10001),
+        ("Chapter 21 Sample", 21),
+        ("0 开场", 0),
+    ] {
+        assert_eq!(
+            cleaner.extract_chapter_number(name),
+            Some(expected),
+            "{name}"
+        );
+    }
+    assert!(parse_ordinal("99999999999999999999999").is_none());
+    assert!(parse_ordinal("千万万万万").is_none());
+    assert!(parse_ordinal("随机文字").is_none());
+    for (files, expected) in [
+        (
+            vec!["10.mp3", "2.mp3", "1.mp3", "4.mp3", "3.mp3"],
+            vec!["1.mp3", "2.mp3", "3.mp3", "4.mp3", "10.mp3"],
+        ),
+        (
+            vec![
+                "第四百七十章 示例.mp3",
+                "第二章 示例.mp3",
+                "第十章 示例.mp3",
+                "第一章 示例.mp3",
+            ],
+            vec![
+                "第一章 示例.mp3",
+                "第二章 示例.mp3",
+                "第十章 示例.mp3",
+                "第四百七十章 示例.mp3",
+            ],
+        ),
+        (
+            vec!["第十章 示例.mp3", "2.mp3", "第一章 示例.mp3", "11.mp3"],
+            vec!["第一章 示例.mp3", "2.mp3", "第十章 示例.mp3", "11.mp3"],
+        ),
+    ] {
+        let mut local: Vec<_> = files
+            .iter()
+            .map(|file| format!(r"C:\books\{file}"))
+            .collect();
+        local.sort_by_cached_key(|path| chapter_order_key(path));
+        assert_eq!(
+            local,
+            expected
+                .iter()
+                .map(|file| format!(r"C:\books\{file}"))
+                .collect::<Vec<_>>()
+        );
+        let url_for = |file: &str| {
+            let mut url = url::Url::parse("https://example.test/book/").unwrap();
+            url.path_segments_mut().unwrap().push(file);
+            url.to_string()
+        };
+        let mut remote: Vec<_> = files.iter().map(|file| url_for(file)).collect();
+        remote.sort_by_cached_key(|path| chapter_order_key(path));
+        assert_eq!(
+            remote,
+            expected
+                .iter()
+                .map(|file| url_for(file))
+                .collect::<Vec<_>>()
+        );
+    }
+    let mut ranges = vec!["51-100/1.mp3", "1-50/10.mp3", "1-50/2.mp3"];
+    ranges.sort_by_cached_key(|path| chapter_order_key(path));
+    assert_eq!(ranges, vec!["1-50/2.mp3", "1-50/10.mp3", "51-100/1.mp3"]);
+}
+
+#[test]
+fn series_members_inherit_parent_people_without_misreading_volume_codes() {
+    use crate::core::library_scanner::shared::directory_book_name;
+    for (child, parent, title, author, narrator) in [
+        (
+            "示例第一部",
+            "示例-作者甲／演播甲",
+            "示例第一部",
+            Some("作者甲"),
+            Some("演播甲"),
+        ),
+        ("示例-S01", "示例-作者甲", "示例-S01", Some("作者甲"), None),
+        (
+            "S02",
+            "示例-作者甲／演播甲",
+            "S02",
+            Some("作者甲"),
+            Some("演播甲"),
+        ),
+        (
+            "示例第一部-作者乙",
+            "示例-作者甲／演播甲",
+            "示例第一部",
+            Some("作者乙"),
+            Some("演播甲"),
+        ),
+        ("其他书第一部", "示例-作者甲", "其他书第一部", None, None),
+        ("独立书", "合集-作者甲", "独立书", None, None),
+    ] {
+        let actual = directory_book_name(child, parent);
+        assert_eq!(
+            (actual.title, actual.author, actual.narrator),
+            (title, author, narrator)
+        );
+    }
+    for names in [
+        ["示例第一部", "示例第二部", "示例第三部"],
+        [
+            "示例-第一部-作者乙",
+            "示例-第二部",
+            "示例-第三部-演播：演播乙",
+        ],
+        ["示例-S01", "示例-S02", "示例-S03"],
+        ["S01", "S02", "S03"],
+    ] {
+        let candidates: Vec<_> = names
+            .iter()
+            .enumerate()
+            .map(|(index, name)| SeriesDirectoryCandidate {
+                key: index,
+                parent_key: "parent".into(),
+                parent_name: "示例 - 作者甲 ／ 演播甲".into(),
+                name: (*name).into(),
+            })
+            .collect();
+        let series = infer_series_directories(&candidates);
+        assert_eq!(series.len(), 3, "{names:?}");
+        for index in 0..3 {
+            assert_eq!(series[&index].title, "示例");
+            assert_eq!(series[&index].order, index as i32 + 1);
+        }
     }
 }
 

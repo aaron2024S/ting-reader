@@ -540,7 +540,12 @@ pub fn align_chapters_to_file_stems(
 /// Audiobookshelf chapter offsets must follow media-file order. Main and extra
 /// chapter indexes are separate UI sequences and cannot be used for this.
 pub fn build_audiobookshelf_chapters(mut chapters: Vec<Chapter>) -> Vec<AudiobookshelfChapter> {
-    chapters.sort_by(|a, b| natord::compare(&a.path, &b.path).then_with(|| a.id.cmp(&b.id)));
+    chapters.sort_by_cached_key(|chapter| {
+        (
+            super::text_cleaner::chapter_order_key(&chapter.path),
+            chapter.id.clone(),
+        )
+    });
 
     let mut current_time = 0.0;
     chapters

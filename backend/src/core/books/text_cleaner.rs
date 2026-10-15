@@ -12,6 +12,8 @@
 
 use crate::core::app::error::{Result, TingError};
 use regex::Regex;
+use std::cmp::Ordering;
+use std::sync::OnceLock;
 
 /// Extract the title from a directory/search name using "Title-Contributor"
 /// or "Title | Description". Explicit metadata titles do not use this fallback.
@@ -42,9 +44,16 @@ impl<'a> BookName<'a> {
             author: None,
             narrator: None,
         };
-        if let Some((title, contributors)) = name.split_once(['-', '－', '—']) {
-            let title = title.trim();
-            let contributors = contributors.trim();
+        for (index, _) in name.match_indices(['-', '－', '—']) {
+            let title = name[..index].trim();
+            let contributors = name[index..].trim_start_matches(['-', '－', '—']).trim();
+            let token = contributors
+                .split(['/', '／', '-', '－', '—'])
+                .next()
+                .unwrap_or_default();
+            if is_volume_marker(token) {
+                continue;
+            }
             // A numeric volume suffix belongs to the title.
             if !title.is_empty()
                 && !contributors.is_empty()
@@ -71,9 +80,141 @@ impl<'a> BookName<'a> {
                         _ => parsed.author = Some(value),
                     }
                 }
+                break;
             }
         }
         parsed
+    }
+}
+
+fn is_volume_marker(value: &str) -> bool {
+    static VOLUME: OnceLock<Regex> = OnceLock::new();
+    VOLUME.get_or_init(|| Regex::new(
+        r"(?ix)^\s*(?:[0-9０-９]+|s[0-9０-９]{1,3}|(?:vol(?:ume)?|season|book)\s*\.?\s*[0-9０-９]{1,3}|(?:第\s*)?[0-9０-９零〇一二两三四五六七八九十百千万]+\s*(?:卷|季|部|册|輯|辑))\s*$",
+    ).unwrap()).is_match(value)
+}
+
+/// Shared positive/zero ordinal parser for series and chapter filenames.
+/// Checked arithmetic rejects malformed/overflowing input instead of panicking.
+pub(crate) fn parse_ordinal(value: &str) -> Option<i32> {
+    let value: String = value
+        .trim()
+        .chars()
+        .map(|ch| match ch {
+            '０'..='９' => char::from(b'0' + (ch as u32 - '０' as u32) as u8),
+            _ => ch,
+        })
+        .collect();
+    if value.is_empty() {
+        return None;
+    }
+    let digit = |ch| match ch {
+        '0'..='9' => Some(ch as i32 - '0' as i32),
+        '零' | '〇' => Some(0),
+        '一' => Some(1),
+        '二' | '两' => Some(2),
+        '三' => Some(3),
+        '四' => Some(4),
+        '五' => Some(5),
+        '六' => Some(6),
+        '七' => Some(7),
+        '八' => Some(8),
+        '九' => Some(9),
+        _ => None,
+    };
+    if value.chars().all(|ch| digit(ch).is_some()) {
+        return value.chars().try_fold(0i32, |number, ch| {
+            number.checked_mul(10)?.checked_add(digit(ch)?)
+        });
+    }
+    let mut total = 0i32;
+    let mut section = 0i32;
+    let mut number = 0i32;
+    let mut previous_unit = 10000;
+    let mut has_ten_thousands = false;
+    for ch in value.chars() {
+        if let Some(next) = digit(ch) {
+            number = number.checked_mul(10)?.checked_add(next)?;
+            continue;
+        }
+        let unit = match ch {
+            '十' => 10,
+            '百' => 100,
+            '千' => 1000,
+            '万' => 10000,
+            _ => return None,
+        };
+        if unit == 10000 {
+            if has_ten_thousands {
+                return None;
+            }
+            section = section.checked_add(number)?;
+            total = total.checked_add(section.max(1).checked_mul(unit)?)?;
+            section = 0;
+            previous_unit = 10000;
+            has_ten_thousands = true;
+        } else {
+            if unit >= previous_unit {
+                return None;
+            }
+            section = section.checked_add(number.max(1).checked_mul(unit)?)?;
+            previous_unit = unit;
+        }
+        number = 0;
+    }
+    total.checked_add(section)?.checked_add(number)
+}
+
+fn chapter_number_match(title: &str) -> Option<(i32, usize)> {
+    static NUMBER: OnceLock<Regex> = OnceLock::new();
+    let regex = NUMBER.get_or_init(|| Regex::new(
+        r"(?ix)(?:第\s*([0-9０-９零〇一二两三四五六七八九十百千万]+)\s*[章节集回话話節讲講]|([0-9０-９零〇一二两三四五六七八九十百千万]+)\s*[章节集回话話節讲講]|\b(?:chapter|episode|ep)\s*([0-9０-９]+))|^\s*([0-9０-９零〇一二两三四五六七八九十百千万]+)(?:[\s._、:：\-]|$)",
+    ).unwrap());
+    let caps = regex.captures(title)?;
+    let number = caps.iter().skip(1).flatten().next()?;
+    Some((parse_ordinal(number.as_str())?, caps.get(0)?.end()))
+}
+
+/// Cached key shared by scans, chapter merges and sidecar offsets.
+/// Compare decoded paths naturally; numbered filenames use their numeric
+/// chapter position, including Chinese ordinals. Directory segments retain
+/// their order so chapter counters can restart inside separate ranges.
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct ChapterOrderKey {
+    normalized: String,
+    original: String,
+}
+
+impl Ord for ChapterOrderKey {
+    fn cmp(&self, other: &Self) -> Ordering {
+        natord::compare(&self.normalized, &other.normalized)
+            .then_with(|| self.original.cmp(&other.original))
+    }
+}
+
+impl PartialOrd for ChapterOrderKey {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+pub(crate) fn chapter_order_key(path: &str) -> ChapterOrderKey {
+    let url = (path.starts_with("http://") || path.starts_with("https://"))
+        .then(|| url::Url::parse(path).ok())
+        .flatten();
+    let decoded = url
+        .as_ref()
+        .map(|url| urlencoding::decode(url.path()).unwrap_or_else(|_| url.path().into()));
+    let normalized = decoded.as_deref().unwrap_or(path).replace('\\', "/");
+    let (parent, filename) = normalized.rsplit_once('/').unwrap_or(("", &normalized));
+    let normalized = if let Some((number, end)) = chapter_number_match(filename) {
+        format!("{parent}/{number} {}", &filename[end..])
+    } else {
+        normalized
+    };
+    ChapterOrderKey {
+        normalized,
+        original: path.to_owned(),
     }
 }
 
@@ -251,27 +392,7 @@ impl TextCleaner {
 
     /// Extract chapter number from title
     pub fn extract_chapter_number(&self, title: &str) -> Option<i32> {
-        // Priority 1: "第xxx集" or "第xxx章"
-        let re1 = Regex::new(r"第\s*(\d+)\s*[集回章话]").unwrap();
-        if let Some(caps) = re1.captures(title)
-            && let Ok(num) = caps[1].parse::<i32>()
-        {
-            return Some(num);
-        }
-
-        // Priority 2: "xxx集" or "xxx章"
-        let re2 = Regex::new(r"(\d+)\s*[集回章话]").unwrap();
-        if let Some(caps) = re2.captures(title)
-            && let Ok(num) = caps[1].parse::<i32>()
-        {
-            return Some(num);
-        }
-
-        // Priority 3: Just numbers, but be careful not to pick up dates or other numbers
-        // This is risky, so maybe only if it looks like a chapter number (at start or separated)
-        // For now, let's stick to explicit markers or if it's the only number.
-
-        None
+        chapter_number_match(title).map(|(number, _)| number)
     }
 
     /// Clean a chapter title

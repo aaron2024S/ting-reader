@@ -89,11 +89,8 @@ impl MergeService {
         // Let's do a re-sort pass.
         let mut all_chapters = self.chapter_repo.find_by_book(target_book_id).await?;
         // Sort by title natural order
-        all_chapters.sort_by(|a, b| {
-            natord::compare(
-                a.title.as_deref().unwrap_or(""),
-                b.title.as_deref().unwrap_or(""),
-            )
+        all_chapters.sort_by_cached_key(|chapter| {
+            super::text_cleaner::chapter_order_key(chapter.title.as_deref().unwrap_or_default())
         });
 
         for (i, chapter) in all_chapters.iter_mut().enumerate() {
@@ -161,7 +158,8 @@ impl MergeService {
             + 1;
 
         let mut source_chapters = self.chapter_repo.find_by_book(source_book_id).await?;
-        source_chapters.sort_by(|a, b| natord::compare(&a.path, &b.path));
+        source_chapters
+            .sort_by_cached_key(|chapter| super::text_cleaner::chapter_order_key(&chapter.path));
 
         for chapter in source_chapters.iter_mut() {
             let duplicate_hash = chapter

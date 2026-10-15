@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
 
 use crate::core::books::metadata::BookMetadataFields as ScannedMetadata;
-use crate::core::books::text_cleaner::BookName;
+use crate::core::library_scanner::shared::directory_book_name;
 
 impl LibraryScanner {
     pub(super) async fn extract_final_metadata(
@@ -25,7 +25,12 @@ impl LibraryScanner {
             .filter(|value| !value.trim().is_empty())
             .unwrap_or(dir_name);
         final_meta.title = Some(self.text_cleaner.clean_book_directory_title(base_title));
-        let name = BookName::parse(base_title);
+        let parent_name = dir
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        let name = directory_book_name(base_title, parent_name);
         final_meta.author = name.author.map(str::to_owned);
         final_meta.narrator = name.narrator.map(str::to_owned);
 

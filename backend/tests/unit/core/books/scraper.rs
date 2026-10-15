@@ -396,6 +396,21 @@ async fn automatic_and_aggregate_search_keep_folder_hints_in_provider_requests()
         assert!(request["author"].is_null());
     }
     service
+        .scrape_book_metadata_with_context(
+            "示例书名第一部",
+            &config,
+            Some(json!({
+                "directory_name": "示例书名第一部",
+                "current_metadata": { "author": "继承作者", "narrator": "继承演播" },
+            })),
+        )
+        .await
+        .unwrap();
+    let request = provider.requests.lock().unwrap().last().unwrap().clone();
+    assert_eq!(request["title"], "示例书名第一部");
+    assert_eq!(request["narrator"], "继承演播");
+    assert!(request["author"].is_null());
+    service
         .search_with_params(
             &HashMap::from([
                 ("title".into(), "示例书名-示例作者／示例演播".into()),

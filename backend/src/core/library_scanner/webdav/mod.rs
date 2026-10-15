@@ -228,6 +228,7 @@ impl LibraryScanner {
                     });
             if let (Some((book_id, _, _)), Some(directory_fingerprint)) =
                 (existing_info.as_ref(), directory_fingerprint.as_ref())
+                && !mode.is_full()
                 && cache_complete
                 && cached_book_states.get(&dir_url).is_some_and(|state| {
                     state.fingerprint == *directory_fingerprint
@@ -243,7 +244,9 @@ impl LibraryScanner {
 
             // Natural ordering is needed only when this book will enter title
             // checks or chapter reconciliation. Cache hits above stay linear.
-            file_urls.sort_by(|a, b| natord::compare(a, b));
+            file_urls.sort_by_cached_key(|path| {
+                crate::core::books::text_cleaner::chapter_order_key(path)
+            });
             metadata_files.sort_by(|a, b| natord::compare(a, b));
 
             // Incremental Check: Skip if book exists and no files modified since last scan

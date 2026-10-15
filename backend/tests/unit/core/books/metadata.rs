@@ -77,6 +77,25 @@ fn writes_offsets_in_natural_file_order_not_extra_display_order() {
     assert_eq!(metadata[2].title, "extra 1");
 }
 
+#[test]
+fn chinese_chapter_sidecar_offsets_follow_the_same_order_as_scanning() {
+    let chapters = vec![
+        db_chapter("c470", "/book/第四百七十章 示例.mp3", "470", 10),
+        db_chapter("c10", "/book/第十章 示例.mp3", "10", 20),
+        db_chapter("c2", "/book/第二章 示例.mp3", "2", 30),
+    ];
+    let metadata = build_audiobookshelf_chapters(chapters);
+    assert_eq!(
+        metadata
+            .iter()
+            .map(|chapter| chapter.title.as_str())
+            .collect::<Vec<_>>(),
+        ["2", "10", "470"]
+    );
+    assert_eq!(metadata[1].start, 30.0);
+    assert_eq!(metadata[2].start, 50.0);
+}
+
 struct MetadataFixture {
     directory: tempfile::TempDir,
     chapters: ChapterRepository,

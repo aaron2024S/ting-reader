@@ -6,6 +6,7 @@ use std::sync::OnceLock;
 use tracing::{info, warn};
 
 use super::{LibraryScanner, ScanResult};
+use crate::core::books::text_cleaner::{BookName, parse_ordinal};
 use crate::db::repository::Repository;
 use regex::Regex;
 
@@ -188,7 +189,9 @@ where
             .as_deref()
             .map(clean_series_base_title)
             .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| clean_series_base_title(&candidate.parent_name));
+            .unwrap_or_else(|| {
+                clean_series_base_title(BookName::parse(&candidate.parent_name).title)
+            });
 
         if title.is_empty() {
             continue;
@@ -247,7 +250,7 @@ where
 }
 
 fn parse_series_directory_name(name: &str) -> Option<ParsedSeriesDirectory> {
-    let normalized = normalize_series_dir_name(name);
+    let normalized = normalize_series_dir_name(BookName::parse(name).title);
 
     if let Some(caps) = series_volume_regex().captures(&normalized) {
         let base = caps
@@ -303,6 +306,25 @@ fn parse_series_directory_name(name: &str) -> Option<ParsedSeriesDirectory> {
     }
 
     None
+}
+
+/// Inherit only from the immediate parent of the same book/series. A library
+/// or unrelated collection directory must not supply another book's people.
+pub(crate) fn directory_book_name<'a>(name: &'a str, parent: &'a str) -> BookName<'a> {
+    let mut book = BookName::parse(name);
+    let parent = BookName::parse(parent);
+    let same_title =
+        canonicalize_series_title_key(book.title) == canonicalize_series_title_key(parent.title);
+    let same_series = parse_series_directory_name(book.title).is_some_and(|series| {
+        series.base_title.is_none_or(|title| {
+            canonicalize_series_title_key(&title) == canonicalize_series_title_key(parent.title)
+        })
+    });
+    if !parent.title.is_empty() && (same_title || same_series) {
+        book.author = book.author.or(parent.author);
+        book.narrator = book.narrator.or(parent.narrator);
+    }
+    book
 }
 
 fn series_volume_regex() -> &'static Regex {
@@ -390,80 +412,7 @@ fn parse_leading_series_number(value: &str) -> Option<i32> {
 }
 
 fn parse_series_number(value: &str) -> Option<i32> {
-    let value = value.trim();
-    if value.is_empty() {
-        return None;
-    }
-
-    if value.chars().all(|ch| ch.is_ascii_digit()) {
-        return value.parse::<i32>().ok().filter(|num| *num > 0);
-    }
-
-    parse_chinese_series_number(value)
-}
-
-fn parse_chinese_series_number(value: &str) -> Option<i32> {
-    let mut total = 0;
-    let mut section = 0;
-    let mut number = 0;
-    let mut seen = false;
-
-    for ch in value.chars() {
-        let digit = match ch {
-            '零' | '〇' => {
-                seen = true;
-                number = 0;
-                continue;
-            }
-            '一' => Some(1),
-            '二' | '两' => Some(2),
-            '三' => Some(3),
-            '四' => Some(4),
-            '五' => Some(5),
-            '六' => Some(6),
-            '七' => Some(7),
-            '八' => Some(8),
-            '九' => Some(9),
-            _ => None,
-        };
-
-        if let Some(value) = digit {
-            seen = true;
-            number = value;
-            continue;
-        }
-
-        let unit = match ch {
-            '十' => Some(10),
-            '百' => Some(100),
-            '千' => Some(1000),
-            '万' => Some(10000),
-            _ => None,
-        }?;
-
-        seen = true;
-        if unit == 10000 {
-            section += number;
-            if section == 0 {
-                section = 1;
-            }
-            total += section * unit;
-            section = 0;
-        } else {
-            if number == 0 {
-                number = 1;
-            }
-            section += number * unit;
-        }
-        number = 0;
-    }
-
-    if !seen {
-        return None;
-    }
-
-    let result = total + section + number;
-    if result > 0 { Some(result) } else { None }
+    parse_ordinal(value).filter(|number| *number > 0)
 }
 
 pub(crate) fn parse_chapter_range_dir_name(name: &str) -> Option<ChapterRangeDir> {

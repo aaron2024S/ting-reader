@@ -388,8 +388,8 @@ impl LibraryScanner {
 
             // Only directories in the changed set pay the natural-sort and
             // aggregate-fingerprint cost. The discovery pass itself stays O(N).
-            files.sort_by(|a, b| {
-                natord::compare(a.to_string_lossy().as_ref(), b.to_string_lossy().as_ref())
+            files.sort_by_cached_key(|path| {
+                crate::core::books::text_cleaner::chapter_order_key(&path.to_string_lossy())
             });
             let dir_fingerprint = cached_states
                 .get(&dir_path_string)
