@@ -13,6 +13,70 @@
 use crate::core::app::error::{Result, TingError};
 use regex::Regex;
 
+/// Extract the title from a directory/search name using "Title-Contributor"
+/// or "Title | Description". Explicit metadata titles do not use this fallback.
+pub(crate) fn book_title_from_name(name: &str) -> &str {
+    BookName::parse(name).title
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct BookName<'a> {
+    pub title: &'a str,
+    pub author: Option<&'a str>,
+    pub narrator: Option<&'a str>,
+}
+
+impl<'a> BookName<'a> {
+    /// Title-Author[/Narrator]. A single unlabeled name defaults to author.
+    /// Fullwidth slash and a second hyphen work in actual directory names.
+    pub fn parse(name: &'a str) -> Self {
+        let name = name.trim();
+        let name = name
+            .split(['|', '丨', '｜'])
+            .next()
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            .unwrap_or(name);
+        let mut parsed = Self {
+            title: name,
+            author: None,
+            narrator: None,
+        };
+        if let Some((title, contributors)) = name.split_once(['-', '－', '—']) {
+            let title = title.trim();
+            let contributors = contributors.trim();
+            // A numeric volume suffix belongs to the title.
+            if !title.is_empty()
+                && !contributors.is_empty()
+                && !contributors.chars().all(|ch| ch.is_numeric())
+            {
+                parsed.title = title;
+                let (author, narrator) = contributors
+                    .split_once(['/', '／', '-', '－', '—'])
+                    .map_or((contributors, ""), |parts| parts);
+                for (value, is_narrator) in [(author, false), (narrator, true)] {
+                    let value = value.trim();
+                    let (label, value) = value
+                        .split_once([':', '：'])
+                        .map_or(("", value), |(label, value)| (label.trim(), value.trim()));
+                    if value.is_empty() {
+                        continue;
+                    }
+                    match label {
+                        "作者" | "原著" | "author" => parsed.author = Some(value),
+                        "演播" | "主播" | "播讲" | "narrator" => {
+                            parsed.narrator = Some(value)
+                        }
+                        _ if is_narrator => parsed.narrator = Some(value),
+                        _ => parsed.author = Some(value),
+                    }
+                }
+            }
+        }
+        parsed
+    }
+}
+
 /// Text cleaner for chapter titles and filenames
 pub struct TextCleaner {
     builtin_rules: Vec<CleaningRule>,
@@ -58,6 +122,10 @@ impl Default for CleanerConfig {
 }
 
 impl TextCleaner {
+    pub(crate) fn clean_book_directory_title(&self, name: &str) -> String {
+        self.clean_chapter_title(book_title_from_name(name), None).0
+    }
+
     /// Create a new text cleaner with the given configuration
     pub fn new(config: CleanerConfig) -> Self {
         let builtin_rules = Self::create_builtin_rules();

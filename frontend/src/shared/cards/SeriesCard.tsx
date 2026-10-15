@@ -1,4 +1,5 @@
 import React from 'react';
+import { bookPrimaryCredit } from '../../core/utils/book';
 import type { Series } from '../../core/types';
 import { Layers } from 'lucide-react';
 import { Link } from 'react-router';
@@ -14,6 +15,7 @@ interface SeriesCardProps {
 
 const SeriesCard: React.FC<SeriesCardProps> = ({ series, onClick, coverShape = 'square' }) => {
   const { t } = useTranslation();
+  const credits = bookPrimaryCredit(series.author, series.narrator);
   const content = (
     <>
       <div className={`relative ${coverShape === 'square' ? 'aspect-square' : 'aspect-[3/4]'} overflow-visible mb-1`}>
@@ -60,11 +62,11 @@ const SeriesCard: React.FC<SeriesCardProps> = ({ series, onClick, coverShape = '
           className="font-bold text-sm text-slate-900 dark:text-white group-hover:text-primary-600 transition-colors leading-tight" 
           maxLines={1}
         />
-        <div className="mt-1 flex flex-col gap-0.5">
-          <div className="flex items-center gap-1.5 text-xs text-slate-500 dark:text-slate-400">
-            <span className="line-clamp-1">{series.author || t('shared.unknownAuthor')}</span>
-          </div>
-        </div>
+        {credits && (
+          <p className="mt-1 truncate text-xs text-slate-500 dark:text-slate-400">
+            {credits}
+          </p>
+        )}
       </div>
     </>
   );

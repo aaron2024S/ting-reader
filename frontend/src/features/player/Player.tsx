@@ -27,17 +27,16 @@ import {
   CHAPTERS_PER_GROUP,
 } from "./playerHelpers";
 import {
-  CollapsedPlayerView,
-  ExpandedPlayerHeader,
   ExpandedMainControls,
   ExpandedBottomControls,
   ExpandedProgressSection,
-  ExpandedCoverAndMeta,
-  MiniPlayerBookInfo,
   MiniPlayerDesktopControls,
   MiniPlayerDesktopExtras,
   MiniPlayerMobileControls,
-} from "./PlayerPieces";
+} from "./PlayerControls";
+import {
+  CollapsedPlayerView, ExpandedPlayerHeader, ExpandedCoverAndMeta, MiniPlayerBookInfo,
+} from "./PlayerViews";
 
 const Player: React.FC = () => {
   const bookOperations = useBookOperations();

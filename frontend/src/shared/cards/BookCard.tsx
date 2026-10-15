@@ -9,6 +9,7 @@ import ExpandableTitle from '../widgets/ExpandableTitle';
 import { useTranslation } from 'react-i18next';
 import { useUiPreferencesStore } from '../../core/stores/uiPreferencesStore';
 import { coverProgressPercent } from '../../core/utils/playbackPreferences';
+import { bookPrimaryCredit } from '../../core/utils/book';
 
 interface BookCardProps {
   book: Book;
@@ -22,6 +23,7 @@ const BookCard: React.FC<BookCardProps> = ({ book, onClick, disableLink, coverSh
   const showProgress = useUiPreferencesStore((state) => state.bookshelfProgressEnabled);
   const progress = coverProgressPercent(book.progress_percent);
   const effectiveThemeColor = book.theme_color && !isTooLight(book.theme_color) ? book.theme_color : undefined;
+  const credits = bookPrimaryCredit(book.author, book.narrator);
 
   const content = (
     <>
@@ -63,11 +65,7 @@ const BookCard: React.FC<BookCardProps> = ({ book, onClick, disableLink, coverSh
           className="font-bold text-sm text-slate-900 dark:text-white group-hover:text-primary-600 transition-colors leading-tight" 
           maxLines={1}
         />
-        <div className="mt-1 flex flex-col gap-0.5">
-          <div className="flex items-center gap-1.5 text-xs text-slate-500 dark:text-slate-400">
-            <span className="line-clamp-1">{book.author || t('shared.unknownAuthor')}</span>
-          </div>
-        </div>
+        {credits && <p className="mt-1 truncate text-xs text-slate-500 dark:text-slate-400" title={credits}>{credits}</p>}
       </div>
     </>
   );

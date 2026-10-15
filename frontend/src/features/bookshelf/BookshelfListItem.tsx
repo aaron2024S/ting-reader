@@ -6,6 +6,7 @@ import { useUiPreferencesStore } from '../../core/stores/uiPreferencesStore';
 import { getCoverUrl } from '../../core/utils/image';
 import { coverProgressPercent } from '../../core/utils/playbackPreferences';
 import { getRuntimeAssetUrl } from '../../core/utils/runtimeUrl';
+import { bookCredits } from '../../core/utils/book';
 
 interface Props {
   item: Book | Series;
@@ -20,6 +21,7 @@ export default function BookshelfListItem({ item, kind, coverShape, iconSize, se
   const { t } = useTranslation();
   const showProgress = useUiPreferencesStore(state => state.bookshelfProgressEnabled);
   const isSeries = kind === 'series';
+  const credits = bookCredits(item.author, item.narrator);
   const progress = coverProgressPercent((item as Book).progress_percent);
   const coverWidth = iconSize === 'small' ? 'w-12' : iconSize === 'large' ? 'w-20' : 'w-16';
   const className = `group flex w-full items-center gap-3 px-3 py-3 text-left transition-colors sm:gap-4 sm:px-4 ${
@@ -53,9 +55,7 @@ export default function BookshelfListItem({ item, kind, coverShape, iconSize, se
             <h3 title={item.title} className="truncate text-sm font-semibold leading-snug text-slate-900 transition-colors group-hover:text-primary-600 dark:text-white sm:text-base">
               {item.title}
             </h3>
-            <p className="mt-1 truncate text-xs text-slate-500 dark:text-slate-400">
-              {[item.author || t('shared.unknownAuthor'), item.narrator].filter(Boolean).join(' · ')}
-            </p>
+            {credits && <p className="mt-1 truncate text-xs text-slate-500 dark:text-slate-400" title={credits}>{credits}</p>}
           </div>
           {isSeries ? (
             <span className="shrink-0 text-xs text-slate-500 dark:text-slate-400">

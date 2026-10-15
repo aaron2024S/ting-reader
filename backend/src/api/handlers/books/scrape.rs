@@ -94,29 +94,7 @@ pub async fn scrape_book_diff(
 
     let best_match = &search_results.items[0];
     // We use search result directly as it now contains full metadata
-    let mut detail = crate::plugin::types::scraper::BookDetail {
-        id: best_match.id.clone(),
-        title: best_match.title.clone(),
-        author: best_match.author.clone(),
-        narrator: best_match.narrator.clone(),
-        cover_url: best_match.cover_url.clone(),
-        intro: best_match.intro.clone().unwrap_or_default(),
-        tags: best_match.tags.clone(),
-        chapter_count: 0,
-        duration: best_match.duration,
-        subtitle: best_match.subtitle.clone(),
-        published_year: best_match.published_year.clone(),
-        published_date: best_match.published_date.clone(),
-        publisher: best_match.publisher.clone(),
-        isbn: best_match.isbn.clone(),
-        asin: best_match.asin.clone(),
-        language: best_match.language.clone(),
-        explicit: best_match.explicit.unwrap_or(false),
-        abridged: best_match.abridged.unwrap_or(false),
-        genre: best_match.genre.clone(),
-        chapter_title_template: best_match.chapter_title_template.clone(),
-        chapter_titles: best_match.chapter_titles.clone(),
-    };
+    let mut detail = crate::plugin::types::scraper::BookDetail::from(best_match);
 
     // 4. Handle Specific Field Sources (Merge Strategy)
     // Helper to fetch and merge specific field

@@ -4,6 +4,10 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
+use super::scrape_results::{
+    collect_candidates, merge_source_results, prioritize_contributor_matches, rank_candidates,
+    source_search_params,
+};
 use crate::core::app::error::{Result, TingError};
 use crate::plugin::manager::PluginManager;
 use crate::plugin::types::scraper::{BookDetail, BookItem, ScraperSourceInfo, SearchResult};
@@ -84,14 +88,19 @@ impl ScraperService {
             .collect()
     }
 
-    async fn select_scraper(&self, source: Option<&str>) -> Result<String> {
+    async fn select_scraper(&self, source: Option<&str>) -> Result<ScraperSourceInfo> {
+        let mut sources = self.get_sources().await;
         if let Some(source_id) = source {
-            let sources = self.get_sources().await;
-            if sources.iter().any(|s| s.id == source_id && s.enabled) {
-                return Ok(source_id.to_string());
-            }
-            if let Some(s) = sources.iter().find(|s| s.name == source_id && s.enabled) {
-                return Ok(s.id.clone());
+            let index = sources
+                .iter()
+                .position(|s| s.enabled && s.id == source_id)
+                .or_else(|| {
+                    sources
+                        .iter()
+                        .position(|s| s.enabled && s.name == source_id)
+                });
+            if let Some(index) = index {
+                return Ok(sources.remove(index));
             }
             return Err(TingError::PluginNotFound(format!(
                 "Scraper source '{}' not found or not enabled",
@@ -99,20 +108,19 @@ impl ScraperService {
             )));
         }
 
-        let sources = self.get_sources().await;
-        let active_sources: Vec<_> = sources.into_iter().filter(|s| s.enabled).collect();
+        let mut active_sources: Vec<_> = sources.into_iter().filter(|s| s.enabled).collect();
         if active_sources.is_empty() {
             return Err(TingError::PluginNotFound(
                 "No active scraper plugins available".to_string(),
             ));
         }
-        if let Some(source) = active_sources
+        if let Some(index) = active_sources
             .iter()
-            .find(|source| !source.aggregate_auto_scrape)
+            .position(|source| !source.aggregate_auto_scrape)
         {
-            return Ok(source.id.clone());
+            return Ok(active_sources.remove(index));
         }
-        Ok(active_sources[0].id.clone())
+        Ok(active_sources.remove(0))
     }
 
     fn search_request(
@@ -271,7 +279,7 @@ impl ScraperService {
         page: u32,
         page_size: u32,
     ) -> Result<SearchResult> {
-        let mut normalized_params: BTreeMap<String, String> = search_params
+        let normalized_params: BTreeMap<String, String> = search_params
             .iter()
             .filter_map(|(key, value)| {
                 let value = value.trim();
@@ -283,49 +291,52 @@ impl ScraperService {
                 "At least one search parameter is required".into(),
             ));
         }
-        if let Some(query) = normalized_params.get_mut("title") {
-            let clean = query.split(['丨', '|']).next().unwrap_or(query).trim();
-            if !clean.is_empty() {
-                *query = clean.to_owned();
-            }
-        }
-        let source_id = self.select_scraper(source).await?;
+        let rank_result = |result: &mut SearchResult| {
+            prioritize_contributor_matches(
+                normalized_params
+                    .get("title")
+                    .map(String::as_str)
+                    .unwrap_or_default(),
+                normalized_params.get("author").map(String::as_str),
+                normalized_params.get("narrator").map(String::as_str),
+                result,
+            );
+        };
+        let selected_source = self.select_scraper(source).await?;
+        let source_id = &selected_source.id;
         let cache_key = SearchCacheKey {
             source_id: source_id.clone(),
-            params: normalized_params,
+            params: source_search_params(&normalized_params, &selected_source),
             page,
             page_size,
         };
-        if let Some(result) = self.get_cached_search(&cache_key) {
+        if let Some(mut result) = self.get_cached_search(&cache_key) {
+            rank_result(&mut result);
             return Ok(result);
         }
-        let result = if self.is_aggregate_source(&source_id).await {
-            self.search_aggregate_source(&source_id, &cache_key.params, page, page_size)
+        let mut result = if selected_source.aggregate_auto_scrape {
+            self.search_aggregate_source(source_id, &cache_key.params, page, page_size)
                 .await?
         } else {
-            let filters = cache_key
-                .params
-                .iter()
-                .filter(|(key, _)| !matches!(key.as_str(), "title" | "author" | "narrator"))
-                .map(|(key, value)| (key.clone(), serde_json::Value::String(value.clone())))
-                .collect();
-            let params = Self::search_request(
-                cache_key.params.get("title").map(String::as_str),
-                cache_key.params.get("author").map(String::as_str),
-                cache_key.params.get("narrator").map(String::as_str),
-                page,
-                page_size,
-                filters,
-            )?;
-            match self.invoke_search(&source_id, params.clone()).await {
+            let params = Self::request_from_params(&cache_key.params, page, page_size)?;
+            match self.invoke_search(source_id, params).await {
                 Ok(result) => result,
                 Err(error) if source.is_some() => return Err(error),
                 Err(_) => {
-                    let fallback = self.try_fallback_scraper(&source_id).await?;
+                    let fallback = self.try_fallback_scraper(source_id).await?;
+                    let params = Self::request_from_params(
+                        &source_search_params(&normalized_params, &fallback),
+                        page,
+                        page_size,
+                    )?;
                     // A fallback result must never occupy the primary source's cache.
                     return self
-                        .invoke_search(&fallback, params)
+                        .invoke_search(&fallback.id, params)
                         .await
+                        .map(|mut result| {
+                            rank_result(&mut result);
+                            result
+                        })
                         .map_err(|error| {
                             error.with_plugin_execution_context("All scrapers failed. Last error")
                         });
@@ -333,7 +344,28 @@ impl ScraperService {
             }
         };
         self.cache_search_result(cache_key, result.clone());
+        rank_result(&mut result);
         Ok(result)
+    }
+
+    fn request_from_params(
+        params: &BTreeMap<String, String>,
+        page: u32,
+        page_size: u32,
+    ) -> Result<serde_json::Value> {
+        let filters = params
+            .iter()
+            .filter(|(key, _)| !matches!(key.as_str(), "title" | "author" | "narrator"))
+            .map(|(key, value)| (key.clone(), serde_json::Value::String(value.clone())))
+            .collect();
+        Self::search_request(
+            params.get("title").map(String::as_str),
+            params.get("author").map(String::as_str),
+            params.get("narrator").map(String::as_str),
+            page,
+            page_size,
+            filters,
+        )
     }
 
     async fn invoke_search(
@@ -351,7 +383,7 @@ impl ScraperService {
         Self::parse_search_page(value)
     }
 
-    async fn try_fallback_scraper(&self, failed_source: &str) -> Result<String> {
+    async fn try_fallback_scraper(&self, failed_source: &str) -> Result<ScraperSourceInfo> {
         let sources = self.get_sources().await;
         let fallback = sources
             .into_iter()
@@ -359,7 +391,7 @@ impl ScraperService {
         match fallback {
             Some(source) => {
                 tracing::debug!("Using fallback scraper: {}", source.id);
-                Ok(source.id)
+                Ok(source)
             }
             None => Err(TingError::PluginNotFound(
                 "No fallback scraper available".to_string(),
@@ -369,24 +401,30 @@ impl ScraperService {
 
     async fn search_source_direct(
         &self,
-        source_id: &String,
+        source: &ScraperSourceInfo,
         query: &str,
         author: Option<&str>,
         narrator: Option<&str>,
         page: u32,
         page_size: u32,
     ) -> Result<SearchResult> {
-        let params = Self::search_request(
-            Some(query),
-            author,
-            narrator,
-            page,
-            page_size,
-            Default::default(),
-        )?;
+        let params = [
+            ("title", Some(query)),
+            ("author", author),
+            ("narrator", narrator),
+        ]
+        .into_iter()
+        .filter_map(|(key, value)| value.map(|value| (key.into(), value.to_owned())))
+        .collect();
+        let params =
+            Self::request_from_params(&source_search_params(&params, source), page, page_size)?;
 
-        self.invoke_search(source_id, params)
+        self.invoke_search(&source.id, params)
             .await
+            .map(|mut result| {
+                prioritize_contributor_matches(query, author, narrator, &mut result);
+                result
+            })
             .map_err(|error| {
                 error.with_plugin_execution_context("Failed while preparing aggregate candidates")
             })
@@ -436,10 +474,6 @@ impl ScraperService {
         let now = Instant::now();
         cache.retain(|_, entry| entry.expires_at > now);
         cache.len()
-    }
-
-    async fn is_aggregate_source(&self, source_id: &str) -> bool {
-        self.aggregate_source_ids().await.contains(source_id)
     }
 
     async fn clean_query_with_aggregate_sources(
@@ -551,10 +585,9 @@ impl ScraperService {
             .map(|value| value.trim())
             .filter(|value| !value.is_empty());
 
-        let aggregate_sources = self.aggregate_source_ids().await;
         let candidate_scope =
             Self::source_id_scope_param(search_params.get("candidate_sources")).unwrap_or_default();
-        let candidate_source_ids: Vec<String> = self
+        let candidate_sources: Vec<_> = self
             .get_sources()
             .await
             .into_iter()
@@ -562,19 +595,19 @@ impl ScraperService {
                 source.enabled
                     && source.auto_scrape
                     && source.id.as_str() != aggregate_source.as_str()
-                    && !aggregate_sources.contains(&source.id)
+                    && !source.aggregate_auto_scrape
                     && candidate_scope.contains(&source.id)
             })
-            .map(|source| source.id)
             .collect();
 
         let mut source_results: HashMap<String, BookDetail> = HashMap::new();
         let mut candidate_items = Vec::new();
 
-        for source_id in &candidate_source_ids {
+        for source in &candidate_sources {
+            let source_id = &source.id;
             match self
                 .search_source_direct(
-                    source_id,
+                    source,
                     query,
                     author,
                     narrator,
@@ -584,31 +617,13 @@ impl ScraperService {
                 .await
             {
                 Ok(search_res) => {
-                    if let Some(item) = search_res.items.first() {
-                        let detail = Self::detail_from_item(item);
-                        source_results.insert(source_id.clone(), detail);
-                    }
-
-                    for (rank, item) in search_res.items.iter().enumerate() {
-                        let relevance_score = Self::candidate_title_relevance_score(query, item);
-                        let mut item_json =
-                            serde_json::to_value(item).unwrap_or_else(|_| serde_json::json!({}));
-                        if let Some(object) = item_json.as_object_mut() {
-                            object.insert(
-                                "source_id".to_string(),
-                                serde_json::Value::String(source_id.clone()),
-                            );
-                            object.insert(
-                                "source_result_rank".to_string(),
-                                serde_json::json!(rank + 1),
-                            );
-                            object.insert(
-                                "title_relevance_score".to_string(),
-                                serde_json::json!(relevance_score),
-                            );
-                        }
-                        candidate_items.push(item_json);
-                    }
+                    collect_candidates(
+                        query,
+                        source_id,
+                        search_res,
+                        &mut source_results,
+                        &mut candidate_items,
+                    )?;
                 }
                 Err(e) => tracing::warn!(
                     source_id = %source_id,
@@ -624,26 +639,17 @@ impl ScraperService {
             }
         }
 
-        candidate_items.sort_by(|left, right| {
-            let right_score = Self::candidate_value_score(right);
-            let left_score = Self::candidate_value_score(left);
-            right_score
-                .partial_cmp(&left_score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| {
-                    Self::candidate_value_rank(left).cmp(&Self::candidate_value_rank(right))
-                })
-                .then_with(|| {
-                    Self::candidate_value_title(left).cmp(&Self::candidate_value_title(right))
-                })
-        });
+        rank_candidates(&mut candidate_items);
         candidate_items.truncate(20);
 
         let merge_config = crate::db::models::ScraperConfig {
-            default_sources: candidate_source_ids,
+            default_sources: candidate_sources
+                .into_iter()
+                .map(|source| source.id)
+                .collect(),
             ..Default::default()
         };
-        let merged_metadata = self.merge_source_results(query, &merge_config, &source_results);
+        let merged_metadata = merge_source_results(query, &merge_config, &source_results);
 
         let aggregate_context = Self::search_request_with_context(
             Some(query),
@@ -685,148 +691,12 @@ impl ScraperService {
         Self::parse_search_page(value)
     }
 
-    fn candidate_title_relevance_score(query: &str, item: &BookItem) -> f64 {
-        let query = Self::normalize_title_for_match(query);
-        let title = Self::normalize_title_for_match(&item.title);
-        if query.is_empty() || title.is_empty() {
-            return 0.0;
-        }
-
-        if title == query {
-            return 1000.0;
-        }
-        if title.contains(&query) {
-            return 900.0 + (query.chars().count() as f64 / title.chars().count() as f64);
-        }
-        if query.contains(&title) {
-            return 850.0 + (title.chars().count() as f64 / query.chars().count() as f64);
-        }
-
-        let query_chars: HashSet<char> = query.chars().collect();
-        let title_chars: HashSet<char> = title.chars().collect();
-        let overlap = query_chars.intersection(&title_chars).count() as f64;
-        if overlap == 0.0 {
-            return 0.0;
-        }
-
-        let query_coverage = overlap / query_chars.len().max(1) as f64;
-        let title_coverage = overlap / title_chars.len().max(1) as f64;
-        500.0 * ((query_coverage * 0.7) + (title_coverage * 0.3))
-    }
-
-    fn normalize_title_for_match(value: &str) -> String {
-        value
-            .split('丨')
-            .next()
-            .unwrap_or(value)
-            .chars()
-            .flat_map(char::to_lowercase)
-            .filter(|ch| {
-                !ch.is_whitespace()
-                    && !matches!(
-                        ch,
-                        '-' | '_'
-                            | '.'
-                            | '·'
-                            | ':'
-                            | '：'
-                            | '|'
-                            | '/'
-                            | '\\'
-                            | '('
-                            | ')'
-                            | '（'
-                            | '）'
-                            | '['
-                            | ']'
-                            | '【'
-                            | '】'
-                            | '{'
-                            | '}'
-                            | '《'
-                            | '》'
-                            | '<'
-                            | '>'
-                            | '，'
-                            | ','
-                            | '。'
-                            | '！'
-                            | '!'
-                            | '?'
-                            | '？'
-                    )
-            })
-            .collect()
-    }
-
-    fn candidate_value_score(value: &serde_json::Value) -> f64 {
-        value
-            .get("title_relevance_score")
-            .and_then(serde_json::Value::as_f64)
-            .unwrap_or(0.0)
-    }
-
-    fn candidate_value_rank(value: &serde_json::Value) -> u64 {
-        value
-            .get("source_result_rank")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(u64::MAX)
-    }
-
-    fn candidate_value_title(value: &serde_json::Value) -> String {
-        value
-            .get("title")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default()
-            .to_string()
-    }
-
-    async fn aggregate_source_ids(&self) -> HashSet<String> {
-        self.plugin_manager
-            .find_capabilities_by_kind("metadata_provider")
-            .await
-            .into_iter()
-            .filter(|registration| {
-                matches!(&registration.capability,
-                    crate::plugin::types::PluginCapability::MetadataProvider(cap)
-                    if cap.aggregate_auto_scrape)
-            })
-            .map(|registration| registration.plugin_id)
-            .collect()
-    }
-
-    fn detail_from_item(item: &BookItem) -> BookDetail {
-        BookDetail {
-            id: item.id.clone(),
-            title: item.title.clone(),
-            author: item.author.clone(),
-            narrator: item.narrator.clone(),
-            cover_url: item.cover_url.clone(),
-            intro: item.intro.clone().unwrap_or_default(),
-            tags: item.tags.clone(),
-            chapter_count: 0,
-            duration: item.duration,
-            subtitle: item.subtitle.clone(),
-            published_year: item.published_year.clone(),
-            published_date: item.published_date.clone(),
-            publisher: item.publisher.clone(),
-            isbn: item.isbn.clone(),
-            asin: item.asin.clone(),
-            language: item.language.clone(),
-            explicit: item.explicit.unwrap_or(false),
-            abridged: item.abridged.unwrap_or(false),
-            genre: item.genre.clone(),
-            chapter_title_template: item.chapter_title_template.clone(),
-            chapter_titles: item.chapter_titles.clone(),
-        }
-    }
-
     fn detail_from_plugin_value(value: serde_json::Value) -> Option<BookDetail> {
         Self::parse_search_page(value)
             .ok()?
             .items
             .first()
-            .map(Self::detail_from_item)
+            .map(BookDetail::from)
     }
 
     /// Scrape book metadata using the provided configuration strategy
@@ -885,8 +755,31 @@ impl ScraperService {
             .filter(|source| !aggregate_sources.contains(source.as_str()))
             .cloned()
             .collect();
+        let directory_name = context
+            .as_ref()
+            .and_then(|context| context.get("directory_name"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(query);
+        let name = super::text_cleaner::BookName::parse(directory_name);
+        let metadata_value = |key| {
+            context
+                .as_ref()
+                .and_then(|context| context.get("current_metadata"))
+                .and_then(|metadata| metadata.get(key))
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        };
+        let author = metadata_value("author").or(name.author).map(str::to_owned);
+        let narrator = metadata_value("narrator")
+            .or(name.narrator)
+            .map(str::to_owned);
         let scraper_query = self
-            .clean_query_with_aggregate_sources(query, &aggregate_sources_to_run, context.as_ref())
+            .clean_query_with_aggregate_sources(
+                super::text_cleaner::book_title_from_name(query),
+                &aggregate_sources_to_run,
+                context.as_ref(),
+            )
             .await;
 
         let mut source_results: HashMap<String, BookDetail> = HashMap::new();
@@ -895,41 +788,28 @@ impl ScraperService {
             match self
                 .search(
                     &scraper_query,
-                    None,
-                    None,
+                    author.as_deref(),
+                    narrator.as_deref(),
                     Some(&source_id),
                     1,
                     AGGREGATE_CANDIDATE_PAGE_SIZE,
                 )
                 .await
             {
-                Ok(search_res) => {
-                    if let Some(item) = search_res.items.first() {
-                        let detail = Self::detail_from_item(item);
-                        source_results.insert(source_id.clone(), detail);
-                    }
-
-                    for (rank, item) in search_res.items.iter().enumerate() {
-                        let relevance_score =
-                            Self::candidate_title_relevance_score(&scraper_query, item);
-                        let mut item_json =
-                            serde_json::to_value(item).unwrap_or_else(|_| serde_json::json!({}));
-                        if let Some(object) = item_json.as_object_mut() {
-                            object.insert(
-                                "source_id".to_string(),
-                                serde_json::Value::String(source_id.clone()),
-                            );
-                            object.insert(
-                                "source_result_rank".to_string(),
-                                serde_json::json!(rank + 1),
-                            );
-                            object.insert(
-                                "title_relevance_score".to_string(),
-                                serde_json::json!(relevance_score),
-                            );
-                        }
-                        candidate_items.push(item_json);
-                    }
+                Ok(mut search_res) => {
+                    prioritize_contributor_matches(
+                        &scraper_query,
+                        author.as_deref(),
+                        narrator.as_deref(),
+                        &mut search_res,
+                    );
+                    collect_candidates(
+                        &scraper_query,
+                        &source_id,
+                        search_res,
+                        &mut source_results,
+                        &mut candidate_items,
+                    )?;
                 }
                 Err(e) => tracing::warn!(
                     source_id = %source_id,
@@ -944,19 +824,7 @@ impl ScraperService {
             }
         }
 
-        candidate_items.sort_by(|left, right| {
-            let right_score = Self::candidate_value_score(right);
-            let left_score = Self::candidate_value_score(left);
-            right_score
-                .partial_cmp(&left_score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| {
-                    Self::candidate_value_rank(left).cmp(&Self::candidate_value_rank(right))
-                })
-                .then_with(|| {
-                    Self::candidate_value_title(left).cmp(&Self::candidate_value_title(right))
-                })
-        });
+        rank_candidates(&mut candidate_items);
 
         if source_results.is_empty() && aggregate_sources_to_run.is_empty() {
             return Err(TingError::NotFound(
@@ -964,7 +832,7 @@ impl ScraperService {
             ));
         }
 
-        let final_detail = self.merge_source_results(query, config, &source_results);
+        let final_detail = merge_source_results(query, config, &source_results);
 
         if !aggregate_sources_to_run.is_empty() {
             let mut scanner_context = context;
@@ -981,8 +849,8 @@ impl ScraperService {
                 for batch in &batches {
                     let aggregate_request = Self::search_request_with_context(
                         Some(query),
-                        None,
-                        None,
+                        author.as_deref(),
+                        narrator.as_deref(),
                         (1, 1),
                         Default::default(),
                         batch.to_vec(),
@@ -1043,121 +911,6 @@ impl ScraperService {
         }
 
         Ok(final_detail)
-    }
-
-    fn merge_source_results(
-        &self,
-        query: &str,
-        config: &crate::db::models::ScraperConfig,
-        source_results: &HashMap<String, BookDetail>,
-    ) -> BookDetail {
-        let mut final_detail = BookDetail {
-            id: None,
-            title: query.to_string(),
-            author: String::new(),
-            narrator: None,
-            cover_url: None,
-            intro: String::new(),
-            tags: vec![],
-            chapter_count: 0,
-            duration: None,
-            subtitle: None,
-            published_year: None,
-            published_date: None,
-            publisher: None,
-            isbn: None,
-            asin: None,
-            language: None,
-            explicit: false,
-            abridged: false,
-            genre: None,
-            chapter_title_template: None,
-            chapter_titles: Vec::new(),
-        };
-
-        let select = |specific: Option<&Vec<String>>| {
-            specific
-                .into_iter()
-                .flatten()
-                .chain(config.default_sources.iter())
-                .filter_map(|source| source_results.get(source.trim()))
-                .collect::<Vec<_>>()
-        };
-        let defaults = select(None);
-        final_detail.title = defaults
-            .iter()
-            .find(|detail| !detail.title.is_empty())
-            .map(|detail| detail.title.clone())
-            .or_else(|| {
-                source_results
-                    .iter()
-                    .filter(|(_, detail)| !detail.title.is_empty())
-                    .min_by_key(|(source, _)| *source)
-                    .map(|(_, detail)| detail.title.clone())
-            })
-            .unwrap_or_else(|| query.to_owned());
-        final_detail.author = select(config.author_sources.as_ref())
-            .iter()
-            .find(|detail| !detail.author.is_empty())
-            .map(|detail| detail.author.clone())
-            .unwrap_or_default();
-        final_detail.narrator = select(config.narrator_sources.as_ref())
-            .iter()
-            .find_map(|detail| detail.narrator.clone());
-        final_detail.cover_url = select(config.cover_sources.as_ref())
-            .iter()
-            .find_map(|detail| detail.cover_url.clone());
-        final_detail.intro = select(config.intro_sources.as_ref())
-            .iter()
-            .find(|detail| !detail.intro.is_empty())
-            .map(|detail| detail.intro.clone())
-            .unwrap_or_default();
-        final_detail.tags = select(config.tags_sources.as_ref())
-            .iter()
-            .find(|detail| !detail.tags.is_empty())
-            .map(|detail| detail.tags.clone())
-            .unwrap_or_default();
-
-        // Remaining fields from default sources
-        for source in &config.default_sources {
-            if let Some(detail) = source_results.get(source.trim()) {
-                if final_detail.subtitle.is_none() {
-                    final_detail.subtitle = detail.subtitle.clone();
-                }
-                if final_detail.published_year.is_none() {
-                    final_detail.published_year = detail.published_year.clone();
-                }
-                if final_detail.published_date.is_none() {
-                    final_detail.published_date = detail.published_date.clone();
-                }
-                if final_detail.publisher.is_none() {
-                    final_detail.publisher = detail.publisher.clone();
-                }
-                if final_detail.isbn.is_none() {
-                    final_detail.isbn = detail.isbn.clone();
-                }
-                if final_detail.asin.is_none() {
-                    final_detail.asin = detail.asin.clone();
-                }
-                if final_detail.language.is_none() {
-                    final_detail.language = detail.language.clone();
-                }
-                if detail.explicit {
-                    final_detail.explicit = true;
-                }
-                if detail.abridged {
-                    final_detail.abridged = true;
-                }
-                if final_detail.chapter_title_template.is_none() {
-                    final_detail.chapter_title_template = detail.chapter_title_template.clone();
-                }
-                if final_detail.chapter_titles.is_empty() && !detail.chapter_titles.is_empty() {
-                    final_detail.chapter_titles = detail.chapter_titles.clone();
-                }
-            }
-        }
-
-        final_detail
     }
 }
 

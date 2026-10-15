@@ -1,6 +1,7 @@
 use super::super::{LibraryScanner, MetadataSource, ScanStatus};
 use super::chapters::WebDavChapterContext;
 use crate::core::app::error::Result;
+use crate::core::books::text_cleaner::BookName;
 use crate::db::repository::Repository;
 use sha2::{Digest, Sha256};
 use tracing::warn;
@@ -56,7 +57,11 @@ impl LibraryScanner {
             .next_back()
             .unwrap_or("Unknown Book")
             .to_string();
-        let (cleaned_dir_name, _) = self.text_cleaner.clean_chapter_title(&dir_name_title, None);
+        let directory_name = fallback_title_override
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(&dir_name_title);
+        let directory_title = self.text_cleaner.clean_book_directory_title(directory_name);
+        let directory_metadata = BookName::parse(directory_name);
 
         // No local path, use URL as path
         // We use the original URL as path to ensure connectivity, but StorageService needs to handle it correctly
@@ -335,10 +340,7 @@ impl LibraryScanner {
             book_title = title;
             source = MetadataSource::FileMetadata;
         } else if scraper_config.use_filename_as_title {
-            book_title = fallback_title_override
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or(&cleaned_dir_name)
-                .to_string();
+            book_title = directory_title.clone();
             source = MetadataSource::Fallback;
         } else if !meta_album.trim().is_empty() && !meta_album.to_lowercase().starts_with("track") {
             // Priority 1/2: metadata.json or ID3 (already merged above)
@@ -346,10 +348,7 @@ impl LibraryScanner {
             book_title = meta_album.clone();
             source = MetadataSource::FileMetadata;
         } else {
-            book_title = fallback_title_override
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or(&cleaned_dir_name)
-                .to_string();
+            book_title = directory_title;
             source = MetadataSource::Fallback;
         }
 
@@ -361,8 +360,8 @@ impl LibraryScanner {
             id: book_id.clone(),
             library_id: library.id.clone(),
             title: Some(book_title.clone()),
-            author: meta_author.or(Some("Unknown".to_string())),
-            narrator: meta_narrator,
+            author: meta_author.or_else(|| directory_metadata.author.map(str::to_owned)),
+            narrator: meta_narrator.or_else(|| directory_metadata.narrator.map(str::to_owned)),
             cover_url: meta_cover_url,
             description: local_description,
             created_at: chrono::Utc::now().to_rfc3339(),
@@ -427,7 +426,9 @@ impl LibraryScanner {
             let scrape_context = serde_json::json!({
                 "library_type": "webdav",
                 "directory": dir_url,
-                "directory_name": dir_name_title,
+                "directory_name": fallback_title_override
+                    .filter(|value| !value.trim().is_empty())
+                    .unwrap_or(&dir_name_title),
                 "chapters": chapter_candidates,
                 "current_metadata": {
                     "title": book.title,

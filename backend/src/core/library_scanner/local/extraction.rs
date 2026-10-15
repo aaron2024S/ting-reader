@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
 
 use crate::core::books::metadata::BookMetadataFields as ScannedMetadata;
+use crate::core::books::text_cleaner::BookName;
 
 impl LibraryScanner {
     pub(super) async fn extract_final_metadata(
@@ -23,22 +24,10 @@ impl LibraryScanner {
         let base_title = fallback_title_override
             .filter(|value| !value.trim().is_empty())
             .unwrap_or(dir_name);
-        let (cleaned_title, _) = self.text_cleaner.clean_chapter_title(base_title, None);
-        final_meta.title = Some(cleaned_title);
-
-        // Fallback Author from "Author - Title" pattern
-        if base_title.contains(" - ") {
-            let parts: Vec<&str> = base_title.split(" - ").collect();
-            if parts.len() >= 2 {
-                final_meta.author = Some(parts[0].trim().to_string());
-                // Also update title if we are assuming Author - Title pattern
-                if final_meta.title.is_some() && final_meta.title.as_deref() == Some(base_title) {
-                    let (cleaned_title_part, _) =
-                        self.text_cleaner.clean_chapter_title(parts[1], None);
-                    final_meta.title = Some(cleaned_title_part);
-                }
-            }
-        }
+        final_meta.title = Some(self.text_cleaner.clean_book_directory_title(base_title));
+        let name = BookName::parse(base_title);
+        final_meta.author = name.author.map(str::to_owned);
+        final_meta.narrator = name.narrator.map(str::to_owned);
 
         // 1. Check if we should force filename as title
         debug!(

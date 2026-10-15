@@ -27,6 +27,10 @@ pub mod shared;
 pub mod watcher;
 pub mod webdav;
 
+#[cfg(test)]
+#[path = "../../../tests/unit/core/library_scanner/fixtures.rs"]
+mod test_support;
+
 /// Supported audio file extensions
 // Removed hardcoded encrypted extensions. Plugins should declare their supported extensions.
 pub const AUDIO_EXTENSIONS: &[&str] = &[

@@ -468,11 +468,7 @@ fn parse_chinese_series_number(value: &str) -> Option<i32> {
 
 pub(crate) fn parse_chapter_range_dir_name(name: &str) -> Option<ChapterRangeDir> {
     let normalized = normalize_range_marks(name);
-    let mut matches = range_regex().captures_iter(&normalized);
-    let caps = matches.next()?;
-    if matches.next().is_some() {
-        return None;
-    }
+    let caps = range_regex().captures(&normalized)?;
 
     let full_match = caps.get(0)?;
     let start = caps.get(1)?.as_str().parse::<u32>().ok()?;
@@ -491,10 +487,11 @@ pub(crate) fn parse_chapter_range_dir_name(name: &str) -> Option<ChapterRangeDir
     if starts_with_numeric_range_tail(suffix) {
         return None;
     }
-
-    let surrounding_text = format!("{}{}", &normalized[..full_match.start()], suffix);
-    let context = canonicalize_range_context(&surrounding_text);
-    let context_title = clean_range_context_title(&surrounding_text);
+    // Only the title before the first range identifies the book. Everything
+    // after the range is a description of this segment and does not affect merging.
+    let prefix = &normalized[..full_match.start()];
+    let context = canonicalize_range_context(prefix);
+    let context_title = clean_range_context_title(prefix);
 
     Some(ChapterRangeDir {
         start,

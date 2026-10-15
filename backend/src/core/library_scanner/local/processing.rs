@@ -140,7 +140,7 @@ impl LibraryScanner {
             && !fallback_title.trim().is_empty()
             && source == MetadataSource::Fallback
         {
-            title = fallback_title.to_string();
+            title = self.text_cleaner.clean_book_directory_title(fallback_title);
         }
         let mut author = scanned_meta.author;
         let mut narrator = scanned_meta.narrator;
@@ -163,10 +163,6 @@ impl LibraryScanner {
         let json_chapters = scanned_meta.json_chapters;
         let chapter_title_template = scanned_meta.chapter_title_template;
         let chapter_titles = scanned_meta.chapter_titles;
-
-        if author.is_none() {
-            author = Some("Unknown".to_string());
-        }
 
         // 3. Apply Manual Correction or Existing Data
         if is_manual_corrected

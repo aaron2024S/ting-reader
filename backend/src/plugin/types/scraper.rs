@@ -146,7 +146,7 @@ pub struct BookItem {
 ///
 /// Contains comprehensive metadata about a book, including all information
 /// needed to display a book detail page.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct BookDetail {
     /// Unique identifier on the source platform
     pub id: Option<String>,
@@ -226,6 +226,34 @@ pub struct BookDetail {
     /// Optional cleaned chapter titles in the same order as scanned files.
     #[serde(default)]
     pub chapter_titles: Vec<String>,
+}
+
+impl From<&BookItem> for BookDetail {
+    fn from(item: &BookItem) -> Self {
+        Self {
+            id: item.id.clone(),
+            title: item.title.clone(),
+            author: item.author.clone(),
+            narrator: item.narrator.clone(),
+            cover_url: item.cover_url.clone(),
+            intro: item.intro.clone().unwrap_or_default(),
+            tags: item.tags.clone(),
+            chapter_count: 0,
+            duration: item.duration,
+            subtitle: item.subtitle.clone(),
+            published_year: item.published_year.clone(),
+            published_date: item.published_date.clone(),
+            publisher: item.publisher.clone(),
+            isbn: item.isbn.clone(),
+            asin: item.asin.clone(),
+            language: item.language.clone(),
+            explicit: item.explicit.unwrap_or(false),
+            abridged: item.abridged.unwrap_or(false),
+            genre: item.genre.clone(),
+            chapter_title_template: item.chapter_title_template.clone(),
+            chapter_titles: item.chapter_titles.clone(),
+        }
+    }
 }
 
 /// Chapter information
