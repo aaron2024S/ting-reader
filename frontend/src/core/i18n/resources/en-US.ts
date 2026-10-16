@@ -946,7 +946,7 @@ const enUS = {
     autoDetectChanges: "Auto-detect library changes",
     autoDetectChangesHelp:
       "Monitor this local library directory and trigger scans automatically. Changes apply immediately.",
-    cloudMode: "Cloud drive mode (reduce remote audio probing)",
+    cloudMode: "Cloud drive mode",
     cloudModeHelp:
       "For WebDAV libraries, only use scraper files such as book.nfo, metadata.json, and covers instead of reading audio metadata. For local libraries, .strm files skip remote duration probing.",
     activePriorityTitle: "Metadata source priority (drag to reorder)",

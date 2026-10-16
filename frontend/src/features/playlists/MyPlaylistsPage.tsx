@@ -3,113 +3,16 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router';
 import { useTranslation } from 'react-i18next';
 import apiClient from '../../core/api/client';
-import type { Book, Playlist, PlaylistItem } from '../../core/types';
-import { getCoverUrl } from '../../core/utils/image';
+import type { Playlist } from '../../core/types';
 import { usePlayerStore } from '../../core/stores/playerStore';
 import DisplaySettingsMenu from '../../shared/widgets/DisplaySettingsMenu';
 import { ListMusic, Plus, Search, X } from 'lucide-react';
-import { getCoverAspectClass, useBookshelfCoverShape, type CoverShape } from '../../core/hooks/useBookshelfCoverShape';
-import { getPlaylistBookCount, playlistCoverIndex } from '../../core/utils/playlist';
+import { getBookshelfGridClass, useBookshelfCoverShape, type CoverShape } from '../../core/hooks/useBookshelfCoverShape';
+import { getPlaylistBookCount } from '../../core/utils/playlist';
+import { PlaylistCoverStack } from './PlaylistPieces';
 
 type PlaylistSortBy = 'updatedAt' | 'title' | 'count';
 type PlaylistIconSize = 'small' | 'medium' | 'large';
-
-type PlaylistCover = {
-  id: string;
-  title?: string;
-  cover_url?: string;
-  library_id?: string;
-  book_id?: string;
-};
-
-const toBookCover = (book: Book, suffix = ''): PlaylistCover => ({
-  id: `${book.id}${suffix}`,
-  title: book.title,
-  cover_url: book.cover_url,
-  library_id: book.library_id,
-  book_id: book.id,
-});
-
-const collectPlaylistCoverCandidates = (playlist: Playlist): PlaylistCover[] => {
-  const covers: PlaylistCover[] = [];
-  const pushCover = (cover: PlaylistCover) => {
-    covers.push(cover);
-  };
-
-  const pushSeriesCovers = (item: PlaylistItem) => {
-    if (!item.series) return;
-
-    const seriesBooks = item.series.books || [];
-    if (seriesBooks.length > 0) {
-      seriesBooks.forEach((book, index) => {
-        pushCover({
-          id: `${item.series!.id}-${book.id || index}`,
-          title: book.title || item.series!.title,
-          cover_url: book.cover_url || item.series!.cover_url,
-          library_id: book.library_id || item.series!.library_id,
-          book_id: book.id,
-        });
-      });
-      return;
-    }
-
-    pushCover({
-      id: item.series.id,
-      title: item.series.title,
-      cover_url: item.series.cover_url,
-      library_id: item.series.library_id,
-    });
-  };
-
-  if (playlist.items && playlist.items.length > 0) {
-    playlist.items.forEach(item => {
-      if (item.item_type === 'series') {
-        pushSeriesCovers(item);
-      } else if (item.book) {
-        pushCover(toBookCover(item.book));
-      }
-    });
-  } else {
-    playlist.books.forEach(book => pushCover(toBookCover(book)));
-  }
-
-  if (covers.length === 0 && playlist.books.length > 0) {
-    playlist.books.forEach(book => pushCover(toBookCover(book, '-fallback')));
-  }
-
-  return covers;
-};
-
-const collectPlaylistCovers = (playlist: Playlist, seed: number): PlaylistCover[] => {
-  const covers = collectPlaylistCoverCandidates(playlist);
-  if (covers.length === 0) return [];
-  return [covers[playlistCoverIndex(playlist.id, seed, covers.length)]];
-};
-
-const getGridGap = (iconSize: PlaylistIconSize) => {
-  switch (iconSize) {
-    case 'small':
-      return 'gap-3';
-    case 'large':
-      return 'gap-6';
-    default:
-      return 'gap-4';
-  }
-};
-
-const getGridStyle = (iconSize: PlaylistIconSize): React.CSSProperties => {
-  const cardWidth = iconSize === 'small' ? 170 : iconSize === 'large' ? 440 : 300;
-  return {
-    gridTemplateColumns: `repeat(auto-fill, minmax(min(100%, ${cardWidth}px), ${cardWidth}px))`,
-  };
-};
-
-const getMobileGridStyle = (iconSize: PlaylistIconSize): React.CSSProperties => {
-  const cardWidth = iconSize === 'small' ? 132 : iconSize === 'large' ? 180 : 156;
-  return {
-    gridTemplateColumns: `repeat(auto-fit, minmax(${cardWidth}px, 1fr))`,
-  };
-};
 
 const MyPlaylistsPage: React.FC = () => {
   const { t } = useTranslation();
@@ -239,7 +142,7 @@ const MyPlaylistsPage: React.FC = () => {
 
           <button
             onClick={() => setShowCreateModal(true)}
-            className="inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-primary-600 hover:bg-primary-700 text-white text-sm font-bold rounded-xl shadow-lg shadow-primary-500/25 transition-colors"
+            className="inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-primary-600 hover:bg-primary-700 text-white text-sm font-bold rounded-xl shadow-sm transition-colors"
           >
             <Plus size={18} />
             {t('playlists.newPlaylist')}
@@ -247,7 +150,7 @@ const MyPlaylistsPage: React.FC = () => {
         </div>
 
         {playlists.length > 0 && (
-          <div className="flex flex-col sm:flex-row sm:items-center gap-3 max-w-2xl">
+          <div className="flex items-center gap-3">
             <div className="relative flex-1 min-w-0">
               <Search size={18} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
               <input
@@ -257,7 +160,7 @@ const MyPlaylistsPage: React.FC = () => {
                 className="w-full pl-10 pr-4 py-3 bg-white dark:bg-slate-900 border border-slate-100 dark:border-slate-800 rounded-2xl outline-none focus:ring-2 focus:ring-primary-500 dark:text-white shadow-sm"
                 />
             </div>
-            <div className="flex items-center justify-end sm:justify-start">
+            <div className="flex shrink-0 items-center">
               <DisplaySettingsMenu
                 open={showFilterMenu}
                 onOpenChange={setShowFilterMenu}
@@ -298,7 +201,7 @@ const MyPlaylistsPage: React.FC = () => {
             <p className="text-sm text-slate-500 mt-2 mb-8">{t('playlists.emptyDescription')}</p>
             <button
               onClick={() => setShowCreateModal(true)}
-              className="inline-flex items-center gap-2 px-6 py-3 bg-primary-600 hover:bg-primary-700 text-white text-sm font-bold rounded-xl shadow-lg shadow-primary-500/25 transition-colors"
+              className="inline-flex items-center gap-2 px-6 py-3 bg-primary-600 hover:bg-primary-700 text-white text-sm font-bold rounded-xl shadow-sm transition-colors"
             >
               <Plus size={18} />
               {t('playlists.newPlaylist')}
@@ -313,19 +216,11 @@ const MyPlaylistsPage: React.FC = () => {
             <p className="text-sm text-slate-500 mt-2">{t('playlists.tryAnotherKeyword')}</p>
           </div>
         ) : (
-          <>
-            <div className={`grid sm:hidden ${getGridGap(iconSize)}`} style={getMobileGridStyle(iconSize)}>
-              {filteredPlaylists.map(playlist => (
-                <PlaylistCard key={playlist.id} playlist={playlist} coverShape={coverShape} iconSize={iconSize} coverSeed={playlistCoverSeed} compactOnMobile />
-              ))}
-            </div>
-
-            <div className={`hidden sm:grid justify-start ${getGridGap(iconSize)}`} style={getGridStyle(iconSize)}>
-              {filteredPlaylists.map(playlist => (
-                <PlaylistCard key={playlist.id} playlist={playlist} coverShape={coverShape} iconSize={iconSize} coverSeed={playlistCoverSeed} />
-              ))}
-            </div>
-          </>
+          <div className={`grid ${getBookshelfGridClass(iconSize)}`}>
+            {filteredPlaylists.map(playlist => (
+              <PlaylistCard key={playlist.id} playlist={playlist} coverShape={coverShape} coverSeed={playlistCoverSeed} />
+            ))}
+          </div>
         )}
       </div>
 
@@ -397,58 +292,27 @@ const MyPlaylistsPage: React.FC = () => {
 const PlaylistCard = ({
   playlist,
   coverShape,
-  iconSize,
   coverSeed,
-  compactOnMobile = false,
 }: {
   playlist: Playlist;
   coverShape: CoverShape;
-  iconSize: PlaylistIconSize;
   coverSeed: number;
-  compactOnMobile?: boolean;
 }) => {
   const { t } = useTranslation();
-  const covers = collectPlaylistCovers(playlist, coverSeed);
   const bookCount = getPlaylistBookCount(playlist);
-  const titleClass = iconSize === 'large' ? 'text-xl' : iconSize === 'small' ? 'text-sm' : 'text-lg';
-  const paddingClass = iconSize === 'large' ? 'p-5' : iconSize === 'small' ? 'p-3' : 'p-4';
 
   return (
     <Link
       to={`/playlists/${playlist.id}`}
-      className={`group bg-white dark:bg-slate-900 border border-slate-100 dark:border-slate-800 rounded-3xl shadow-sm hover:shadow-md transition-shadow ${paddingClass} ${compactOnMobile ? 'max-sm:rounded-2xl max-sm:p-3' : ''}`}
+      className="group min-w-0 rounded-xl outline-none focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:ring-offset-4 dark:ring-offset-slate-950"
     >
-      <div className={`w-full ${getCoverAspectClass(coverShape)} rounded-2xl overflow-hidden bg-slate-100 dark:bg-slate-800 relative ${compactOnMobile ? 'max-sm:rounded-xl' : ''}`}>
-        {covers.length > 0 ? (
-          <div className={covers.length === 1 ? 'h-full' : 'grid grid-cols-2 h-full'}>
-            {covers.map(book => (
-              <img
-                key={book.id}
-                src={getCoverUrl(book.cover_url, book.library_id, book.book_id)}
-                alt={book.title}
-                referrerPolicy="no-referrer"
-                className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
-                onError={(event) => {
-                  (event.target as HTMLImageElement).src = 'https://placehold.co/300x400?text=No+Cover';
-                }}
-              />
-            ))}
-          </div>
-        ) : (
-          <div className="h-full flex items-center justify-center text-white bg-primary-600">
-            <ListMusic size={48} />
-          </div>
-        )}
-      </div>
-
-      <div className={`${compactOnMobile ? 'mt-3' : 'mt-4'} min-w-0`}>
-        <h3 className={`${titleClass} ${compactOnMobile ? 'max-sm:text-sm' : ''} font-bold text-slate-900 dark:text-white truncate group-hover:text-primary-600 transition-colors`}>
+      <PlaylistCoverStack playlist={playlist} coverShape={coverShape} seed={coverSeed} />
+      <div className="min-w-0 px-0.5">
+        <h3 title={playlist.title} className="truncate text-sm font-semibold leading-snug text-slate-900 dark:text-white group-hover:text-primary-600 transition-colors">
           {playlist.title}
         </h3>
-        <p className={`text-sm text-slate-500 mt-1 ${iconSize === 'small' || compactOnMobile ? 'truncate' : 'line-clamp-2 min-h-10'}`}>
-          {playlist.description || t('playlists.bookCount', { count: bookCount })}
-        </p>
-        <p className="text-xs text-slate-400 font-bold mt-3">{t('playlists.bookCount', { count: bookCount })}</p>
+        <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">{t('playlists.bookCount', { count: bookCount })}</p>
+        {playlist.description && <p title={playlist.description} className="mt-1 truncate text-xs text-slate-400 dark:text-slate-500">{playlist.description}</p>}
       </div>
     </Link>
   );

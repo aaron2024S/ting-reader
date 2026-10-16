@@ -902,7 +902,7 @@ const zhCN = {
     autoDetectChanges: "自动检测媒体库变化",
     autoDetectChangesHelp:
       "开启后，将监控该媒体库目录的文件变化并自动触发扫描（修改后即时生效）",
-    cloudMode: "网盘模式（减少远程音频探测）",
+    cloudMode: "网盘模式",
     cloudModeHelp:
       "WebDAV 库开启后，仅使用 book.nfo / metadata.json / 封面等刮削文件，不再从音频文件读取元数据；本地库开启后，.strm 文件将不再探测远程音频时长。",
     activePriorityTitle: "元数据来源优先级排序 (拖动调整)",

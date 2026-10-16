@@ -8,10 +8,12 @@ import BookCard from '../../shared/cards/BookCard';
 import BackButton from '../../shared/widgets/BackButton';
 import { usePlayerStore } from '../../core/stores/playerStore';
 import { Check, Edit3, Layers, ListMusic, Plus, Save, Search, Trash2, X } from 'lucide-react';
-import { useBookshelfCoverShape } from '../../core/hooks/useBookshelfCoverShape';
+import { getBookshelfGridClass, useBookshelfDisplaySettings } from '../../core/hooks/useBookshelfCoverShape';
+import { getPlaylistBookCount } from '../../core/utils/playlist';
 import LoadingSpinner from '../../shared/ui/LoadingSpinner';
 import {
   BookCover,
+  PlaylistCoverStack,
   EmptyPlaylistState,
   PlaylistSeriesCard,
   SelectedOrderPanel,
@@ -31,18 +33,12 @@ const getPlaylistItems = (playlist?: Playlist | null): PlaylistItem[] => {
   }));
 };
 
-const getPlaylistBookCount = (playlist?: Playlist | null) => (
-  getPlaylistItems(playlist).reduce((total, item) => (
-    total + (item.item_type === 'series' ? (item.series?.books?.length || 0) : 1)
-  ), 0)
-);
-
 const PlaylistDetailPage: React.FC = () => {
   const { t } = useTranslation();
   const { id } = useParams();
   const navigate = useNavigate();
   const currentChapter = usePlayerStore((state) => state.currentChapter);
-  const coverShape = useBookshelfCoverShape();
+  const { coverShape, iconSize } = useBookshelfDisplaySettings();
   const [playlist, setPlaylist] = useState<Playlist | null>(null);
   const [books, setBooks] = useState<Book[]>([]);
   const [series, setSeries] = useState<Series[]>([]);
@@ -280,24 +276,23 @@ const PlaylistDetailPage: React.FC = () => {
       <div className="flex-1 space-y-6">
         <BackButton fallback="/playlists" />
 
-        <div className="flex flex-col xl:flex-row xl:items-end justify-between gap-5">
+        <div className="rounded-3xl border border-slate-200/60 dark:border-slate-800 bg-gradient-to-br from-primary-50/70 via-white to-slate-50 dark:from-slate-900 dark:via-slate-900 dark:to-slate-800/60 p-4 sm:p-6 flex flex-col xl:flex-row xl:items-center justify-between gap-5">
           <div className="flex items-center gap-4 min-w-0">
-            <div
-              className="w-16 h-16 rounded-2xl bg-primary-600 text-white flex items-center justify-center shrink-0 shadow-lg shadow-primary-500/25"
-            >
-              <ListMusic size={30} />
+            <div className="w-28 sm:w-40 shrink-0">
+              <PlaylistCoverStack playlist={playlist} coverShape={coverShape} />
             </div>
             <div className="min-w-0">
-              <h1 className="text-2xl md:text-3xl font-bold text-slate-900 dark:text-white truncate">
+              <h1 className="text-xl sm:text-2xl md:text-3xl font-bold text-slate-900 dark:text-white whitespace-pre-wrap [overflow-wrap:anywhere]">
                 {playlist.title}
               </h1>
-              <p className="text-sm md:text-base text-slate-500 dark:text-slate-400 mt-1 line-clamp-2">
-                {playlist.description || t('playlists.bookCount', { count: getPlaylistBookCount(playlist) })}
+              <p className="mt-2 flex items-center gap-1.5 text-xs sm:text-sm text-primary-600 dark:text-primary-400">
+                <ListMusic size={16} />{t('playlists.bookCount', { count: getPlaylistBookCount(playlist) })}
               </p>
+              {playlist.description && <p className="mt-2 text-sm leading-relaxed text-slate-500 dark:text-slate-400 whitespace-pre-wrap [overflow-wrap:anywhere]">{playlist.description}</p>}
             </div>
           </div>
 
-          <div className="flex flex-wrap gap-2">
+          <div className="flex flex-wrap gap-2 xl:max-w-sm xl:justify-end">
             {isManaging ? (
               <>
                 <button
@@ -346,20 +341,21 @@ const PlaylistDetailPage: React.FC = () => {
                 </button>
                 <button
                   onClick={handleDelete}
-                  className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-red-50 dark:bg-red-900/20 text-red-600 text-sm font-bold hover:bg-red-100 dark:hover:bg-red-900/30"
+                  aria-label={t('playlists.delete')}
+                  title={t('playlists.delete')}
+                  className="inline-flex items-center justify-center w-11 h-11 rounded-xl text-slate-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
                 >
                   <Trash2 size={18} />
-                  {t('playlists.delete')}
                 </button>
               </>
             )}
           </div>
         </div>
 
-        {(isManaging || playlist.books.length > 0) && (
-          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 bg-white dark:bg-slate-900 border border-slate-100 dark:border-slate-800 rounded-2xl p-3 shadow-sm">
+        {(isManaging || playlistItems.length > 0) && (
+          <div className="flex flex-wrap items-center gap-3">
             {isManaging && (
-              <div className="flex bg-slate-100 dark:bg-slate-800 rounded-xl p-1">
+              <div className="flex w-full sm:w-auto bg-slate-100 dark:bg-slate-800 rounded-xl p-1">
                 <button
                   onClick={() => setManageView('books')}
                   className={`flex items-center gap-2 px-3 py-2 text-sm font-bold rounded-lg transition-all ${
@@ -384,7 +380,7 @@ const PlaylistDetailPage: React.FC = () => {
                 </button>
               </div>
             )}
-            <div className="relative flex-1">
+            <div className="relative flex-1 min-w-0">
               <Search size={18} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
               <input
                 value={query}
@@ -410,7 +406,7 @@ const PlaylistDetailPage: React.FC = () => {
 
         {!isManaging ? (
           filteredPlaylistItems.length > 0 ? (
-            <div className="grid grid-cols-3 sm:grid-cols-5 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-6 2xl:grid-cols-7 gap-x-5 gap-y-9">
+            <div className={`grid ${getBookshelfGridClass(iconSize)}`}>
               {filteredPlaylistItems.map(item => (
                 item.item_type === 'series' && item.series ? (
                   <PlaylistSeriesCard key={`series-${item.item_id}`} series={item.series} coverShape={coverShape} />
@@ -447,7 +443,7 @@ const PlaylistDetailPage: React.FC = () => {
             />
           )
         ) : displayBooks.length > 0 ? (
-          <div className="grid grid-cols-3 sm:grid-cols-5 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-6 2xl:grid-cols-7 gap-x-5 gap-y-9">
+          <div className={`grid ${getBookshelfGridClass(iconSize)}`}>
             {displayBooks.map(book => (
               <div key={book.id} className="relative">
                 <button

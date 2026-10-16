@@ -1,10 +1,12 @@
 /* eslint-disable react-refresh/only-export-components */
 
 import React from 'react';
-import { useNavigate } from 'react-router';
 import { useTranslation } from 'react-i18next';
 import { ArrowDown, ArrowUp, Layers, ListMusic, Plus, X } from 'lucide-react';
-import type { Book, PlaylistItem, Series } from '../../core/types';
+import type { Book, Playlist, PlaylistItem, Series } from '../../core/types';
+import { collectPlaylistCovers } from '../../core/utils/playlist';
+import SeriesCard from '../../shared/cards/SeriesCard';
+import { bookPrimaryCredit } from '../../core/utils/book';
 import { getCoverUrl } from '../../core/utils/image';
 import { getCoverAspectClass, type CoverShape } from '../../core/hooks/useBookshelfCoverShape';
 
@@ -16,6 +18,41 @@ export const samePlaylistItem = (
   itemId: string,
 ) => item.item_type === itemType && item.item_id === itemId;
 
+export const PlaylistCoverStack = ({
+  playlist,
+  coverShape,
+  seed = 0,
+}: {
+  playlist: Playlist;
+  coverShape: CoverShape;
+  seed?: number;
+}) => {
+  const covers = collectPlaylistCovers(playlist, seed, 3);
+  return (
+    <div className={`relative w-full ${getCoverAspectClass(coverShape)}`} aria-hidden="true">
+      <div className="absolute inset-x-[12%] top-[6%] bottom-[18%]">
+        {covers.length > 0 && (
+          <div className="absolute inset-0 -translate-x-[7%] translate-y-[5%] -rotate-8 rounded-xl bg-primary-100 dark:bg-slate-700 shadow-sm overflow-hidden">
+            {covers[2] && <img src={getCoverUrl(covers[2].cover_url, covers[2].library_id, covers[2].book_id)} alt="" loading="lazy" referrerPolicy="no-referrer" className="w-full h-full object-cover opacity-65" onError={event => { event.currentTarget.style.visibility = 'hidden'; }} />}
+          </div>
+        )}
+        {covers[1] && (
+          <div className="absolute inset-0 translate-x-[9%] translate-y-[8%] rotate-8 rounded-xl overflow-hidden bg-slate-200 dark:bg-slate-700 shadow-md">
+            <img src={getCoverUrl(covers[1].cover_url, covers[1].library_id, covers[1].book_id)} alt="" loading="lazy" referrerPolicy="no-referrer" className="w-full h-full object-cover opacity-80" onError={event => { event.currentTarget.style.visibility = 'hidden'; }} />
+            <div className="absolute inset-0 bg-slate-950/10" />
+          </div>
+        )}
+        <div className="relative h-full rounded-xl overflow-hidden bg-primary-50 dark:bg-slate-800 ring-1 ring-black/5 dark:ring-white/10 shadow-[0_10px_22px_-12px_rgba(15,23,42,0.5)] transition-transform duration-300 motion-safe:group-hover:-translate-y-1">
+          <div className="absolute inset-0 flex items-center justify-center text-primary-400">
+            <ListMusic className="w-1/3 h-1/3" />
+          </div>
+          {covers[0] && <img src={getCoverUrl(covers[0].cover_url, covers[0].library_id, covers[0].book_id)} alt="" loading="lazy" referrerPolicy="no-referrer" className="relative w-full h-full object-cover" onError={event => { event.currentTarget.style.visibility = 'hidden'; }} />}
+        </div>
+      </div>
+    </div>
+  );
+};
+
 // ─── BookCover ──────────────────────────────────────────────────────────────
 // Single book cover card in the grid; display-only.
 
@@ -25,7 +62,7 @@ interface BookCoverProps {
 }
 
 export const BookCover: React.FC<BookCoverProps> = ({ book, coverShape }) => {
-  const { t } = useTranslation();
+  const credit = bookPrimaryCredit(book.author, book.narrator);
 
   return (
   <div className="group flex flex-col relative">
@@ -43,7 +80,7 @@ export const BookCover: React.FC<BookCoverProps> = ({ book, coverShape }) => {
     </div>
     <div className="mt-2 min-w-0">
       <p className="font-bold text-sm text-slate-900 dark:text-white truncate">{book.title}</p>
-      <p className="text-xs text-slate-500 dark:text-slate-400 truncate mt-1">{book.author || t('playlists.unknownAuthor')}</p>
+      {credit && <p className="text-xs text-slate-500 dark:text-slate-400 truncate mt-1">{credit}</p>}
     </div>
   </div>
   );
@@ -57,47 +94,12 @@ interface PlaylistSeriesCardProps {
   coverShape: CoverShape;
 }
 
-export const PlaylistSeriesCard: React.FC<PlaylistSeriesCardProps> = ({ series, coverShape }) => {
-  const { t } = useTranslation();
-  const navigate = useNavigate();
-  const coverBook = series.books?.[0];
-  const coverUrl = series.cover_url || coverBook?.cover_url;
-  const libraryId = series.library_id || coverBook?.library_id;
-  const bookId = coverBook?.id;
-
-  return (
-    <button
-      onClick={() => navigate(`/series/${series.id}`)}
-      className="group flex flex-col relative text-left"
-    >
-      <div className={`relative ${getCoverAspectClass(coverShape)} overflow-hidden rounded-md shadow-md bg-white dark:bg-slate-800`}>
-        {coverUrl ? (
-          <img
-            src={getCoverUrl(coverUrl, libraryId, bookId)}
-            alt={series.title}
-            loading="lazy"
-            referrerPolicy="no-referrer"
-            className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
-            onError={(event) => {
-              (event.target as HTMLImageElement).src = 'https://placehold.co/300x400?text=Series';
-            }}
-          />
-        ) : (
-          <div className="w-full h-full flex items-center justify-center text-slate-400">
-            <Layers size={34} />
-          </div>
-        )}
-        <div className="absolute top-2 left-2 px-2 py-1 rounded-full bg-primary-600 text-white text-[10px] font-black shadow-sm">
-          {t('playlists.seriesBadge')}
-        </div>
-      </div>
-      <div className="mt-2 min-w-0">
-        <p className="font-bold text-sm text-slate-900 dark:text-white truncate group-hover:text-primary-600 transition-colors">{series.title}</p>
-        <p className="text-xs text-slate-500 dark:text-slate-400 truncate mt-1">{series.author || t('playlists.unknownAuthor')} · {t('playlists.seriesBookCount', { count: series.books?.length || 0 })}</p>
-      </div>
-    </button>
-  );
-};
+export const PlaylistSeriesCard: React.FC<PlaylistSeriesCardProps> = ({ series, coverShape }) => (
+  <SeriesCard
+    series={{ ...series, cover_url: series.cover_url || series.books?.[0]?.cover_url }}
+    coverShape={coverShape}
+  />
+);
 
 // ─── SeriesSelectCard ───────────────────────────────────────────────────────
 // Selectable series card in the playlist editor.
@@ -262,9 +264,6 @@ export const SelectedOrderPanel: React.FC<SelectedOrderPanelProps> = ({ items, c
   </section>
   );
 };
-
-// ─── EmptyPlaylistState ─────────────────────────────────────────────────────
-// Shared empty state card: icon, title, and description.
 
 // ─── EmptyPlaylistState ─────────────────────────────────────────────────────
 // Shared empty state card: icon, title, and description.

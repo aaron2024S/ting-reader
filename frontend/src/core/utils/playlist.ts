@@ -13,11 +13,12 @@ export interface PlaylistCoverItem {
  */
 export const getPlaylistBookCount = (playlist?: Playlist | null): number => {
   if (!playlist) return 0;
-  return (
-    playlist.items?.reduce((total, item) => (
+  if (playlist.items?.length) {
+    return playlist.items.reduce((total, item) => (
       total + (item.item_type === 'series' ? (item.series?.books?.length || 0) : 1)
-    ), 0) ?? playlist.book_ids.length
-  );
+    ), 0);
+  }
+  return playlist.books.length || playlist.book_ids.length;
 };
 
 /**
@@ -74,7 +75,8 @@ export const collectPlaylistCoverCandidates = (playlist: Playlist): PlaylistCove
         });
       }
     });
-  } else {
+  }
+  if (covers.length === 0) {
     playlist.books.forEach(book => {
       covers.push({
         id: book.id,
@@ -89,10 +91,19 @@ export const collectPlaylistCoverCandidates = (playlist: Playlist): PlaylistCove
 };
 
 /**
- * Pick a single cover from a playlist's candidates using a seeded hash.
+ * Pick adjacent covers from a seeded starting point, without repeating a book.
+ * Home tiles keep their single cover; playlist stacks request up to three.
  */
-export const collectPlaylistCovers = (playlist: Playlist, seed: number): PlaylistCoverItem[] => {
-  const covers = collectPlaylistCoverCandidates(playlist);
+export const collectPlaylistCovers = (playlist: Playlist, seed: number, limit = 1): PlaylistCoverItem[] => {
+  const seen = new Set<string>();
+  const covers = collectPlaylistCoverCandidates(playlist).filter(cover => {
+    const key = cover.book_id || cover.id;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
   if (covers.length === 0) return [];
-  return [covers[playlistCoverIndex(playlist.id, seed, covers.length)]];
+  const start = playlistCoverIndex(playlist.id, seed, covers.length);
+  return Array.from({ length: Math.min(Math.max(0, limit), covers.length) },
+    (_, index) => covers[(start + index) % covers.length]);
 };
