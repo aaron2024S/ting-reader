@@ -204,7 +204,11 @@ impl LibraryScanner {
             .keys()
             .map(|dir| dir.to_string_lossy().to_string())
             .collect();
-        let inferred_series = infer_local_series_directories(path, dir_groups.keys());
+        let inferred_series = if scraper_config.auto_generate_series {
+            infer_local_series_directories(path, dir_groups.keys())
+        } else {
+            HashMap::new()
+        };
         let changed_series_keys: HashSet<(PathBuf, String)> = inferred_series
             .iter()
             .filter(|(dir, _)| {
@@ -357,6 +361,9 @@ impl LibraryScanner {
                 .unwrap_or(0);
             let state_config_fingerprint =
                 format!("{}:lock={}", scan_config_fingerprint, existing_lock_state);
+            let config_changed = cached_states.get(&dir_path_string).is_none_or(|state| {
+                state.config_fingerprint.as_deref() != Some(state_config_fingerprint.as_str())
+            });
             if let Some((book_id, _, _)) = existing_info.as_ref()
                 && chapter_counts
                     .get(book_id)
@@ -419,7 +426,11 @@ impl LibraryScanner {
                     fallback_title_override: coalesced_range_dirs
                         .get(&dir)
                         .and_then(|range_dirs| range_dirs.title_override.as_deref()),
-                    mode,
+                    mode: if config_changed {
+                        super::ScanMode::Full
+                    } else {
+                        mode
+                    },
                 })
                 .await
             {

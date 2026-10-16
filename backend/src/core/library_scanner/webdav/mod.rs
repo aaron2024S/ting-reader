@@ -86,7 +86,11 @@ impl LibraryScanner {
 
         let (dir_groups, coalesced_range_dirs) =
             self.coalesce_webdav_range_directory_groups(dir_groups);
-        let inferred_series = self.infer_webdav_series_directories(dir_groups.keys());
+        let inferred_series = if scraper_config.auto_generate_series {
+            self.infer_webdav_series_directories(dir_groups.keys())
+        } else {
+            HashMap::new()
+        };
         let total_groups = dir_groups.len();
         let mut processed_count = 0;
 
@@ -492,7 +496,8 @@ impl LibraryScanner {
             .filter(|pattern| !pattern.trim().is_empty())
             .and_then(|pattern| regex::Regex::new(pattern).ok());
 
-        if chapter_regex.is_none() && !scraper_config.use_filename_as_title {
+        let filename_titles_first = scraper_config.metadata_rank("filename") == 0;
+        if chapter_regex.is_none() && !filename_titles_first {
             return existing_chapters.iter().any(|chapter| {
                 if chapter.manual_corrected != 0 {
                     return false;
@@ -561,7 +566,7 @@ impl LibraryScanner {
                     .text_cleaner
                     .clean_chapter_title(&rt, book.title.as_deref());
                 Some((cleaned, is_extra))
-            } else if scraper_config.use_filename_as_title {
+            } else if filename_titles_first {
                 let (cleaned, is_extra) = self
                     .text_cleaner
                     .clean_chapter_title(&filename, book.title.as_deref());

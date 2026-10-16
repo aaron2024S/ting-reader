@@ -17,9 +17,7 @@ use uuid::Uuid;
 pub(super) struct ChapterProcessingOptions<'a> {
     pub(super) last_scanned: Option<chrono::DateTime<chrono::Utc>>,
     pub(super) task_id: Option<&'a str>,
-    pub(super) use_filename_as_title: bool,
-    pub(super) extract_extra_chapters: bool,
-    pub(super) cloud_mode: bool,
+    pub(super) scraper_config: &'a crate::db::models::ScraperConfig,
     pub(super) changed_file_paths: Option<&'a HashSet<PathBuf>>,
     pub(super) json_chapters: Option<Vec<crate::core::books::metadata::AudiobookshelfChapter>>,
     pub(super) chapter_title_template: Option<&'a str>,
@@ -36,14 +34,14 @@ impl LibraryScanner {
         let ChapterProcessingOptions {
             last_scanned,
             task_id,
-            use_filename_as_title,
-            extract_extra_chapters,
-            cloud_mode,
+            scraper_config,
             changed_file_paths,
             json_chapters,
             chapter_title_template,
             chapter_title_overrides,
         } = options;
+        let extract_extra_chapters = scraper_config.extract_extra_chapters;
+        let cloud_mode = scraper_config.cloud_mode;
         let mut has_changes = false;
         let total_files = files.len();
         let mut json_chapters = json_chapters;
@@ -234,25 +232,26 @@ impl LibraryScanner {
                             preserve_raw_chapter_titles,
                         );
                         Some((cleaned, is_extra))
-                    } else if use_filename_as_title {
-                        let (cleaned, is_extra) = clean_or_preserve_chapter_title(
-                            self.text_cleaner.as_ref(),
-                            &filename_str,
-                            book.title.as_deref(),
-                            preserve_raw_chapter_titles,
-                        );
-                        Some((cleaned, is_extra))
-                    } else if use_json_chapters {
-                        json_chapters.as_ref().and_then(|chapters| {
-                            chapters.get(index).map(|chapter| {
-                                let (_, is_extra) = self
-                                    .text_cleaner
-                                    .clean_chapter_title(&chapter.title, book.title.as_deref());
-                                (chapter.title.clone(), is_extra)
-                            })
-                        })
                     } else {
-                        None
+                        let local_title = json_chapters
+                            .as_ref()
+                            .filter(|_| use_json_chapters)
+                            .and_then(|chapters| chapters.get(index))
+                            .map(|chapter| chapter.title.as_str());
+                        let (title, source) =
+                            scraper_config.select_title(&filename_str, local_title, None, None);
+                        let (title, is_extra) = super::super::shared::resolve_chapter_title(
+                            self.text_cleaner.as_ref(),
+                            title,
+                            book.title.as_deref(),
+                            None,
+                            source != "local_metadata",
+                            preserve_raw_chapter_titles,
+                            extract_extra_chapters,
+                        );
+                        (scraper_config.metadata_rank("audio_metadata")
+                            >= scraper_config.metadata_rank(source))
+                        .then_some((title, is_extra))
                     }
                 } else {
                     None
@@ -281,7 +280,7 @@ impl LibraryScanner {
                 // Check if we need to update Title or Index
                 // Cases to update even if not modified:
                 // 1. Regex applied/changed and provides new title/index.
-                // 2. use_filename_as_title is TRUE and current title != filename.
+                // 2. The configured title source provides a different title.
                 // 3. Index changed due to reordering.
 
                 let mut should_update = false;
@@ -406,7 +405,18 @@ impl LibraryScanner {
                 .and_then(|chapters| chapters.get(index))
                 .map(|chapter| ((chapter.end - chapter.start).round() as i32).max(0))
                 .filter(|duration| *duration > 0);
-            let extracted = if json_duration.is_none() || !use_json_chapters {
+            let local_title = json_chapters
+                .as_ref()
+                .filter(|_| use_json_chapters)
+                .and_then(|chapters| chapters.get(index))
+                .map(|chapter| chapter.title.as_str());
+            let needs_audio_title = scraper_config.metadata_rank("audio_metadata")
+                < scraper_config.metadata_rank(
+                    scraper_config
+                        .select_title(&filename_str, local_title, None, None)
+                        .1,
+                );
+            let extracted = if json_duration.is_none() || needs_audio_title {
                 Some(self.extract_chapter_metadata(file_path, cloud_mode).await)
             } else {
                 None
@@ -416,26 +426,17 @@ impl LibraryScanner {
                 .unwrap_or(0);
             let extracted_title = extracted.map(|metadata| metadata.1).unwrap_or_default();
 
-            // metadata.json is the fallback title source. Explicit chapter regex
-            // and filename-based titles still override it and go through cleaner.
+            // Explicit chapter rules override the configured metadata priority.
             let (raw_title, should_clean_title) = if let Some(rt) = regex_title {
                 (rt, true)
-            } else if use_filename_as_title {
-                (filename_str.clone(), true)
-            } else if use_json_chapters {
-                if let Some(ref chapters) = json_chapters {
-                    if index < chapters.len() {
-                        (chapters[index].title.clone(), false)
-                    } else {
-                        (filename_str.clone(), true)
-                    }
-                } else {
-                    (filename_str.clone(), true)
-                }
-            } else if !extracted_title.is_empty() {
-                (extracted_title, true)
             } else {
-                (filename_str.clone(), true)
+                let (title, source) = scraper_config.select_title(
+                    &filename_str,
+                    local_title,
+                    Some(&extracted_title),
+                    None,
+                );
+                (title.to_owned(), source != "local_metadata")
             };
 
             let (final_title, is_extra) = super::super::shared::resolve_chapter_title(

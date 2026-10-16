@@ -1,4 +1,4 @@
-use super::super::{LibraryScanner, MetadataSource, ScanStatus};
+use super::super::{LibraryScanner, ScanStatus};
 use super::chapters::WebDavChapterContext;
 use crate::core::app::error::Result;
 use crate::core::library_scanner::shared::directory_book_name;
@@ -98,7 +98,7 @@ impl LibraryScanner {
 
         // Extract metadata from WebDAV files (try multiple files if needed)
         let (
-            mut meta_album,
+            meta_album,
             mut _meta_chapter_title,
             mut meta_author,
             mut meta_narrator,
@@ -305,21 +305,23 @@ impl LibraryScanner {
             }
         }
 
-        let local_rank = 0;
-        let audio_rank = scraper_config
-            .metadata_rank("audio_metadata")
-            .saturating_add(1);
-        let scraper_rank = scraper_config.metadata_rank("scraper").saturating_add(1);
-        let sidecar_title = local_album.clone().filter(|title| !title.trim().is_empty());
-        let (selected_album, title_rank) =
-            choose_metadata_value(local_album, audio_album, local_rank, audio_rank);
+        let local_rank = scraper_config.metadata_rank("local_metadata");
+        let audio_rank = scraper_config.metadata_rank("audio_metadata");
+        let scraper_rank = scraper_config.metadata_rank("scraper");
+        let (selected_title, title_source) = scraper_config.select_title(
+            &directory_title,
+            local_album.as_deref(),
+            audio_album.as_deref(),
+            None,
+        );
+        let title_rank = scraper_config.metadata_rank(title_source);
+        let book_title = self.text_cleaner.clean_filename(selected_title);
         let (selected_author, author_rank) =
             choose_metadata_value(local_author, audio_author, local_rank, audio_rank);
         let (selected_narrator, narrator_rank) =
             choose_metadata_value(local_narrator, audio_narrator, local_rank, audio_rank);
         let (selected_cover, cover_rank) =
             choose_metadata_value(local_cover_url, audio_cover_url, local_rank, audio_rank);
-        meta_album = selected_album.unwrap_or_default();
         meta_author = selected_author;
         meta_narrator = selected_narrator;
         meta_cover_url = selected_cover;
@@ -333,30 +335,6 @@ impl LibraryScanner {
         } else {
             local_rank
         };
-
-        let mut book_title;
-        let source;
-
-        // Remote sidecars are authoritative when present, independently of
-        // the option controlling writes to the drive.
-        if let Some(title) = sidecar_title {
-            book_title = title;
-            source = MetadataSource::FileMetadata;
-        } else if scraper_config.use_filename_as_title {
-            book_title = directory_title.clone();
-            source = MetadataSource::Fallback;
-        } else if !meta_album.trim().is_empty() && !meta_album.to_lowercase().starts_with("track") {
-            // Priority 1/2: metadata.json or ID3 (already merged above)
-            // Bugfix: Ignore generic "Track XX" titles from ID3 metadata
-            book_title = meta_album.clone();
-            source = MetadataSource::FileMetadata;
-        } else {
-            book_title = directory_title;
-            source = MetadataSource::Fallback;
-        }
-
-        // Clean the book title (whether from ID3 or Directory)
-        book_title = self.text_cleaner.clean_filename(&book_title);
 
         // Create or Update book
         let mut book = crate::db::models::Book {
@@ -451,10 +429,7 @@ impl LibraryScanner {
                 .await
             {
                 Ok(detail) => {
-                    if !scraper_config.use_filename_as_title
-                        && !detail.title.is_empty()
-                        && (source == MetadataSource::Fallback || scraper_rank < title_rank)
-                    {
+                    if !detail.title.trim().is_empty() && scraper_rank < title_rank {
                         book.title = Some(detail.title);
                     }
 

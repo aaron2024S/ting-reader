@@ -198,10 +198,11 @@ pub async fn create_library(
         req.root_path.unwrap_or_else(|| "/".to_string())
     };
 
-    let scraper_config = req.scraper_config.and_then(|config| {
+    let scraper_config = req.scraper_config.and_then(|mut config| {
         if library_type == "rss" {
             return normalize_rss_sync_config(config).map(|config| config.to_string());
         }
+        crate::db::models::normalize_metadata_priority(&mut config);
         Some(config.to_string())
     });
 
@@ -430,10 +431,11 @@ pub async fn update_library(
         library.root_path = root_path;
     }
 
-    if let Some(config) = req.scraper_config {
+    if let Some(mut config) = req.scraper_config {
         library.scraper_config = if library.library_type == "rss" {
             normalize_rss_sync_config(config).map(|config| config.to_string())
         } else {
+            crate::db::models::normalize_metadata_priority(&mut config);
             Some(config.to_string())
         };
     } else if library.library_type == "rss" {

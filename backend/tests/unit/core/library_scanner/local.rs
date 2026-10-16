@@ -32,14 +32,21 @@ async fn parent_series_people_reach_saved_volumes_and_numeric_chapter_indexes() 
         }
     }
     let library = test_support::library(&scanner, &root).await;
-    let config = crate::db::models::ScraperConfig {
+    let mut config = crate::db::models::ScraperConfig {
         cloud_mode: true,
         extract_audio_cover: false,
         metadata_priority: vec!["local_metadata".into()],
         ..Default::default()
     };
-    // A second full scan exercises updates and cached paths as well as new rows.
-    for _ in 0..2 {
+    // Changing the setting must invalidate scan caches without changing files.
+    // Disabling it later must preserve existing relationships.
+    for (enabled, mode, expected_series) in [
+        (false, ScanMode::Full, 0),
+        (false, ScanMode::Incremental, 0),
+        (true, ScanMode::Incremental, 1),
+        (false, ScanMode::Full, 1),
+    ] {
+        config.auto_generate_series = enabled;
         let result = scanner
             .scan_local_library(LocalLibraryScanContext {
                 library_id: &library.id,
@@ -47,7 +54,7 @@ async fn parent_series_people_reach_saved_volumes_and_numeric_chapter_indexes() 
                 task_id: None,
                 last_scanned: None,
                 scraper_config: &config,
-                mode: ScanMode::Full,
+                mode,
                 scan_paths: None,
             })
             .await
@@ -90,7 +97,10 @@ async fn parent_series_people_reach_saved_volumes_and_numeric_chapter_indexes() 
                 .find_series_by_book(&book.id)
                 .await
                 .unwrap();
-            assert_eq!(series.len(), 1);
+            assert_eq!(series.len(), expected_series);
+            if expected_series == 0 {
+                continue;
+            }
             assert_eq!(series[0].title, "示例书名");
             let members = scanner
                 .series_repo
@@ -102,6 +112,99 @@ async fn parent_series_people_reach_saved_volumes_and_numeric_chapter_indexes() 
                 members.iter().map(|(_, order)| *order).collect::<Vec<_>>(),
                 [1, 2, 3]
             );
+        }
+    }
+}
+
+#[test]
+fn series_generation_defaults_on_for_legacy_configs_and_preserves_explicit_false() {
+    use crate::db::models::ScraperConfig;
+    assert!(ScraperConfig::default().auto_generate_series);
+    for json in ["{}", r#"{"cloud_mode":true,"default_sources":[]}"#] {
+        let config: ScraperConfig = serde_json::from_str(json).unwrap();
+        assert!(config.auto_generate_series);
+    }
+    let config: ScraperConfig = serde_json::from_str(r#"{"auto_generate_series":false}"#).unwrap();
+    assert!(!config.auto_generate_series);
+    let saved = serde_json::to_value(&config).unwrap();
+    assert_eq!(saved["auto_generate_series"], false);
+}
+
+#[tokio::test]
+async fn local_metadata_json_series_import_ignores_directory_series_setting() {
+    use crate::core::library_scanner::{LocalLibraryScanContext, ScanMode, test_support};
+    let directory = tempfile::tempdir().unwrap();
+    let scanner = test_support::scanner(directory.path());
+    let root = directory.path().join("library");
+    let book_dir = root.join("独立书籍");
+    std::fs::create_dir_all(&book_dir).unwrap();
+    std::fs::write(book_dir.join("001.strm"), "https://example.test/audio").unwrap();
+    std::fs::write(
+        book_dir.join("metadata.json"),
+        r#"{"title":"元数据书名","series":["元数据系列 #2"],"chapters":[{"id":0,"start":0,"end":10,"title":"元数据章节"}]}"#,
+    )
+    .unwrap();
+    let library = test_support::library(&scanner, &root).await;
+    let mut config = crate::db::models::ScraperConfig {
+        cloud_mode: true,
+        extract_audio_cover: false,
+        metadata_priority: vec!["local_metadata".into()],
+        ..Default::default()
+    };
+    for (enabled, priority, expected_book, expected_chapter) in [
+        (false, vec!["filename", "local_metadata"], "独立书籍", "1"),
+        (
+            true,
+            vec!["local_metadata", "filename"],
+            "元数据书名",
+            "元数据章节",
+        ),
+        (false, vec!["filename", "local_metadata"], "独立书籍", "1"),
+    ] {
+        config.auto_generate_series = enabled;
+        config.metadata_priority = priority.into_iter().map(str::to_owned).collect();
+        let result = scanner
+            .scan_local_library(LocalLibraryScanContext {
+                library_id: &library.id,
+                path: &root,
+                task_id: None,
+                last_scanned: None,
+                scraper_config: &config,
+                mode: ScanMode::Incremental,
+                scan_paths: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(result.failed_count, 0, "{:?}", result.errors);
+        let books = scanner
+            .book_repo
+            .find_by_library(&library.id)
+            .await
+            .unwrap();
+        assert_eq!(books.len(), 1);
+        assert_eq!(books[0].title.as_deref(), Some(expected_book));
+        let chapters = scanner
+            .chapter_repo
+            .find_by_book(&books[0].id)
+            .await
+            .unwrap();
+        assert_eq!(chapters.len(), 1);
+        assert_eq!(chapters[0].title.as_deref(), Some(expected_chapter));
+        assert_eq!(chapters[0].duration, Some(10));
+        let series = scanner
+            .series_repo
+            .find_series_by_book(&books[0].id)
+            .await
+            .unwrap();
+        assert_eq!(series.len(), 1);
+        if let Some(series) = series.first() {
+            assert_eq!(series.title, "元数据系列");
+            let members = scanner
+                .series_repo
+                .find_books_by_series(&series.id)
+                .await
+                .unwrap();
+            assert_eq!(members[0].1, 2);
         }
     }
 }
@@ -197,9 +300,8 @@ async fn directory_title_cleanup_preserves_explicit_metadata_and_group_override(
     )
     .unwrap();
     let mut config = crate::db::models::ScraperConfig {
-        metadata_priority: vec!["local_metadata".into()],
+        metadata_priority: vec!["local_metadata".into(), "filename".into()],
         extract_audio_cover: false,
-        use_filename_as_title: false,
         ..Default::default()
     };
     let (metadata, _) = scanner
@@ -208,7 +310,7 @@ async fn directory_title_cleanup_preserves_explicit_metadata_and_group_override(
     assert_eq!(metadata.title.as_deref(), Some("真实书名 - 副标题"));
     assert_eq!(metadata.author.as_deref(), Some("真实作者"));
     assert_eq!(metadata.narrator.as_deref(), Some("真实演播"));
-    config.use_filename_as_title = true;
+    config.metadata_priority.reverse();
     let (metadata, _) = scanner
         .extract_final_metadata(&book_dir, &[], &config, Some("合并书名-目录作者／目录演播"))
         .await;

@@ -47,12 +47,11 @@ impl LibraryScanner {
                                 book_id,
                                 files,
                                 ChapterProcessingOptions {
-                                    last_scanned,
+                                    last_scanned: if mode.is_full() { None } else { last_scanned },
                                     task_id,
-                                    use_filename_as_title: scraper_config.use_filename_as_title,
-                                    extract_extra_chapters: scraper_config.extract_extra_chapters,
-                                    cloud_mode: scraper_config.cloud_mode,
-                                    changed_file_paths: Some(changed_file_paths),
+                                    scraper_config,
+                                    changed_file_paths: (!mode.is_full())
+                                        .then_some(changed_file_paths),
                                     json_chapters: None,
                                     chapter_title_template: None,
                                     chapter_title_overrides: None,
@@ -277,12 +276,10 @@ impl LibraryScanner {
                 &book_id,
                 files,
                 ChapterProcessingOptions {
-                    last_scanned,
+                    last_scanned: if mode.is_full() { None } else { last_scanned },
                     task_id,
-                    use_filename_as_title: scraper_config.use_filename_as_title,
-                    extract_extra_chapters: scraper_config.extract_extra_chapters,
-                    cloud_mode: scraper_config.cloud_mode,
-                    changed_file_paths: Some(changed_file_paths),
+                    scraper_config,
+                    changed_file_paths: (!mode.is_full()).then_some(changed_file_paths),
                     json_chapters,
                     chapter_title_template: chapter_title_template.as_deref(),
                     chapter_title_overrides: if chapter_titles.is_empty() {

@@ -385,12 +385,70 @@ fn empty_priority_uses_the_same_defaults_as_new_library_config() {
         empty.metadata_sources().collect::<Vec<_>>(),
         config.metadata_sources().collect::<Vec<_>>()
     );
-    assert_eq!(empty.metadata_rank("local_metadata"), 0);
-    assert_eq!(empty.metadata_rank("audio_metadata"), 1);
+    assert_eq!(empty.metadata_rank("filename"), 0);
+    assert_eq!(empty.metadata_rank("local_metadata"), 1);
+    assert_eq!(empty.metadata_rank("audio_metadata"), 2);
     empty.metadata_priority = vec!["scraper".into(), "audio_metadata".into()];
-    assert_eq!(empty.metadata_rank("scraper"), 0);
-    assert_eq!(empty.metadata_rank("audio_metadata"), 1);
+    assert_eq!(empty.metadata_rank("scraper"), 1);
+    assert_eq!(empty.metadata_rank("audio_metadata"), 2);
     assert_eq!(empty.metadata_rank("local_metadata"), usize::MAX - 1);
+}
+
+#[test]
+fn title_priority_selects_available_sources_and_rejects_generic_audio_tags() {
+    for (priority, expected) in [
+        (
+            vec!["filename", "local_metadata", "audio_metadata", "scraper"],
+            ("目录标题", "filename"),
+        ),
+        (
+            vec!["local_metadata", "filename", "audio_metadata", "scraper"],
+            ("元数据标题", "local_metadata"),
+        ),
+        (
+            vec!["audio_metadata", "local_metadata", "filename", "scraper"],
+            ("音频标题", "audio_metadata"),
+        ),
+        (
+            vec!["scraper", "local_metadata", "audio_metadata", "filename"],
+            ("刮削标题", "scraper"),
+        ),
+    ] {
+        let config = ScraperConfig {
+            metadata_priority: priority.into_iter().map(str::to_owned).collect(),
+            ..Default::default()
+        };
+        assert_eq!(
+            config.select_title(
+                "目录标题",
+                Some("元数据标题"),
+                Some("音频标题"),
+                Some("刮削标题")
+            ),
+            expected
+        );
+    }
+    let config = ScraperConfig {
+        metadata_priority: vec![
+            "audio_metadata".into(),
+            "local_metadata".into(),
+            "scraper".into(),
+            "filename".into(),
+        ],
+        ..Default::default()
+    };
+    assert_eq!(
+        config.select_title("目录标题", Some("元数据标题"), Some("Track 01"), None),
+        ("元数据标题", "local_metadata")
+    );
+    assert_eq!(
+        config.select_title("目录标题", Some(" "), None, Some("刮削标题")),
+        ("刮削标题", "scraper")
+    );
+    assert_eq!(
+        config.select_title("目录标题", None, None, None),
+        ("目录标题", "filename")
+    );
 }
 
 struct RemoteMetadataResources {

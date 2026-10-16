@@ -890,12 +890,13 @@ const zhCN = {
     writeMetadataJson: "写入 metadata.json",
     writeMetadataJsonHelp:
       "开启后，生成 Audiobookshelf 兼容的 metadata.json 元数据文件",
-    preferAudioTitle: "优先使用文件/文件夹名作为标题",
-    preferAudioTitleHelp:
-      "开启后，忽略优先级配置，强制使用文件夹名作为书名、文件名作为章节名",
+    filename: "文件/文件夹名",
     extractAudioCover: "提取音频封面",
     extractAudioCoverHelp: "开启后，系统/插件将尝试从音频文件中提取并保存封面",
     extractExtraChapters: "提取番外章节",
+    autoGenerateSeries: "自动生成系列",
+    autoGenerateSeriesHelp:
+      "扫描时根据文件夹名自动创建并关联系列。关闭后保留已有系列，metadata.json 中的系列信息仍照常导入。",
     extractExtraChaptersHelp:
       "开启后，根据章节标题自动识别番外并与正文分组；关闭后，自动识别到的番外按正文处理。",
     autoDetectChanges: "自动检测媒体库变化",

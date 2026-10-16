@@ -38,6 +38,7 @@ const ScraperConfigurator: React.FC<Props> = ({ configStr, sources, onChange, li
 
   // Special handling for priority tab
   const PRIORITY_SOURCES = [
+    { id: 'filename', name: t('scraperConfig.filename') },
     { id: 'local_metadata', name: t('scraperConfig.localMetadata') },
     { id: 'audio_metadata', name: t('scraperConfig.audioMetadata') },
     { id: 'scraper', name: t('scraperConfig.scraper') }
@@ -47,7 +48,9 @@ const ScraperConfigurator: React.FC<Props> = ({ configStr, sources, onChange, li
 
   // Initialize default priority if empty
   if (activeTab === 'priority' && activeIds.length === 0) {
-      activeIds = ['local_metadata', 'audio_metadata', 'scraper'];
+      activeIds = PRIORITY_SOURCES.map(source => source.id);
+  } else if (activeTab === 'priority' && !activeIds.includes('filename')) {
+      activeIds = ['filename', ...activeIds];
   }
   if (activeTab !== 'priority') {
     const autoSourceIds = new Set(sources.map(source => source.id));
@@ -57,9 +60,9 @@ const ScraperConfigurator: React.FC<Props> = ({ configStr, sources, onChange, li
   const nfoEnabled = config.nfo_writing_enabled ?? false;
   const metadataWritingEnabled = config.metadata_writing_enabled ?? false;
   const webdavMetadataWritingEnabled = config.webdav_metadata_writing_enabled ?? false;
-  const useFilenameAsTitle = config.use_filename_as_title ?? true;
   const extractAudioCover = config.extract_audio_cover ?? true;
   const extractExtraChapters = config.extract_extra_chapters ?? true;
+  const autoGenerateSeries = config.auto_generate_series ?? true;
   const disableWatcher = config.disable_watcher ?? false;
   const cloudMode = config.cloud_mode ?? false;
 
@@ -70,11 +73,6 @@ const ScraperConfigurator: React.FC<Props> = ({ configStr, sources, onChange, li
 
   const handleMetadataWritingChange = (e: React.ChangeEvent<HTMLInputElement>) => {
       const newConfig: Record<string, unknown> = { ...config, metadata_writing_enabled: e.target.checked };
-      onChange(JSON.stringify(newConfig, null, 2));
-  };
-
-  const handlePreferAudioTitleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-      const newConfig: Record<string, unknown> = { ...config, use_filename_as_title: e.target.checked };
       onChange(JSON.stringify(newConfig, null, 2));
   };
 
@@ -135,6 +133,23 @@ const ScraperConfigurator: React.FC<Props> = ({ configStr, sources, onChange, li
     <div className="bg-slate-50 dark:bg-slate-800 rounded-xl p-4 border border-slate-200 dark:border-slate-700">
       {/* Settings Toggles */}
       <div className="space-y-2 mb-4">
+        {(libraryType === 'local' || libraryType === 'webdav') && (
+          <div className="flex items-center gap-3 p-3 bg-white dark:bg-slate-900 rounded-lg border border-slate-200 dark:border-slate-700 shadow-sm">
+            <input
+              type="checkbox"
+              id="auto-generate-series"
+              checked={autoGenerateSeries}
+              onChange={event => onChange(JSON.stringify({ ...config, auto_generate_series: event.target.checked }, null, 2))}
+              className="w-4 h-4 text-primary-600 rounded focus:ring-primary-500 cursor-pointer"
+            />
+            <div className="flex min-w-0 items-center gap-1.5">
+              <label htmlFor="auto-generate-series" className="text-sm font-bold text-slate-700 dark:text-slate-300 cursor-pointer">
+                {t('scraperConfig.autoGenerateSeries')}
+              </label>
+              <HelpHint text={t('scraperConfig.autoGenerateSeriesHelp')} />
+            </div>
+          </div>
+        )}
         {libraryType === 'webdav' && (
           <div className="flex items-center gap-3 p-3 bg-white dark:bg-slate-900 rounded-lg border border-slate-200 dark:border-slate-700 shadow-sm">
             <input
@@ -189,23 +204,6 @@ const ScraperConfigurator: React.FC<Props> = ({ configStr, sources, onChange, li
         </div>
           </>
         )}
-
-        {/* Prefer Audio Title - Show for all libraries */}
-        <div className="flex items-center gap-3 p-3 bg-white dark:bg-slate-900 rounded-lg border border-slate-200 dark:border-slate-700 shadow-sm">
-          <input
-            type="checkbox"
-            id="prefer-audio-title"
-            checked={useFilenameAsTitle}
-            onChange={handlePreferAudioTitleChange}
-            className="w-4 h-4 text-primary-600 rounded focus:ring-primary-500 cursor-pointer"
-          />
-          <div className="flex min-w-0 items-center gap-1.5">
-            <label htmlFor="prefer-audio-title" className="text-sm font-bold text-slate-700 dark:text-slate-300 cursor-pointer">
-              {t('scraperConfig.preferAudioTitle')}
-            </label>
-            <HelpHint text={t('scraperConfig.preferAudioTitleHelp')} />
-          </div>
-        </div>
 
         {/* Extract Audio Cover - Show for all libraries */}
         <div className="flex items-center gap-3 p-3 bg-white dark:bg-slate-900 rounded-lg border border-slate-200 dark:border-slate-700 shadow-sm">

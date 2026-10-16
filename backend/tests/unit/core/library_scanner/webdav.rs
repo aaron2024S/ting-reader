@@ -26,7 +26,7 @@ async fn webdav_series_inherit_parent_people_and_sort_decoded_chinese_chapters()
     let origin = format!("http://{}", listener.local_addr().unwrap());
     library.url = format!("{origin}/dav");
     library.library_type = "webdav".into();
-    let config = crate::db::models::ScraperConfig {
+    let mut config = crate::db::models::ScraperConfig {
         cloud_mode: true,
         extract_audio_cover: false,
         metadata_priority: vec!["local_metadata".into()],
@@ -89,13 +89,18 @@ async fn webdav_series_inherit_parent_people_and_sort_decoded_chinese_chapters()
     let _server = WebDavTestServer(tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap()
     }));
-    for _ in 0..2 {
+    for (enabled, mode, expected_series) in [
+        (false, ScanMode::Full, 0),
+        (false, ScanMode::Incremental, 0),
+        (true, ScanMode::Incremental, 1),
+        (false, ScanMode::Full, 1),
+    ] {
+        config.auto_generate_series = enabled;
         let result = scanner
-            .scan_webdav_library(&library, None, &config, ScanMode::Full)
+            .scan_webdav_library(&library, None, &config, mode)
             .await
             .unwrap();
         assert_eq!(result.failed_count, 0, "{:?}", result.errors);
-        assert_eq!(result.books_skipped, 0);
         let books = scanner
             .book_repo
             .find_by_library(&library.id)
@@ -132,11 +137,94 @@ async fn webdav_series_inherit_parent_people_and_sort_decoded_chinese_chapters()
                 .find_series_by_book(&book.id)
                 .await
                 .unwrap();
-            assert_eq!(series.len(), 1);
-            assert_eq!(series[0].title, "示例系列");
+            assert_eq!(series.len(), expected_series);
+            if let Some(series) = series.first() {
+                assert_eq!(series.title, "示例系列");
+            }
         }
     }
     drop(caches);
+}
+
+#[tokio::test]
+async fn webdav_metadata_json_series_import_ignores_directory_series_setting() {
+    use crate::core::library_scanner::test_support;
+    use axum::{http::StatusCode, response::IntoResponse};
+    let directory = tempfile::tempdir().unwrap();
+    let scanner = test_support::scanner(directory.path());
+    let mut library = test_support::library(&scanner, directory.path()).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    library.url = format!("http://{}/dav", listener.local_addr().unwrap());
+    library.library_type = "webdav".into();
+    let dir_url = format!("{}/book", library.url);
+    let _cache =
+        WebDavTestCache(crate::core::books::metadata::remote_metadata_dir(&dir_url).unwrap());
+    let app = axum::Router::new().fallback(|request: axum::extract::Request| async move {
+        if request.uri().path().ends_with("/metadata.json") {
+            (
+                StatusCode::OK,
+                r#"{"title":"元数据书名","series":["元数据系列 #2"],"chapters":[{"id":0,"start":0,"end":10,"title":"元数据章节"}]}"#,
+            )
+                .into_response()
+        } else {
+            StatusCode::NOT_FOUND.into_response()
+        }
+    });
+    let _server = WebDavTestServer(tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap()
+    }));
+    let files = vec![format!("{dir_url}/001.mp3")];
+    let metadata_files = vec![format!("{dir_url}/metadata.json")];
+    let mut config = crate::db::models::ScraperConfig {
+        cloud_mode: true,
+        extract_audio_cover: false,
+        metadata_priority: vec!["local_metadata".into()],
+        ..Default::default()
+    };
+    for (enabled, priority, expected_book, expected_chapter) in [
+        (false, vec!["filename", "local_metadata"], "book", "1"),
+        (
+            true,
+            vec!["local_metadata", "filename"],
+            "元数据书名",
+            "元数据章节",
+        ),
+        (false, vec!["filename", "local_metadata"], "book", "1"),
+    ] {
+        config.auto_generate_series = enabled;
+        config.metadata_priority = priority.into_iter().map(str::to_owned).collect();
+        let (id, _) = scanner
+            .process_webdav_book(super::processing::WebDavBookContext {
+                library: &library,
+                dir_url: &dir_url,
+                file_urls: &files,
+                metadata_files: &metadata_files,
+                scraper_config: &config,
+                full_scan: true,
+                existing_info: None,
+                fallback_title_override: None,
+            })
+            .await
+            .unwrap();
+        use crate::db::repository::Repository;
+        let book = scanner.book_repo.find_by_id(&id).await.unwrap().unwrap();
+        assert_eq!(book.title.as_deref(), Some(expected_book));
+        let chapters = scanner.chapter_repo.find_by_book(&id).await.unwrap();
+        assert_eq!(chapters.len(), 1);
+        assert_eq!(chapters[0].title.as_deref(), Some(expected_chapter));
+        assert_eq!(chapters[0].duration, Some(10));
+        let series = scanner.series_repo.find_series_by_book(&id).await.unwrap();
+        assert_eq!(series.len(), 1);
+        if let Some(series) = series.first() {
+            assert_eq!(series.title, "元数据系列");
+            let members = scanner
+                .series_repo
+                .find_books_by_series(&series.id)
+                .await
+                .unwrap();
+            assert_eq!(members[0].1, 2);
+        }
+    }
 }
 
 #[tokio::test]

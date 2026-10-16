@@ -7,10 +7,10 @@ export interface ScraperConfig {
   tags_sources?: string[];
   nfo_writing_enabled?: boolean;
   metadata_writing_enabled?: boolean;
-  use_filename_as_title?: boolean;
   metadata_priority?: string[];
   extract_audio_cover?: boolean;
   extract_extra_chapters?: boolean;
+  auto_generate_series?: boolean;
   disable_watcher?: boolean;
   cloud_mode?: boolean;
   scheduled_sync_enabled?: boolean;

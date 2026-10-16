@@ -933,13 +933,14 @@ const enUS = {
     writeMetadataJson: "Write metadata.json",
     writeMetadataJsonHelp:
       "When enabled, creates Audiobookshelf-compatible metadata.json files.",
-    preferAudioTitle: "Prefer file/folder names as titles",
-    preferAudioTitleHelp:
-      "Ignore priority settings and use folder names as book titles and filenames as chapter titles.",
+    filename: "File/folder names",
     extractAudioCover: "Extract audio covers",
     extractAudioCoverHelp:
       "The system/plugins will try to extract and save covers from audio files.",
     extractExtraChapters: "Extract extra chapters",
+    autoGenerateSeries: "Automatically create series",
+    autoGenerateSeriesHelp:
+      "Create and link series from folder names during scans. Disabling this keeps existing series; series declared in metadata.json are still imported.",
     extractExtraChaptersHelp:
       "Detect extra chapters from their titles and group them separately. When disabled, automatically detected extras are treated as main chapters.",
     autoDetectChanges: "Auto-detect library changes",

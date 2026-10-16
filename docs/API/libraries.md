@@ -59,9 +59,9 @@
   "nfo_writing_enabled": false,
   "metadata_writing_enabled": false,
   "webdav_metadata_writing_enabled": false,
-  "prefer_audio_title": false,
-  "metadata_priority": ["string"],
+  "metadata_priority": ["filename", "local_metadata", "audio_metadata", "scraper"],
   "extract_audio_cover": false,
+  "auto_generate_series": true,
   "disable_watcher": false,
   "cloud_mode": false
 }
@@ -72,6 +72,8 @@
 说明：
 
 - 创建成功后会自动提交一次媒体库扫描任务。
+- `metadata_priority` 按从前到后的顺序选择元数据来源。默认依次为文件/文件夹名、本地 JSON/NFO、音频内嵌元数据、刮削器；将 `filename` 后移即可优先采用其他来源的标题。文件夹名用于书名，文件名用于章节名；缺少标题时使用下一来源，最终回退到路径名称。手动修改及章节正则等显式规则仍优先生效。旧版标题开关自动迁移到此列表，不再单独设置。
+- 本地和 WebDAV 库的 `auto_generate_series` 默认为 `true`，旧库未配置此字段时也默认开启。此开关只控制根据文件夹名自动创建、关联系列，不影响 `metadata.json` 中系列信息的正常导入。关闭后已有系列及其关联保留，仍可手动管理。修改后在下次扫描生效，无需重新建库。
 - WebDAV 的 `webdav_metadata_writing_enabled` 控制是否将后续元数据编辑同步到网盘，默认关闭。开启后同步 `metadata.json`、`book.nfo` 和文件封面；封面 URL 保持引用，不上传图片，也不删除已有网盘封面。
 - WebDAV 扫描始终优先使用远端 `metadata.json`、`book.nfo`，并将已有文件和封面下载到服务器 `temp/<书籍路径的 SHA-256>/`。编辑时维护本地副本；手动锁定的元数据不会被后续扫描覆盖。初次扫描不会写入网盘。
 - RSS 库上传的封面也保存在 `temp/<哈希>/`，编辑元数据不生成 `metadata.json` 或 NFO。
@@ -155,7 +157,7 @@
 
 说明：
 - 扫描任务完成后会在任务消息和 `audit::scan` 日志中记录媒体库名称、类型、路径、同步模式、新增/更新/删除数量；如果配置了 Webhook 监听，会触发 `library.scan_completed`。
-- 扫描时会尝试识别同一父目录下的系列目录。支持 `书名之XX`、`书名第一卷`、`书名第1季`、`书名 S01`、`书名 Vol.1`、`书名 Season 1` 等命名；这些目录本身包含音频文件时会分别作为书籍入库，并自动关联到同一个系列。若目录名包含卷/季编号，会按编号设置系列排序。
+- 开启“自动生成系列”时，扫描会尝试识别同一父目录下的系列目录。支持 `书名之XX`、`书名第一卷`、`书名第1季`、`书名 S01`、`书名 Vol.1`、`书名 Season 1` 等命名；这些目录本身包含音频文件时会分别作为书籍入库，并自动关联到同一个系列。若目录名包含卷/季编号，会按编号设置系列排序。此开关不影响章节分组目录合并或章节排序。
 
 ---
 

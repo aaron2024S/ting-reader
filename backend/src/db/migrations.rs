@@ -811,6 +811,9 @@ pub fn run_migrations(conn: &mut Connection) -> Result<()> {
     if current_version < 29 {
         apply_migration(conn, 29, MIGRATION_V29)?;
     }
+    if current_version < 30 {
+        migrate_metadata_priority(conn)?;
+    }
 
     info!("Database migrations completed successfully");
     Ok(())
@@ -925,6 +928,37 @@ fn apply_migration(conn: &mut Connection, version: i64, sql: &str) -> Result<()>
     tx.commit().map_err(TingError::DatabaseError)?;
 
     info!("Migration v{} applied successfully", version);
+    Ok(())
+}
+
+fn migrate_metadata_priority(conn: &mut Connection) -> Result<()> {
+    let tx = conn.transaction()?;
+    let libraries = {
+        let mut statement = tx.prepare(
+            "SELECT id, scraper_config FROM libraries WHERE type IN ('local', 'webdav') AND scraper_config IS NOT NULL",
+        )?;
+        statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?
+    };
+    for (id, json) in libraries {
+        let Ok(mut config) = serde_json::from_str::<serde_json::Value>(&json) else {
+            continue;
+        };
+        if !config.is_object() {
+            continue;
+        }
+        crate::db::models::normalize_metadata_priority(&mut config);
+        tx.execute(
+            "UPDATE libraries SET scraper_config = ? WHERE id = ?",
+            rusqlite::params![config.to_string(), id],
+        )?;
+    }
+    tx.execute("INSERT INTO schema_migrations (version) VALUES (30)", [])?;
+    tx.commit()?;
+    info!("Migration v30 applied: Filename metadata priority");
     Ok(())
 }
 

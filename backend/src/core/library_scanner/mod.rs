@@ -47,6 +47,7 @@ pub const STANDARD_EXTENSIONS: &[&str] = &[
 pub enum MetadataSource {
     Nfo,
     FileMetadata,
+    Scraper,
     Fallback,
 }
 

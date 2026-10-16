@@ -158,37 +158,39 @@ impl LibraryScanner {
             } else {
                 None
             };
-            let (meta_title, meta_duration) = if let Some(chapter) = sidecar_chapter {
-                let duration = ((chapter.end - chapter.start).round() as i32).max(0);
-                (chapter.title.clone(), duration)
-            } else if is_cloud_mode {
-                (filename.clone(), 0)
-            } else {
-                let (_, title, _, _, _, duration) = self
-                    .extract_webdav_metadata(
-                        library,
-                        file_url,
-                        None,
-                        scraper_config.extract_audio_cover,
-                    )
-                    .await;
-                (title, duration)
-            };
+            let local_title = sidecar_chapter.map(|chapter| chapter.title.as_str());
+            let json_duration = sidecar_chapter
+                .map(|chapter| ((chapter.end - chapter.start).round() as i32).max(0))
+                .filter(|duration| *duration > 0);
+            let needs_audio_title = scraper_config.metadata_rank("audio_metadata")
+                < scraper_config.metadata_rank(
+                    scraper_config
+                        .select_title(&filename, local_title, None, None)
+                        .1,
+                );
+            let (audio_title, audio_duration) =
+                if !is_cloud_mode && (json_duration.is_none() || needs_audio_title) {
+                    let (_, title, _, _, _, duration) = self
+                        .extract_webdav_metadata(
+                            library,
+                            file_url,
+                            None,
+                            scraper_config.extract_audio_cover,
+                        )
+                        .await;
+                    (title, duration)
+                } else {
+                    (String::new(), 0)
+                };
+            let meta_duration = json_duration.unwrap_or(audio_duration);
 
-            // Explicit chapter rules override sidecar titles; otherwise use
-            // the sidecar before audio tags and filename fallbacks.
+            // Explicit chapter rules override the configured metadata priority.
             let (raw_title, should_clean_title) = if let Some(rt) = regex_title {
                 (rt, true)
-            } else if use_json_chapters {
-                (meta_title, false)
-            } else if scraper_config.use_filename_as_title {
-                (filename.clone(), true)
-            } else if !meta_title.trim().is_empty()
-                && !meta_title.to_lowercase().starts_with("track")
-            {
-                (meta_title, true)
             } else {
-                (filename, true)
+                let (title, source) =
+                    scraper_config.select_title(&filename, local_title, Some(&audio_title), None);
+                (title.to_owned(), source != "local_metadata")
             };
 
             let (final_title, is_extra) = super::super::shared::resolve_chapter_title(

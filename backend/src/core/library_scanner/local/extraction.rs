@@ -24,7 +24,8 @@ impl LibraryScanner {
         let base_title = fallback_title_override
             .filter(|value| !value.trim().is_empty())
             .unwrap_or(dir_name);
-        final_meta.title = Some(self.text_cleaner.clean_book_directory_title(base_title));
+        let directory_title = self.text_cleaner.clean_book_directory_title(base_title);
+        final_meta.title = Some(directory_title.clone());
         let parent_name = dir
             .parent()
             .and_then(Path::file_name)
@@ -34,7 +35,6 @@ impl LibraryScanner {
         final_meta.author = name.author.map(str::to_owned);
         final_meta.narrator = name.narrator.map(str::to_owned);
 
-        // 1. Check if we should force filename as title
         debug!(
             "Processing dir: {:?}, scraper_config: {:?}",
             dir, scraper_config
@@ -43,21 +43,26 @@ impl LibraryScanner {
         // Read lower-priority sources first, using the same config policy as WebDAV.
         for source_type in scraper_config.metadata_sources().rev() {
             match source_type {
+                "filename" => {
+                    final_meta.title = Some(directory_title.clone());
+                    final_source = MetadataSource::Fallback;
+                }
                 "local_metadata" => {
                     if let Some(path) = self.find_cover_image(dir) {
                         final_meta.cover_url = Some(path);
                     }
-                    for mut metadata in [self.extract_from_nfo(dir), self.extract_from_json(dir)]
+                    for metadata in [self.extract_from_nfo(dir), self.extract_from_json(dir)]
                         .into_iter()
                         .flatten()
                     {
-                        if scraper_config.use_filename_as_title {
-                            metadata.title = None;
-                        }
-                        final_meta.merge(metadata);
-                        if !scraper_config.use_filename_as_title && final_meta.title.is_some() {
+                        if metadata
+                            .title
+                            .as_ref()
+                            .is_some_and(|title| !title.trim().is_empty())
+                        {
                             final_source = MetadataSource::Nfo;
                         }
+                        final_meta.merge(metadata);
                     }
                 }
                 "audio_metadata" => {
@@ -66,17 +71,15 @@ impl LibraryScanner {
                         .await
                     {
                         let mut metadata = meta;
-                        if scraper_config.use_filename_as_title
-                            || metadata.title.as_ref().is_some_and(|title| {
-                                title.trim().is_empty() || title.to_lowercase().starts_with("track")
-                            })
-                        {
+                        if metadata.title.as_ref().is_some_and(|title| {
+                            title.trim().is_empty() || title.to_lowercase().starts_with("track")
+                        }) {
                             metadata.title = None;
                         }
-                        final_meta.merge(metadata);
-                        if !scraper_config.use_filename_as_title && final_meta.title.is_some() {
+                        if metadata.title.is_some() {
                             final_source = MetadataSource::FileMetadata;
                         }
+                        final_meta.merge(metadata);
                     }
                 }
                 "scraper" if scraper_config.has_scraper_sources() => {
@@ -97,11 +100,14 @@ impl LibraryScanner {
                             )
                             .await
                         {
-                            let mut metadata = meta;
-                            if scraper_config.use_filename_as_title {
-                                metadata.title = None;
+                            if meta
+                                .title
+                                .as_ref()
+                                .is_some_and(|title| !title.trim().is_empty())
+                            {
+                                final_source = MetadataSource::Scraper;
                             }
-                            final_meta.merge(metadata);
+                            final_meta.merge(meta);
                         }
                     }
                 }

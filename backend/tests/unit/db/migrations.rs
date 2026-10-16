@@ -1,6 +1,102 @@
 use super::*;
 
 #[test]
+fn migration_v30_moves_legacy_title_flags_into_priority_without_losing_settings() {
+    let mut conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(MIGRATION_TABLE).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE libraries (id TEXT PRIMARY KEY, type TEXT, scraper_config TEXT);
+         INSERT INTO schema_migrations (version) VALUES (29);",
+    )
+    .unwrap();
+    let cases = [
+        (
+            "default",
+            "local",
+            r#"{"cloud_mode":true}"#,
+            Some(vec![
+                "filename",
+                "local_metadata",
+                "audio_metadata",
+                "scraper",
+            ]),
+        ),
+        (
+            "enabled",
+            "webdav",
+            r#"{"use_filename_as_title":true,"metadata_priority":["audio_metadata","local_metadata","scraper"],"cloud_mode":true}"#,
+            Some(vec![
+                "filename",
+                "audio_metadata",
+                "local_metadata",
+                "scraper",
+            ]),
+        ),
+        (
+            "disabled",
+            "local",
+            r#"{"use_filename_as_title":false,"metadata_priority":["scraper","local_metadata","audio_metadata"],"cloud_mode":true}"#,
+            Some(vec![
+                "scraper",
+                "local_metadata",
+                "audio_metadata",
+                "filename",
+            ]),
+        ),
+        (
+            "empty",
+            "webdav",
+            r#"{"use_filename_as_title":false,"metadata_priority":[],"cloud_mode":true}"#,
+            Some(vec![
+                "local_metadata",
+                "audio_metadata",
+                "scraper",
+                "filename",
+            ]),
+        ),
+        (
+            "explicit",
+            "local",
+            r#"{"use_filename_as_title":true,"metadata_priority":["local_metadata","filename","scraper"],"cloud_mode":true}"#,
+            Some(vec!["local_metadata", "filename", "scraper"]),
+        ),
+        ("rss", "rss", r#"{"scheduled_sync_enabled":true}"#, None),
+        ("invalid", "local", "invalid JSON", None),
+    ];
+    for (id, kind, json, _) in &cases {
+        conn.execute(
+            "INSERT INTO libraries VALUES (?, ?, ?)",
+            rusqlite::params![id, kind, json],
+        )
+        .unwrap();
+    }
+    for _ in 0..2 {
+        run_migrations(&mut conn).unwrap();
+        for (id, _, original, priority) in &cases {
+            let saved: String = conn
+                .query_row(
+                    "SELECT scraper_config FROM libraries WHERE id = ?",
+                    [id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            if let Some(priority) = priority {
+                let value: serde_json::Value = serde_json::from_str(&saved).unwrap();
+                assert_eq!(
+                    value["metadata_priority"],
+                    serde_json::json!(priority),
+                    "{id}"
+                );
+                assert_eq!(value["cloud_mode"], true);
+                assert!(value.get("use_filename_as_title").is_none());
+            } else {
+                assert_eq!(&saved, original);
+            }
+        }
+    }
+}
+
+#[test]
 fn migration_v26_creates_persistent_scanner_state() {
     let mut conn = Connection::open_in_memory().unwrap();
     conn.execute_batch(MIGRATION_TABLE).unwrap();
