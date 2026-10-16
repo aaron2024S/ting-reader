@@ -1,3 +1,6 @@
+use crate::core::app::error::{
+    AccessErrorKind, AuthenticationErrorKind, InputErrorKind, LookupErrorKind,
+};
 mod decrypt;
 mod hls;
 mod hls_serve;
@@ -81,7 +84,15 @@ async fn get_remote_media_reader(
             .storage_service
             .get_webdav_reader(library, path, range, state.encryption_key.as_ref())
             .await
-            .map_err(|e| TingError::NotFound(format!("Remote WebDAV media not found: {}", e)));
+            .map_err(|e| {
+                let message = format!("Remote WebDAV media not found: {}", e);
+                TingError::not_found(
+                    LookupErrorKind::File,
+                    "get_remote_media_reader::not_found",
+                    message,
+                )
+                .with_source(anyhow::anyhow!(e))
+            });
     }
 
     if library.library_type == "rss" || path.starts_with("http://") || path.starts_with("https://")
@@ -90,13 +101,22 @@ async fn get_remote_media_reader(
             .storage_service
             .get_http_reader(path, range)
             .await
-            .map_err(|e| TingError::NotFound(format!("Remote media not found: {}", e)));
+            .map_err(|e| {
+                let message = format!("Remote media not found: {}", e);
+                TingError::not_found(
+                    LookupErrorKind::File,
+                    "get_remote_media_reader::not_found",
+                    message,
+                )
+                .with_source(anyhow::anyhow!(e))
+            });
     }
 
-    Err(TingError::ValidationError(format!(
-        "Unsupported remote library type '{}'",
-        library.library_type
-    )))
+    Err(TingError::validation(
+        InputErrorKind::UnsupportedValue,
+        "get_remote_media_reader::validation",
+        format!("Unsupported remote library type '{}'", library.library_type),
+    ))
 }
 
 /// Handler for GET /api/stream/:chapterId - Stream chapter audio
@@ -112,13 +132,25 @@ pub async fn stream_chapter(
         .chapter_repo
         .find_by_id(&chapter_id)
         .await?
-        .ok_or_else(|| TingError::NotFound(format!("Chapter {} not found", chapter_id)))?;
+        .ok_or_else(|| {
+            TingError::not_found(
+                LookupErrorKind::Chapter,
+                "stream_chapter::not_found",
+                format!("Chapter {} not found", chapter_id),
+            )
+        })?;
 
     let book = state
         .book_repo
         .find_by_id(&chapter.book_id)
         .await?
-        .ok_or_else(|| TingError::NotFound(format!("Book {} not found", chapter.book_id)))?;
+        .ok_or_else(|| {
+            TingError::not_found(
+                LookupErrorKind::Chapter,
+                "stream_chapter::not_found",
+                format!("Book {} not found", chapter.book_id),
+            )
+        })?;
 
     ensure_user_can_stream_book(&state, user.as_ref(), &book.id).await?;
 
@@ -126,7 +158,13 @@ pub async fn stream_chapter(
         .library_repo
         .find_by_id(&book.library_id)
         .await?
-        .ok_or_else(|| TingError::NotFound(format!("Library {} not found", book.library_id)))?;
+        .ok_or_else(|| {
+            TingError::not_found(
+                LookupErrorKind::Book,
+                "stream_chapter::not_found",
+                format!("Library {} not found", book.library_id),
+            )
+        })?;
 
     let ext = std::path::Path::new(&chapter.path)
         .extension()
@@ -191,7 +229,11 @@ pub async fn stream_signed_chapter(
 
     let user_id = params.user.as_deref().unwrap_or_default();
     let signed_user = state.user_repo.find_by_id(user_id).await?.ok_or_else(|| {
-        TingError::PermissionDenied("Signed media route user not found".to_string())
+        TingError::permission(
+            AccessErrorKind::ResourceDenied,
+            "stream_signed_chapter::permission",
+            "Signed media route user not found".to_string(),
+        )
     })?;
     let auth_user = AuthUser {
         user_id: signed_user.id.clone(),
@@ -222,11 +264,17 @@ fn validate_signed_stream_query(
     chapter_id: &str,
     params: &SignedStreamQuery,
 ) -> Result<()> {
-    let expires = params
-        .expires
-        .ok_or_else(|| TingError::PermissionDenied("Missing signed media expiry".to_string()))?;
+    let expires = params.expires.ok_or_else(|| {
+        TingError::permission(
+            AccessErrorKind::ResourceDenied,
+            "validate_signed_stream_query::permission",
+            "Missing signed media expiry".to_string(),
+        )
+    })?;
     if signature_has_expired(expires) {
-        return Err(TingError::PermissionDenied(
+        return Err(TingError::permission(
+            AccessErrorKind::ResourceDenied,
+            "validate_signed_stream_query::permission",
             "Signed media URL has expired".to_string(),
         ));
     }
@@ -235,12 +283,24 @@ fn validate_signed_stream_query(
         .user
         .as_deref()
         .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| TingError::PermissionDenied("Missing signed media user".to_string()))?;
+        .ok_or_else(|| {
+            TingError::permission(
+                AccessErrorKind::ResourceDenied,
+                "validate_signed_stream_query::permission",
+                "Missing signed media user".to_string(),
+            )
+        })?;
     let signature = params
         .signature
         .as_deref()
         .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| TingError::PermissionDenied("Missing signed media signature".to_string()))?;
+        .ok_or_else(|| {
+            TingError::permission(
+                AccessErrorKind::ResourceDenied,
+                "validate_signed_stream_query::permission",
+                "Missing signed media signature".to_string(),
+            )
+        })?;
     let download = signed_download_flag(params.download.as_deref());
     let expected = sign_media_stream_request(
         state.encryption_key.as_ref(),
@@ -253,7 +313,9 @@ fn validate_signed_stream_query(
     );
 
     if !constant_time_eq(signature.as_bytes(), expected.as_bytes()) {
-        return Err(TingError::PermissionDenied(
+        return Err(TingError::permission(
+            AccessErrorKind::ResourceDenied,
+            "validate_signed_stream_query::permission",
             "Invalid signed media signature".to_string(),
         ));
     }
@@ -266,7 +328,13 @@ async fn ensure_user_can_stream_book(
     user: Option<&AuthUser>,
     book_id: &str,
 ) -> Result<()> {
-    let user = user.ok_or_else(|| TingError::AuthenticationError("用户未认证".to_string()))?;
+    let user = user.ok_or_else(|| {
+        TingError::authentication(
+            AuthenticationErrorKind::MissingCredentials,
+            "ensure_user_can_stream_book::authentication",
+            "用户未认证".to_string(),
+        )
+    })?;
     let is_admin = user.role == "admin";
     let can_access = state
         .book_repo
@@ -275,10 +343,11 @@ async fn ensure_user_can_stream_book(
     if can_access {
         Ok(())
     } else {
-        Err(TingError::PermissionDenied(format!(
-            "User cannot access book {}",
-            book_id
-        )))
+        Err(TingError::permission(
+            AccessErrorKind::ResourceDenied,
+            "ensure_user_can_stream_book::permission",
+            format!("User cannot access book {}", book_id),
+        ))
     }
 }
 

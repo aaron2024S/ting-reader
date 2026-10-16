@@ -2,6 +2,7 @@ use super::{
     AppState, Chapter, Library, Result, StreamQuery, TingError, create_decrypted_stream,
     get_remote_media_reader,
 };
+use crate::core::app::error::InputErrorKind;
 use crate::db::repository::Repository;
 use axum::{
     body::Body,
@@ -187,17 +188,22 @@ pub(super) async fn transcode_stream(
     params: &StreamQuery,
 ) -> Result<axum::response::Response> {
     let chapter_id = &chapter.id;
-    let format = params
-        .transcode
-        .as_deref()
-        .ok_or_else(|| TingError::InvalidRequest("Missing transcode format".into()))?;
+    let format = params.transcode.as_deref().ok_or_else(|| {
+        TingError::invalid_request(
+            InputErrorKind::MissingField,
+            "transcode_stream::invalid_request",
+            "Missing transcode format".into(),
+        )
+    })?;
     tracing::info!("Requested transcoding: {} -> {}", chapter.path, format);
 
     let content_type = match format {
         "mp3" => "audio/mpeg",
         "wav" => "audio/wav",
         _ => {
-            return Err(TingError::InvalidRequest(
+            return Err(TingError::invalid_request(
+                InputErrorKind::UnsupportedValue,
+                "transcode_stream::invalid_request",
                 "Unsupported transcode format".to_string(),
             ));
         }

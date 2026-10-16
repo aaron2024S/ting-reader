@@ -3,6 +3,7 @@
 //! This module provides the plugin registry that manages all loaded plugins,
 //! their metadata, and dependency relationships.
 
+use crate::core::app::error::{DependencyErrorKind, LookupErrorKind, PluginErrorKind};
 mod graph;
 
 use super::types::{Plugin, PluginId, PluginMetadata, PluginState, PluginStats};
@@ -58,10 +59,11 @@ impl PluginRegistry {
 
         // Check if plugin already exists
         if self.plugins.contains_key(&plugin_id) {
-            return Err(TingError::PluginLoadError(format!(
-                "Plugin {} is already registered",
-                plugin_id
-            )));
+            return Err(TingError::plugin_load(
+                PluginErrorKind::Runtime,
+                "register::plugin_load",
+                format!("Plugin {} is already registered", plugin_id),
+            ));
         }
 
         // Check dependencies before registering
@@ -96,19 +98,27 @@ impl PluginRegistry {
     pub fn unregister(&mut self, id: &PluginId) -> Result<()> {
         // Check if plugin exists
         if !self.plugins.contains_key(id) {
-            return Err(TingError::PluginNotFound(id.clone()));
+            return Err(TingError::plugin_not_found(
+                LookupErrorKind::Plugin,
+                "unregister::plugin_not_found",
+                id.clone(),
+            ));
         }
 
         // Check if other plugins depend on this one
         if let Some(dependents) = self.dependents.get(id)
             && !dependents.is_empty()
         {
-            return Err(TingError::DependencyError(format!(
-                "Cannot unregister plugin {}: {} plugin(s) depend on it: {:?}",
-                id,
-                dependents.len(),
-                dependents
-            )));
+            return Err(TingError::dependency(
+                DependencyErrorKind::Missing,
+                "unregister::dependency",
+                format!(
+                    "Cannot unregister plugin {}: {} plugin(s) depend on it: {:?}",
+                    id,
+                    dependents.len(),
+                    dependents
+                ),
+            ));
         }
 
         // Remove from registry

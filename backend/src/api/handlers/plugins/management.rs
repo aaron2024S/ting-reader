@@ -10,6 +10,7 @@ use crate::api::models::{
 };
 use crate::api::state::AppState;
 use crate::auth::middleware::AuthUser;
+use crate::core::app::error::LookupErrorKind;
 use crate::core::app::error::{Result, TingError};
 use axum::{
     Json,
@@ -72,10 +73,13 @@ pub async fn get_plugin_detail(
     require_plugin_visible(&metadata, &user)?;
 
     let plugins = state.plugin_manager.list_plugins().await;
-    let plugin_info = plugins
-        .into_iter()
-        .find(|p| p.id == id)
-        .ok_or_else(|| TingError::PluginNotFound(id.clone()))?;
+    let plugin_info = plugins.into_iter().find(|p| p.id == id).ok_or_else(|| {
+        TingError::plugin_not_found(
+            LookupErrorKind::Plugin,
+            "get_plugin_detail::plugin_not_found",
+            id.clone(),
+        )
+    })?;
 
     let response = PluginDetailResponse {
         id: plugin_info.id.clone(),
@@ -126,10 +130,13 @@ pub async fn reload_plugin(
 ) -> Result<impl IntoResponse> {
     require_plugin_system_write(&user)?;
 
-    let metadata = state
-        .plugin_manager
-        .get_plugin(&id)
-        .map_err(|_| TingError::PluginNotFound(id.clone()))?;
+    let metadata = state.plugin_manager.get_plugin(&id).map_err(|_| {
+        TingError::plugin_not_found(
+            LookupErrorKind::Plugin,
+            "reload_plugin::plugin_not_found",
+            id.clone(),
+        )
+    })?;
     require_plugin_visible(&metadata, &user)?;
 
     state.plugin_manager.reload_plugin(&id).await?;
@@ -147,10 +154,13 @@ pub async fn uninstall_plugin(
 ) -> Result<impl IntoResponse> {
     require_plugin_system_write(&user)?;
 
-    let metadata = state
-        .plugin_manager
-        .get_plugin(&id)
-        .map_err(|_| TingError::PluginNotFound(id.clone()))?;
+    let metadata = state.plugin_manager.get_plugin(&id).map_err(|_| {
+        TingError::plugin_not_found(
+            LookupErrorKind::Plugin,
+            "uninstall_plugin::plugin_not_found",
+            id.clone(),
+        )
+    })?;
     require_plugin_visible(&metadata, &user)?;
 
     state.plugin_manager.uninstall_plugin(&id).await?;
@@ -169,10 +179,13 @@ pub async fn get_plugin_config(
     user: AuthUser,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse> {
-    let metadata = state
-        .plugin_manager
-        .get_plugin(&id)
-        .map_err(|_| TingError::PluginNotFound(id.clone()))?;
+    let metadata = state.plugin_manager.get_plugin(&id).map_err(|_| {
+        TingError::plugin_not_found(
+            LookupErrorKind::Plugin,
+            "get_plugin_config::plugin_not_found",
+            id.clone(),
+        )
+    })?;
     require_plugin_visible(&metadata, &user)?;
 
     if let Some(ref schema) = metadata.config_schema {
@@ -205,10 +218,13 @@ pub async fn update_plugin_config(
 ) -> Result<impl IntoResponse> {
     require_plugin_system_write(&user)?;
 
-    let metadata = state
-        .plugin_manager
-        .get_plugin(&id)
-        .map_err(|_| TingError::PluginNotFound(id.clone()))?;
+    let metadata = state.plugin_manager.get_plugin(&id).map_err(|_| {
+        TingError::plugin_not_found(
+            LookupErrorKind::Plugin,
+            "update_plugin_config::plugin_not_found",
+            id.clone(),
+        )
+    })?;
     require_plugin_visible(&metadata, &user)?;
 
     // Auto-initialize or sync config schema before preserving encrypted fields.

@@ -65,6 +65,104 @@ fn invalid_sync_host_ops_throw_catchable_errors_without_custom_js_builders() {
 }
 
 #[tokio::test]
+async fn host_failures_preserve_classification_through_javascript_and_rust() {
+    use crate::core::app::error::TingError;
+    use ting_plugin_contract::protocol::PluginErrorCode;
+
+    let file = NamedTempFile::new().unwrap();
+    let mut runtime = bounded_runtime(file.path().into(), Duration::from_secs(2));
+    runtime
+        .execute_script(
+            r#"
+        globalThis.inspect_failure = async function() {
+            try { await Ting.host.invoke('books.list'); }
+            catch (error) {
+                return {code: error.code, details: error.details,
+                    retryable: error.retryable, envelope: error.pluginError};
+            }
+        };
+        globalThis.propagate_failure = async function() {
+            return await Ting.host.invoke('books.list');
+        };
+        globalThis.sync_failure = function() {
+            return Ting.resources.chunkCopy('missing');
+        };
+    "#,
+        )
+        .unwrap();
+    let context = crate::plugin::types::PluginInvocationContext::default();
+    let caught: Value = runtime
+        .call_function("inspect_failure", Value::Null, &context)
+        .await
+        .unwrap();
+    assert_eq!(caught["code"], "plugin_unavailable");
+    assert_eq!(caught["details"]["reason"], "unavailable");
+    assert_eq!(caught["retryable"], false);
+    assert_eq!(
+        caught["envelope"]["plugin_id"],
+        runtime.metadata.instance_id()
+    );
+    for (function, code) in [
+        ("propagate_failure", PluginErrorCode::PluginUnavailable),
+        ("sync_failure", PluginErrorCode::PermissionDenied),
+    ] {
+        let error = runtime
+            .call_function::<_, Value>(function, Value::Null, &context)
+            .await
+            .unwrap_err();
+        let Some(TingError::PluginReported(error)) = error.downcast_ref::<TingError>() else {
+            panic!("Host error lost its classification: {error:?}");
+        };
+        assert_eq!(error.code, code);
+        error.validate().unwrap();
+    }
+    assert!(!runtime.is_unavailable());
+}
+
+#[tokio::test]
+async fn missing_resources_preserve_the_same_code_in_sync_and_async_operations() {
+    use crate::core::app::error::TingError;
+    use ting_plugin_contract::protocol::PluginErrorCode;
+
+    let file = NamedTempFile::new().unwrap();
+    let mut runtime = bounded_runtime(file.path().into(), Duration::from_secs(2));
+    runtime
+        .execute_script(
+            r#"
+        globalThis.async_missing = async function() {
+            return await Ting.resources.invoke('stat', {resource: 'missing'});
+        };
+        globalThis.sync_missing = function() {
+            return Ting.resources.chunkCopy('missing');
+        };
+    "#,
+        )
+        .unwrap();
+    let scope = std::sync::Arc::new(crate::plugin::host_api::resources::ResourceScope::new(
+        runtime.metadata.instance_id(),
+        uuid::Uuid::new_v4(),
+        None,
+        std::env::temp_dir(),
+        Default::default(),
+    ));
+    let context = crate::plugin::types::PluginInvocationContext {
+        user: None,
+        resources: Some(scope),
+    };
+    for function in ["async_missing", "sync_missing"] {
+        let error = runtime
+            .call_function::<_, Value>(function, Value::Null, &context)
+            .await
+            .unwrap_err();
+        let Some(TingError::PluginReported(error)) = error.downcast_ref::<TingError>() else {
+            panic!("Resource error lost its classification: {error:?}");
+        };
+        assert_eq!(error.code, PluginErrorCode::NotFound);
+        error.validate().unwrap();
+    }
+}
+
+#[tokio::test]
 async fn cancelling_an_inflight_future_releases_context_and_quarantines_the_instance() {
     let file = NamedTempFile::new().unwrap();
     let mut runtime = bounded_runtime(file.path().into(), Duration::from_secs(2));

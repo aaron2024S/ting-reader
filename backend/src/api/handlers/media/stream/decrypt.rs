@@ -2,6 +2,7 @@
 //! resources, while plugins own format detection and decoding algorithms.
 
 use crate::api::state::AppState;
+use crate::core::app::error::{DeadlineErrorKind, InputErrorKind, PluginErrorKind};
 use crate::core::app::error::{Result, TingError};
 use crate::db::models::{Chapter, Library};
 use crate::plugin::host_api::resources::{
@@ -41,7 +42,9 @@ async fn remote_reader(
             .get_http_reader(path, Some(range))
             .await
     } else {
-        Err(TingError::ValidationError(
+        Err(TingError::validation(
+            InputErrorKind::UnsupportedValue,
+            "remote_reader::validation",
             "Unsupported remote format source".into(),
         ))
     }
@@ -90,10 +93,10 @@ impl ResourceSource for RemoteMediaSource {
             let mut count = 0;
             while count < data.len() {
                 let read = tokio::select! {
-                    _ = token.cancelled() => return Err(TingError::Timeout("Remote resource cancelled".into())),
+                    _ = token.cancelled() => return Err(TingError::timeout(DeadlineErrorKind::Cancelled, "read_at::timeout", "Remote resource cancelled".into())),
                     read = reader.read(&mut data[count..]) => read.map_err(TingError::IoError)?,
                     _ = tokio::time::sleep(std::time::Duration::from_secs(15)) =>
-                        return Err(TingError::Timeout("Remote resource read timed out".into())),
+                        return Err(TingError::timeout(DeadlineErrorKind::Elapsed, "read_at::timeout", "Remote resource read timed out".into())),
                 };
                 if read == 0 { break; }
                 count += read;
@@ -192,12 +195,22 @@ pub(crate) async fn create_decrypted_stream(
                     .map(|stat| stat.length.unwrap_or(0))
             })
             .transpose()
-            .map_err(|error| TingError::PluginExecutionError(error.to_string()))?
+            .map_err(|error| {
+                let message = error.to_string();
+                TingError::plugin_execution(
+                    PluginErrorKind::Runtime,
+                    "create_decrypted_stream::plugin_execution",
+                    message,
+                )
+                .with_source(anyhow::anyhow!(error))
+            })?
             .unwrap_or(0);
     } else {
         let (_, total_size) = remote_reader(state, library, &chapter.path, (0, 1)).await?;
         if total_size == 0 || total_size > MAX_SAFE_INTEGER {
-            return Err(TingError::PluginExecutionError(
+            return Err(TingError::plugin_execution(
+                PluginErrorKind::Unavailable,
+                "create_decrypted_stream::plugin_execution",
                 "Remote format length unavailable".into(),
             ));
         }
@@ -221,7 +234,11 @@ pub(crate) async fn create_decrypted_stream(
         length = total_size;
     }
     let selected = selected.ok_or_else(|| {
-        TingError::PluginExecutionError("No format plugin matched the media source".into())
+        TingError::plugin_execution(
+            PluginErrorKind::Runtime,
+            "create_decrypted_stream::plugin_execution",
+            "No format plugin matched the media source".into(),
+        )
     })?;
     let plugin_id = selected.plugin_id.clone();
     let capability_id = selected.capability_id.clone();
@@ -231,9 +248,15 @@ pub(crate) async fn create_decrypted_stream(
         user: None,
         resources: Some(Arc::clone(&scope)),
     };
-    scope
-        .extend_readable_end(&input, length)
-        .map_err(|error| TingError::PluginExecutionError(error.to_string()))?;
+    scope.extend_readable_end(&input, length).map_err(|error| {
+        let message = error.to_string();
+        TingError::plugin_execution(
+            PluginErrorKind::Runtime,
+            "create_decrypted_stream::plugin_execution",
+            message,
+        )
+        .with_source(anyhow::anyhow!(error))
+    })?;
     let output = state
         .plugin_manager
         .invoke_capability(
@@ -245,11 +268,23 @@ pub(crate) async fn create_decrypted_stream(
         )
         .await?;
     let opened: OpenDecryptResult = serde_json::from_value(output).map_err(|error| {
-        TingError::PluginExecutionError(format!("Invalid format session: {error}"))
+        let message = format!("Invalid format session: {error}");
+        TingError::plugin_execution(
+            PluginErrorKind::InvalidOutput,
+            "create_decrypted_stream::plugin_execution",
+            message,
+        )
+        .with_source(anyhow::anyhow!(error))
     })?;
-    scope
-        .check_session(&opened.session_id)
-        .map_err(|error| TingError::PluginExecutionError(error.to_string()))?;
+    scope.check_session(&opened.session_id).map_err(|error| {
+        let message = error.to_string();
+        TingError::plugin_execution(
+            PluginErrorKind::Runtime,
+            "create_decrypted_stream::plugin_execution",
+            message,
+        )
+        .with_source(anyhow::anyhow!(error))
+    })?;
     let mut playback = DecryptPlayback {
         state: state.clone(),
         plugin_id,
@@ -261,7 +296,9 @@ pub(crate) async fn create_decrypted_stream(
     };
     let (start, end) = if let Some(header) = range_header {
         let Some(total) = opened.output.length else {
-            return Err(TingError::InvalidRequest(
+            return Err(TingError::invalid_request(
+                InputErrorKind::UnsupportedValue,
+                "create_decrypted_stream::invalid_request",
                 "Format stream does not support byte ranges".into(),
             ));
         };
@@ -273,7 +310,9 @@ pub(crate) async fn create_decrypted_stream(
     if let Some(total) = opened.output.length
         && (start > end || end > total)
     {
-        return Err(TingError::InvalidRequest(
+        return Err(TingError::invalid_request(
+            InputErrorKind::OutOfRange,
+            "create_decrypted_stream::invalid_request",
             "Invalid format playback range".into(),
         ));
     }
@@ -289,10 +328,18 @@ pub(crate) async fn create_decrypted_stream(
             )
             .await?;
         let position: SeekResult = serde_json::from_value(position).map_err(|error| {
-            TingError::PluginExecutionError(format!("Invalid format seek: {error}"))
+            let message = format!("Invalid format seek: {error}");
+            TingError::plugin_execution(
+                PluginErrorKind::InvalidOutput,
+                "create_decrypted_stream::plugin_execution",
+                message,
+            )
+            .with_source(anyhow::anyhow!(error))
         })?;
         if position.position != start {
-            return Err(TingError::PluginExecutionError(
+            return Err(TingError::plugin_execution(
+                PluginErrorKind::Runtime,
+                "create_decrypted_stream::plugin_execution",
                 "Format seek returned a different position".into(),
             ));
         }
@@ -315,29 +362,27 @@ pub(crate) async fn create_decrypted_stream(
                 serde_json::json!({ "session_id": playback.session_id, "max_bytes": requested }), &context,
             ).await?;
             let chunk: ReadChunkResult = serde_json::from_value(output)
-                .map_err(|error| TingError::PluginExecutionError(format!("Invalid format chunk: {error}")))?;
-            chunk.validate(requested).map_err(|error| TingError::PluginExecutionError(error.to_string()))?;
+                .map_err(|error| { let message = format!("Invalid format chunk: {error}"); TingError::plugin_execution(PluginErrorKind::InvalidOutput, "create_decrypted_stream::plugin_execution", message).with_source(anyhow::anyhow!(error)) })?;
+            chunk.validate(requested).map_err(|error| { let message = error.to_string(); TingError::plugin_execution(PluginErrorKind::Runtime, "create_decrypted_stream::plugin_execution", message).with_source(anyhow::anyhow!(error)) })?;
             if chunk.length == 0 {
                 if chunk.eof {
                     playback.finished = true;
                     return Ok(bytes::Bytes::new());
                 }
-                return Err(TingError::PluginExecutionError(
-                    "Format stream returned an empty non-EOF chunk".into(),
-                ));
+                return Err(TingError::plugin_execution(PluginErrorKind::Runtime, "create_decrypted_stream::plugin_execution", "Format stream returned an empty non-EOF chunk".into()));
             }
             let chunk_ref = chunk.chunk.ok_or_else(||
-                TingError::PluginExecutionError("Format chunk lease missing".into()))?;
+                TingError::plugin_execution(PluginErrorKind::Runtime, "create_decrypted_stream::plugin_execution", "Format chunk lease missing".into()))?;
             let data = playback.scope.chunk(&chunk_ref).map_err(|error|
-                TingError::PluginExecutionError(error.to_string()))?;
+                { let message = error.to_string(); TingError::plugin_execution(PluginErrorKind::Runtime, "create_decrypted_stream::plugin_execution", message).with_source(anyhow::anyhow!(error)) })?;
             playback.scope.release_chunk(&chunk_ref).map_err(|error|
-                TingError::PluginExecutionError(error.to_string()))?;
+                { let message = error.to_string(); TingError::plugin_execution(PluginErrorKind::Runtime, "create_decrypted_stream::plugin_execution", message).with_source(anyhow::anyhow!(error)) })?;
             if data.len() as u64 != chunk.length
                 || playback
                     .remaining
                     .is_some_and(|remaining| chunk.length > remaining)
             {
-                return Err(TingError::PluginExecutionError("Invalid format chunk length".into()));
+                return Err(TingError::plugin_execution(PluginErrorKind::InvalidOutput, "create_decrypted_stream::plugin_execution", "Invalid format chunk length".into()));
             }
             if let Some(remaining) = &mut playback.remaining {
                 *remaining -= chunk.length;

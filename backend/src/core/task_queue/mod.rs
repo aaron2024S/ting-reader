@@ -5,6 +5,7 @@
 
 use crate::core::StorageService;
 use crate::core::app::config::TaskQueueConfig;
+use crate::core::app::error::{CodecErrorKind, InputErrorKind, LookupErrorKind, TaskErrorKind};
 use crate::core::app::error::{Result, TingError};
 use crate::core::audio::AudioStreamer;
 use crate::core::books::ScraperService;
@@ -348,7 +349,13 @@ impl TaskQueue {
                         .update_status(
                             &t.id,
                             TaskStatus::Cancelled.as_str(),
-                            Some("Cancelled due to library deletion"),
+                            Some(&crate::core::app::error::ErrorResponse::from_error(
+                                &TingError::timeout(
+                                    crate::core::app::error::DeadlineErrorKind::Cancelled,
+                                    "task.cancel_library",
+                                    "Cancelled due to library deletion".into(),
+                                ),
+                            )),
                             t.retries,
                         )
                         .await
@@ -441,7 +448,13 @@ impl TaskQueue {
                                 .update_status(
                                     &t.id,
                                     TaskStatus::Cancelled.as_str(),
-                                    Some("Cancelled by new task"),
+                                    Some(&crate::core::app::error::ErrorResponse::from_error(
+                                        &TingError::timeout(
+                                            crate::core::app::error::DeadlineErrorKind::Cancelled,
+                                            "task.replace",
+                                            "Cancelled by new task".into(),
+                                        ),
+                                    )),
                                     t.retries,
                                 )
                                 .await
@@ -491,11 +504,13 @@ impl TaskQueue {
 
     /// Get task status
     pub async fn get_status(&self, task_id: &str) -> Result<TaskStatus> {
-        let task_record = self
-            .task_repo
-            .find_by_id(task_id)
-            .await?
-            .ok_or_else(|| TingError::NotFound(format!("Task not found: {}", task_id)))?;
+        let task_record = self.task_repo.find_by_id(task_id).await?.ok_or_else(|| {
+            TingError::not_found(
+                LookupErrorKind::Task,
+                "get_status::not_found",
+                format!("Task not found: {}", task_id),
+            )
+        })?;
 
         Ok(self.status_from_str(&task_record.status))
     }
@@ -503,11 +518,13 @@ impl TaskQueue {
     /// Cancel a task
     pub async fn cancel(&self, task_id: &str) -> Result<()> {
         // Update task status in database
-        let mut task_record = self
-            .task_repo
-            .find_by_id(task_id)
-            .await?
-            .ok_or_else(|| TingError::NotFound(format!("Task not found: {}", task_id)))?;
+        let mut task_record = self.task_repo.find_by_id(task_id).await?.ok_or_else(|| {
+            TingError::not_found(
+                LookupErrorKind::Task,
+                "cancel::not_found",
+                format!("Task not found: {}", task_id),
+            )
+        })?;
 
         if task_record.status == TaskStatus::Running.as_str() {
             // Allow cancelling running tasks - the executor will pick this up
@@ -515,6 +532,13 @@ impl TaskQueue {
         }
 
         task_record.status = TaskStatus::Cancelled.as_str().to_string();
+        task_record.error = TaskRecord::encode_failure(Some(
+            &crate::core::app::error::ErrorResponse::from_error(&TingError::timeout(
+                crate::core::app::error::DeadlineErrorKind::Cancelled,
+                "task.cancel",
+                "Task cancelled".into(),
+            )),
+        ))?;
         task_record.updated_at = chrono::Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
         self.task_repo.update(&task_record).await?;
 
@@ -563,10 +587,13 @@ impl TaskQueue {
 
     /// Get task details
     pub async fn get_task(&self, task_id: &str) -> Result<TaskRecord> {
-        self.task_repo
-            .find_by_id(task_id)
-            .await?
-            .ok_or_else(|| TingError::NotFound(format!("Task not found: {}", task_id)))
+        self.task_repo.find_by_id(task_id).await?.ok_or_else(|| {
+            TingError::not_found(
+                LookupErrorKind::Task,
+                "get_task::not_found",
+                format!("Task not found: {}", task_id),
+            )
+        })
     }
 
     /// Update task progress from a Host call without exposing the repository.
@@ -588,10 +615,14 @@ impl TaskQueue {
                     )
                     .await
             }
-            (Some(_), Some(_)) => Err(TingError::InvalidRequest(
+            (Some(_), Some(_)) => Err(TingError::invalid_request(
+                InputErrorKind::InvalidValue,
+                "report_progress::invalid_request",
                 "Choose message or message_key, not both".into(),
             )),
-            (None, None) => Err(TingError::InvalidRequest(
+            (None, None) => Err(TingError::invalid_request(
+                InputErrorKind::MissingField,
+                "report_progress::invalid_request",
                 "Task progress requires message or message_key".into(),
             )),
         }
@@ -599,14 +630,18 @@ impl TaskQueue {
 
     /// Delete a task
     pub async fn delete_task(&self, task_id: &str) -> Result<()> {
-        let task_record = self
-            .task_repo
-            .find_by_id(task_id)
-            .await?
-            .ok_or_else(|| TingError::NotFound(format!("Task not found: {}", task_id)))?;
+        let task_record = self.task_repo.find_by_id(task_id).await?.ok_or_else(|| {
+            TingError::not_found(
+                LookupErrorKind::Task,
+                "delete_task::not_found",
+                format!("Task not found: {}", task_id),
+            )
+        })?;
 
         if task_record.status == TaskStatus::Running.as_str() {
-            return Err(TingError::TaskError(
+            return Err(TingError::task(
+                TaskErrorKind::InvalidState,
+                "delete_task::task",
                 "Cannot delete running task. Cancel it first.".to_string(),
             ));
         }
@@ -628,7 +663,9 @@ impl TaskQueue {
     pub async fn clear_tasks(&self, status: Option<String>) -> Result<usize> {
         if let Some(s) = status {
             if s == "running" {
-                return Err(TingError::TaskError(
+                return Err(TingError::task(
+                    TaskErrorKind::InvalidState,
+                    "clear_tasks::task",
                     "Cannot clear running tasks. Cancel them first.".to_string(),
                 ));
             }
@@ -707,7 +744,7 @@ impl TaskQueue {
             .update_status(
                 &task.id,
                 task.status.as_str(),
-                task.error.as_deref(),
+                task.error.as_ref(),
                 task.retries as i32,
             )
             .await
@@ -715,8 +752,15 @@ impl TaskQueue {
 
     /// Convert Task to TaskRecord
     fn task_to_record(&self, task: &Task) -> Result<TaskRecord> {
-        let payload_json = serde_json::to_string(&task.payload)
-            .map_err(|e| TingError::SerializationError(e.to_string()))?;
+        let payload_json = serde_json::to_string(&task.payload).map_err(|e| {
+            let message = e.to_string();
+            TingError::serialization(
+                CodecErrorKind::InvalidData,
+                "task_to_record::serialization",
+                message,
+            )
+            .with_source(anyhow::anyhow!(e))
+        })?;
 
         Ok(TaskRecord {
             id: task.id.clone(),
@@ -731,7 +775,7 @@ impl TaskQueue {
             message: None,
             message_key: None,
             message_params: None,
-            error: task.error.clone(),
+            error: TaskRecord::encode_failure(task.error.as_ref())?,
             retries: task.retries as i32,
             max_retries: task.retry_policy.max_retries as i32,
             // Format time with 3 decimal places for milliseconds (SQL friendly)
@@ -762,10 +806,22 @@ impl TaskQueue {
                     error = %e,
                     "Failed to deserialize task payload"
                 );
-                TingError::SerializationError(format!("Failed to deserialize payload: {}", e))
+                {
+                    let message = format!("Failed to deserialize payload: {}", e);
+                    TingError::serialization(
+                        CodecErrorKind::InvalidData,
+                        "record_to_task::serialization",
+                        message,
+                    )
+                    .with_source(anyhow::anyhow!(e))
+                }
             })?
         } else {
-            return Err(TingError::TaskError("Task payload is missing".to_string()));
+            return Err(TingError::task(
+                TaskErrorKind::Unavailable,
+                "record_to_task::task",
+                "Task payload is missing".to_string(),
+            ));
         };
 
         // Try to parse timestamp - handle both RFC3339 and SQLite CURRENT_TIMESTAMP format
@@ -781,7 +837,15 @@ impl TaskQueue {
                         error = %e,
                         "Failed to parse created_at timestamp"
                     );
-                    TingError::SerializationError(format!("Failed to parse timestamp: {}", e))
+                    {
+                        let message = format!("Failed to parse timestamp: {}", e);
+                        TingError::serialization(
+                            CodecErrorKind::InvalidData,
+                            "record_to_task::serialization",
+                            message,
+                        )
+                        .with_source(anyhow::anyhow!(e))
+                    }
                 })?
                 .and_utc()
         };
@@ -808,7 +872,7 @@ impl TaskQueue {
             timeout: Duration::from_secs(600), // Default timeout
             status: self.status_from_str(&record.status),
             retries: record.retries as u32,
-            error: record.error.clone(),
+            error: record.failure(),
             created_at,
         })
     }

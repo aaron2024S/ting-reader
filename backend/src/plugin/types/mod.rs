@@ -2,6 +2,7 @@
 //!
 //! Defines core plugin interfaces and data structures for the plugin system.
 
+use crate::core::app::error::PluginErrorKind;
 pub mod metadata;
 pub(crate) mod schema;
 pub mod scraper;
@@ -44,7 +45,9 @@ pub trait Plugin: Send + Sync {
         _input: serde_json::Value,
         _context: &PluginInvocationContext,
     ) -> Result<serde_json::Value> {
-        Err(crate::core::app::error::TingError::PluginExecutionError(
+        Err(crate::core::app::error::TingError::plugin_execution(
+            PluginErrorKind::Unavailable,
+            "operation::plugin_execution",
             format!("Plugin instance is unavailable for operation {operation}"),
         ))
     }

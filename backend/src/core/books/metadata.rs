@@ -4,6 +4,7 @@
 //! settings are applied here for scans, manual edits and scraper results alike.
 
 use crate::core::StorageService;
+use crate::core::app::error::{AccessErrorKind, CodecErrorKind, InputErrorKind};
 use crate::core::app::error::{Result, TingError};
 use crate::core::books::nfo_manager::{BookMetadata, NfoManager};
 use crate::db::models::Chapter;
@@ -579,8 +580,15 @@ pub fn remote_metadata_dir(book_path: &str) -> Result<PathBuf> {
 pub fn write_metadata_json(dir: &Path, metadata: &AudiobookshelfMetadata) -> Result<()> {
     let path = dir.join("metadata.json");
     let file = std::fs::File::create(&path).map_err(TingError::IoError)?;
-    serde_json::to_writer_pretty(file, metadata)
-        .map_err(|e| TingError::SerializationError(e.to_string()))?;
+    serde_json::to_writer_pretty(file, metadata).map_err(|e| {
+        let message = e.to_string();
+        TingError::serialization(
+            CodecErrorKind::InvalidData,
+            "write_metadata_json::serialization",
+            message,
+        )
+        .with_source(anyhow::anyhow!(e))
+    })?;
     tracing::info!(
         target: "audit::metadata",
         message_key = "metadata.json.write_succeeded",
@@ -598,8 +606,15 @@ pub fn read_metadata_json(dir: &Path) -> Result<Option<AudiobookshelfMetadata>> 
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error.into()),
     };
-    let metadata: AudiobookshelfMetadata = serde_json::from_reader(file)
-        .map_err(|e| TingError::DeserializationError(e.to_string()))?;
+    let metadata: AudiobookshelfMetadata = serde_json::from_reader(file).map_err(|e| {
+        let message = e.to_string();
+        TingError::deserialization(
+            CodecErrorKind::InvalidData,
+            "read_metadata_json::deserialization",
+            message,
+        )
+        .with_source(anyhow::anyhow!(e))
+    })?;
     Ok(Some(metadata))
 }
 
@@ -620,14 +635,18 @@ pub async fn cache_remote_file(
         .get_webdav_reader(library, remote_url, None, key)
         .await?;
     if length > limit {
-        return Err(TingError::InvalidRequest(
+        return Err(TingError::invalid_request(
+            InputErrorKind::OutOfRange,
+            "cache_remote_file::invalid_request",
             "WebDAV metadata file is too large".into(),
         ));
     }
     let mut bytes = Vec::new();
     reader.take(limit + 1).read_to_end(&mut bytes).await?;
     if bytes.len() as u64 > limit || (length > 0 && bytes.len() as u64 != length) {
-        return Err(TingError::InvalidRequest(
+        return Err(TingError::invalid_request(
+            InputErrorKind::InvalidValue,
+            "cache_remote_file::invalid_request",
             "Incomplete or oversized WebDAV metadata file".into(),
         ));
     }
@@ -754,7 +773,9 @@ fn portable_cover(book: &Book, dir: &Path) -> Result<Option<String>> {
     }
     let path = path.canonicalize()?;
     if path.parent() != Some(dir.canonicalize()?.as_path()) {
-        return Err(TingError::PermissionDenied(
+        return Err(TingError::permission(
+            AccessErrorKind::ResourceDenied,
+            "portable_cover::permission",
             "Cover file is outside the book metadata cache".into(),
         ));
     }

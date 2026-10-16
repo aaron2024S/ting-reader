@@ -1,3 +1,4 @@
+import { apiErrorMessage, apiErrorPayload, ApiRequestError } from '../../core/api/errors';
 import { ExternalLink, Loader2, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -203,9 +204,7 @@ const PluginWebContainer = ({
         .catch((error) => {
           if (cancelled) return;
           setLoadError(
-            error instanceof Error
-              ? error.message
-              : "Plugin UI failed to load.",
+            apiErrorMessage(error, "Plugin UI failed to load."),
           );
         });
     }, 0);
@@ -252,7 +251,12 @@ const PluginWebContainer = ({
         generation,
         responseFor(data, {
           ok: false,
-          error: "Plugin bridge rate limit exceeded",
+          error: {
+            error: 'ResourceLimitExceeded',
+            message: 'Plugin bridge rate limit exceeded',
+            status: 429,
+            details: { reason: 'rate_limit', operation: data.method, retryable: true },
+          },
         }),
       );
       return;
@@ -278,7 +282,12 @@ const PluginWebContainer = ({
           requestedCapabilityId.length > 128 ||
           !allowedCapabilityIds.has(requestedCapabilityId)
         ) {
-          throw new Error("Capability is not allowed for this view");
+          throw new ApiRequestError({
+            error: 'PermissionDenied',
+            message: 'Capability is not allowed for this view',
+            status: 403,
+            details: { reason: 'capability_denied', operation: request.method, retryable: false },
+          });
         }
         const result = await invokePluginCapability(
           extension.pluginId,
@@ -301,10 +310,20 @@ const PluginWebContainer = ({
       const hostMethod =
         typeof params.method === "string" ? params.method.trim() : "";
       if (!hostMethod) {
-        throw new Error("Missing host method");
+        throw new ApiRequestError({
+          error: 'InvalidRequest',
+          message: 'Missing host method',
+          status: 400,
+          details: { reason: 'missing_field', operation: request.method, retryable: false },
+        });
       }
       if (hostMethod.length > 128 || !allowedHostMethods.has(hostMethod)) {
-        throw new Error("Host method is not allowed for this view");
+        throw new ApiRequestError({
+          error: 'PermissionDenied',
+          message: 'Host method is not allowed for this view',
+          status: 403,
+          details: { reason: 'capability_denied', operation: request.method, retryable: false },
+        });
       }
 
       const result = await invokePluginHost({
@@ -323,7 +342,7 @@ const PluginWebContainer = ({
         generation,
         responseFor(request, {
           ok: false,
-          error: err instanceof Error ? err.message : String(err),
+          error: apiErrorPayload(err, 'Plugin operation failed'),
         }),
       );
     }

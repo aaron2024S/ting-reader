@@ -2,6 +2,10 @@
 
 use super::{PluginHostGateway, PluginHostUser, required_string_param, string_param, usize_param};
 use crate::core::Config;
+use crate::core::app::error::{
+    AccessErrorKind, InputErrorKind, LimitErrorKind, LookupErrorKind, PluginErrorKind,
+    SecurityErrorKind,
+};
 use crate::core::app::error::{Result, TingError};
 use crate::core::storage::local_paths::resolve_existing_local_library_root;
 use crate::db::models::Library;
@@ -23,7 +27,11 @@ impl PluginHostGateway {
         resources: Option<&Arc<crate::plugin::host_api::resources::ResourceScope>>,
     ) -> Result<Value> {
         let scope = resources.ok_or_else(|| {
-            TingError::PermissionDenied("Private file open requires a Host resource scope".into())
+            TingError::permission(
+                AccessErrorKind::OwnershipMismatch,
+                "private_file_open::permission",
+                "Private file open requires a Host resource scope".into(),
+            )
         })?;
         let target = self.resolve_private_file_target(plugin_id, params, false)?;
         let canonical = std::fs::canonicalize(&target)?;
@@ -31,7 +39,9 @@ impl PluginHostGateway {
         ensure_path_inside(&root, &canonical)?;
         let metadata = std::fs::metadata(&canonical)?;
         if !metadata.is_file() || metadata.len() > MAX_HOST_FILE_READ_BYTES {
-            return Err(TingError::ResourceLimitExceeded(
+            return Err(TingError::resource_limit(
+                LimitErrorKind::Payload,
+                "private_file_open::resource_limit",
                 "Private file is not a readable file within the 20 MiB limit".into(),
             ));
         }
@@ -43,7 +53,15 @@ impl PluginHostGateway {
                     .first()
                     .map(|mime| mime.to_string()),
             )
-            .map_err(|error| TingError::PermissionDenied(error.to_string()))?;
+            .map_err(|error| {
+                let message = error.to_string();
+                TingError::permission(
+                    AccessErrorKind::ResourceDenied,
+                    "private_file_open::permission",
+                    message,
+                )
+                .with_source(anyhow::anyhow!(error))
+            })?;
         Ok(serde_json::json!({
             "resource": resource,
             "length": metadata.len(),
@@ -74,7 +92,9 @@ impl PluginHostGateway {
         let canonical = std::fs::canonicalize(&target)?;
         ensure_path_inside(&root, &canonical)?;
         if !canonical.is_dir() {
-            return Err(TingError::InvalidRequest(
+            return Err(TingError::invalid_request(
+                InputErrorKind::InvalidValue,
+                "private_file_list::invalid_request",
                 "Private file list target is not a directory".into(),
             ));
         }
@@ -115,7 +135,9 @@ impl PluginHostGateway {
         let canonical = std::fs::canonicalize(&target)?;
         ensure_path_inside(&root, &canonical)?;
         if canonical == root {
-            return Err(TingError::PermissionDenied(
+            return Err(TingError::permission(
+                AccessErrorKind::ResourceDenied,
+                "private_file_remove::permission",
                 "The private file root cannot be removed".into(),
             ));
         }
@@ -140,10 +162,11 @@ impl PluginHostGateway {
             self.resolve_library_file_target(user, params, true).await?;
         let metadata = tokio::fs::metadata(&target).await?;
         if !metadata.is_dir() {
-            return Err(TingError::InvalidRequest(format!(
-                "Library file target is not a directory: {}",
-                relative_path
-            )));
+            return Err(TingError::invalid_request(
+                InputErrorKind::InvalidPath,
+                "library_file_list::invalid_request",
+                format!("Library file target is not a directory: {}", relative_path),
+            ));
         }
 
         let limit = usize_param(params, "limit")
@@ -190,7 +213,11 @@ impl PluginHostGateway {
         resources: Option<&Arc<crate::plugin::host_api::resources::ResourceScope>>,
     ) -> Result<Value> {
         let scope = resources.ok_or_else(|| {
-            TingError::PermissionDenied("Library file open requires a Host resource scope".into())
+            TingError::permission(
+                AccessErrorKind::OwnershipMismatch,
+                "library_file_open::permission",
+                "Library file open requires a Host resource scope".into(),
+            )
         })?;
         let (_, root, target, _) = if string_param(params, "relative_to").as_deref() == Some("book")
         {
@@ -203,7 +230,9 @@ impl PluginHostGateway {
         ensure_path_inside(&root, &canonical)?;
         let metadata = std::fs::metadata(&canonical)?;
         if !metadata.is_file() || metadata.len() > MAX_HOST_FILE_READ_BYTES {
-            return Err(TingError::ResourceLimitExceeded(
+            return Err(TingError::resource_limit(
+                LimitErrorKind::Payload,
+                "library_file_open::resource_limit",
                 "Library file is not a readable file within the 20 MiB limit".into(),
             ));
         }
@@ -215,7 +244,15 @@ impl PluginHostGateway {
                     .first()
                     .map(|mime| mime.to_string()),
             )
-            .map_err(|error| TingError::PermissionDenied(error.to_string()))?;
+            .map_err(|error| {
+                let message = error.to_string();
+                TingError::permission(
+                    AccessErrorKind::ResourceDenied,
+                    "library_file_open::permission",
+                    message,
+                )
+                .with_source(anyhow::anyhow!(error))
+            })?;
         Ok(serde_json::json!({ "resource": resource, "length": metadata.len() }))
     }
 
@@ -226,21 +263,31 @@ impl PluginHostGateway {
         resources: Option<&Arc<crate::plugin::host_api::resources::ResourceScope>>,
     ) -> Result<Value> {
         if !user.is_admin() {
-            return Err(TingError::PermissionDenied(
+            return Err(TingError::permission(
+                AccessErrorKind::AdministratorRequired,
+                "assets_commit::permission",
                 "Admin access required for assets.commit".into(),
             ));
         }
         let scope = resources.ok_or_else(|| {
-            TingError::PermissionDenied("Asset commit requires a Host resource scope".into())
+            TingError::permission(
+                AccessErrorKind::OwnershipMismatch,
+                "assets_commit::permission",
+                "Asset commit requires a Host resource scope".into(),
+            )
         })?;
         if string_param(params, "relative_to").as_deref() != Some("book") {
-            return Err(TingError::InvalidRequest(
+            return Err(TingError::invalid_request(
+                InputErrorKind::OutOfRange,
+                "assets_commit::invalid_request",
                 "Asset must belong to a book".into(),
             ));
         }
         let file_name = required_string_param(params, "path")?;
         if !matches!(file_name.as_str(), "cover.png" | "cover.jpg" | "cover.webp") {
-            return Err(TingError::InvalidRequest(
+            return Err(TingError::invalid_request(
+                InputErrorKind::UnsupportedValue,
+                "assets_commit::invalid_request",
                 "Unsupported cover asset name".into(),
             ));
         }
@@ -254,19 +301,49 @@ impl PluginHostGateway {
         }
         let output: ting_plugin_contract::format_calls::ResourceId =
             serde_json::from_value(params.get("resource").cloned().ok_or_else(|| {
-                TingError::InvalidRequest("Asset output resource is required".into())
+                TingError::invalid_request(
+                    InputErrorKind::MissingField,
+                    "assets_commit::invalid_request",
+                    "Asset output resource is required".into(),
+                )
             })?)
-            .map_err(|_| TingError::InvalidRequest("Invalid asset output resource".into()))?;
-        let stat = scope
-            .stat(&output)
-            .map_err(|error| TingError::PluginExecutionError(error.to_string()))?;
+            .map_err(|_| {
+                TingError::invalid_request(
+                    InputErrorKind::InvalidValue,
+                    "assets_commit::invalid_request",
+                    "Invalid asset output resource".into(),
+                )
+            })?;
+        let stat = scope.stat(&output).map_err(|error| {
+            let message = error.to_string();
+            TingError::plugin_execution(
+                PluginErrorKind::Runtime,
+                "assets_commit::plugin_execution",
+                message,
+            )
+            .with_source(anyhow::anyhow!(error))
+        })?;
         let length = stat
             .length
             .filter(|size| *size >= 12 && *size <= MAX_HOST_FILE_READ_BYTES)
-            .ok_or_else(|| TingError::InvalidRequest("Invalid cover asset size".into()))?;
+            .ok_or_else(|| {
+                TingError::invalid_request(
+                    InputErrorKind::InvalidValue,
+                    "assets_commit::invalid_request",
+                    "Invalid cover asset size".into(),
+                )
+            })?;
         let (header, _) = scope
             .read_at(&output, 0, length.min(16) as usize)
-            .map_err(|error| TingError::PluginExecutionError(error.to_string()))?;
+            .map_err(|error| {
+                let message = error.to_string();
+                TingError::plugin_execution(
+                    PluginErrorKind::Runtime,
+                    "assets_commit::plugin_execution",
+                    message,
+                )
+                .with_source(anyhow::anyhow!(error))
+            })?;
         let valid_image = match file_name.as_str() {
             "cover.png" => header.starts_with(b"\x89PNG\r\n\x1a\n"),
             "cover.jpg" => header.starts_with(b"\xff\xd8\xff"),
@@ -274,13 +351,23 @@ impl PluginHostGateway {
             _ => false,
         };
         if !valid_image {
-            return Err(TingError::InvalidRequest(
+            return Err(TingError::invalid_request(
+                InputErrorKind::InvalidValue,
+                "assets_commit::invalid_request",
                 "Asset bytes do not match the cover format".into(),
             ));
         }
         let bytes = scope
             .commit_asset_output(&output, &target, MAX_HOST_FILE_READ_BYTES)
-            .map_err(|error| TingError::PluginExecutionError(error.to_string()))?;
+            .map_err(|error| {
+                let message = error.to_string();
+                TingError::plugin_execution(
+                    PluginErrorKind::Runtime,
+                    "assets_commit::plugin_execution",
+                    message,
+                )
+                .with_source(anyhow::anyhow!(error))
+            })?;
         Ok(serde_json::json!({
             "path": relative_path,
             "size": bytes,
@@ -302,7 +389,11 @@ impl PluginHostGateway {
             .find_by_id(&library_id)
             .await?
             .ok_or_else(|| {
-                TingError::NotFound(format!("Library with id {} not found", library_id))
+                TingError::not_found(
+                    LookupErrorKind::Library,
+                    "resolve_library_file_target::not_found",
+                    format!("Library with id {} not found", library_id),
+                )
             })?;
         let root = self.local_library_root(&library)?;
         let requested_path = string_param(params, "path")
@@ -338,17 +429,25 @@ impl PluginHostGateway {
             .find_by_id(&library_id)
             .await?
             .ok_or_else(|| {
-                TingError::NotFound(format!("Library with id {} not found", library_id))
+                TingError::not_found(
+                    LookupErrorKind::Library,
+                    "resolve_book_file_target::not_found",
+                    format!("Library with id {} not found", library_id),
+                )
             })?;
-        let book =
-            self.book_repo.find_by_id(&book_id).await?.ok_or_else(|| {
-                TingError::NotFound(format!("Book with id {} not found", book_id))
-            })?;
+        let book = self.book_repo.find_by_id(&book_id).await?.ok_or_else(|| {
+            TingError::not_found(
+                LookupErrorKind::Book,
+                "resolve_book_file_target::not_found",
+                format!("Book with id {} not found", book_id),
+            )
+        })?;
         if book.library_id != library.id {
-            return Err(TingError::InvalidRequest(format!(
-                "Book {} does not belong to library {}",
-                book_id, library_id
-            )));
+            return Err(TingError::invalid_request(
+                InputErrorKind::OutOfRange,
+                "resolve_book_file_target::invalid_request",
+                format!("Book {} does not belong to library {}", book_id, library_id),
+            ));
         }
 
         let requested_path = string_param(params, "path")
@@ -393,28 +492,31 @@ fn local_library_root_with_config(config: &Config, library: &Library) -> Result<
     if library.library_type == "local" {
         let root = resolve_existing_local_library_root(library, config)?;
         if !root.is_dir() {
-            return Err(TingError::InvalidRequest(format!(
-                "Library {} root path is not a directory",
-                library.id
-            )));
+            return Err(TingError::invalid_request(
+                InputErrorKind::InvalidPath,
+                "local_library_root_with_config::invalid_request",
+                format!("Library {} root path is not a directory", library.id),
+            ));
         }
         return Ok(root);
     }
 
     let root = library.root_path.trim();
     if root.is_empty() {
-        return Err(TingError::InvalidRequest(format!(
-            "Library {} does not expose a local root path",
-            library.id
-        )));
+        return Err(TingError::invalid_request(
+            InputErrorKind::InvalidPath,
+            "local_library_root_with_config::invalid_request",
+            format!("Library {} does not expose a local root path", library.id),
+        ));
     }
 
     let root = std::fs::canonicalize(PathBuf::from(root))?;
     if !root.is_dir() {
-        return Err(TingError::InvalidRequest(format!(
-            "Library {} root path is not a directory",
-            library.id
-        )));
+        return Err(TingError::invalid_request(
+            InputErrorKind::InvalidPath,
+            "local_library_root_with_config::invalid_request",
+            format!("Library {} root path is not a directory", library.id),
+        ));
     }
     Ok(root)
 }
@@ -434,7 +536,9 @@ impl PluginHostGateway {
             "data" => self.config.storage.data_dir.join("plugin-data"),
             "temp" => self.config.storage.temp_dir.join("plugin-temp"),
             _ => {
-                return Err(TingError::InvalidRequest(
+                return Err(TingError::invalid_request(
+                    InputErrorKind::InvalidValue,
+                    "private_file_root::invalid_request",
                     "Private file scope must be data or temp".into(),
                 ));
             }
@@ -471,7 +575,9 @@ impl PluginHostGateway {
 fn normalize_private_relative_path(value: &str, allow_empty: bool) -> Result<PathBuf> {
     let raw = Path::new(value.trim());
     if raw.is_absolute() {
-        return Err(TingError::SecurityViolation(
+        return Err(TingError::security(
+            SecurityErrorKind::PathEscape,
+            "normalize_private_relative_path::security",
             "Private file path must be relative".into(),
         ));
     }
@@ -481,14 +587,18 @@ fn normalize_private_relative_path(value: &str, allow_empty: bool) -> Result<Pat
             Component::CurDir => {}
             Component::Normal(part) => normalized.push(part),
             Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
-                return Err(TingError::SecurityViolation(
+                return Err(TingError::security(
+                    SecurityErrorKind::PathEscape,
+                    "normalize_private_relative_path::security",
                     "Private file path cannot escape the plugin root".into(),
                 ));
             }
         }
     }
     if !allow_empty && normalized.as_os_str().is_empty() {
-        return Err(TingError::InvalidRequest(
+        return Err(TingError::invalid_request(
+            InputErrorKind::MissingField,
+            "normalize_private_relative_path::invalid_request",
             "Private file path is required".into(),
         ));
     }
@@ -505,7 +615,9 @@ fn private_relative_path(root: &Path, path: &Path) -> String {
 fn normalize_library_relative_path(value: &str, allow_empty: bool) -> Result<PathBuf> {
     let raw = Path::new(value.trim());
     if raw.is_absolute() {
-        return Err(TingError::SecurityViolation(
+        return Err(TingError::security(
+            SecurityErrorKind::PathEscape,
+            "normalize_library_relative_path::security",
             "Library file path must be relative".to_string(),
         ));
     }
@@ -516,7 +628,9 @@ fn normalize_library_relative_path(value: &str, allow_empty: bool) -> Result<Pat
             Component::CurDir => {}
             Component::Normal(part) => normalized.push(part),
             Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
-                return Err(TingError::SecurityViolation(
+                return Err(TingError::security(
+                    SecurityErrorKind::PathEscape,
+                    "normalize_library_relative_path::security",
                     "Library file path cannot escape the library root".to_string(),
                 ));
             }
@@ -524,7 +638,9 @@ fn normalize_library_relative_path(value: &str, allow_empty: bool) -> Result<Pat
     }
 
     if !allow_empty && normalized.as_os_str().is_empty() {
-        return Err(TingError::InvalidRequest(
+        return Err(TingError::invalid_request(
+            InputErrorKind::MissingField,
+            "normalize_library_relative_path::invalid_request",
             "Library file path is required".to_string(),
         ));
     }
@@ -540,7 +656,9 @@ fn ensure_path_inside(root: &Path, path: &Path) -> Result<()> {
     if path == root || path.starts_with(root) {
         return Ok(());
     }
-    Err(TingError::SecurityViolation(
+    Err(TingError::security(
+        SecurityErrorKind::PathEscape,
+        "ensure_path_inside::security",
         "Library file path escapes the library root".to_string(),
     ))
 }

@@ -7,6 +7,7 @@
 //! - Integration with tracing ecosystem
 
 use crate::core::app::config::LoggingConfig;
+use crate::core::app::error::InputErrorKind;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -59,9 +60,11 @@ impl LogQueryFilter {
                     chrono::DateTime::parse_from_rfc3339(&value)
                         .map(|value| value.with_timezone(&chrono::Utc))
                         .map_err(|_| {
-                            TingError::InvalidRequest(format!(
-                                "{name} must be an RFC 3339 timestamp"
-                            ))
+                            TingError::invalid_request(
+                                InputErrorKind::InvalidValue,
+                                "new::invalid_request",
+                                format!("{name} must be an RFC 3339 timestamp"),
+                            )
                         })
                 })
                 .transpose()
@@ -69,7 +72,9 @@ impl LogQueryFilter {
         let since = parse("since", since)?;
         let until = parse("until", until)?;
         if since.zip(until).is_some_and(|(since, until)| since > until) {
-            return Err(TingError::InvalidRequest(
+            return Err(TingError::invalid_request(
+                InputErrorKind::InvalidValue,
+                "new::invalid_request",
                 "since must not be later than until".into(),
             ));
         }

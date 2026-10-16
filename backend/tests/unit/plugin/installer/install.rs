@@ -1,4 +1,5 @@
 use super::*;
+use crate::core::app::error::{DependencyErrorKind, PluginErrorKind};
 use crate::plugin::types::PluginDependency;
 use std::process::Command;
 use tempfile::TempDir;
@@ -19,8 +20,15 @@ fn create_test_plugin(dir: &Path, name: &str, version: &str) -> Result<()> {
         "capabilities": test_capabilities(),
     });
 
-    let metadata_yaml = serde_yaml::to_string(&metadata)
-        .map_err(|e| TingError::PluginLoadError(format!("Failed to serialize metadata: {}", e)))?;
+    let metadata_yaml = serde_yaml::to_string(&metadata).map_err(|e| {
+        let message = format!("Failed to serialize metadata: {}", e);
+        TingError::plugin_load(
+            PluginErrorKind::InvalidManifest,
+            "create_test_plugin::plugin_load",
+            message,
+        )
+        .with_source(anyhow::anyhow!(e))
+    })?;
     fs::write(dir.join("plugin.yml"), metadata_yaml)?;
     fs::write(dir.join("plugin.js"), "// Test plugin")?;
 
@@ -48,8 +56,15 @@ fn create_test_plugin_with_dependencies(
         "capabilities": test_capabilities(),
     });
 
-    let metadata_yaml = serde_yaml::to_string(&metadata)
-        .map_err(|e| TingError::PluginLoadError(format!("Failed to serialize metadata: {}", e)))?;
+    let metadata_yaml = serde_yaml::to_string(&metadata).map_err(|e| {
+        let message = format!("Failed to serialize metadata: {}", e);
+        TingError::plugin_load(
+            PluginErrorKind::InvalidManifest,
+            "create_test_plugin_with_dependencies::plugin_load",
+            message,
+        )
+        .with_source(anyhow::anyhow!(e))
+    })?;
     fs::write(dir.join("plugin.yml"), metadata_yaml)?;
     fs::write(dir.join("plugin.js"), "// Test plugin with dependencies")?;
 
@@ -169,7 +184,11 @@ async fn test_install_plugin_dependency_failure() {
 
     let result = installer
         .install_plugin(&source_dir, |_metadata| {
-            Err(TingError::DependencyError("Missing dependency".to_string()))
+            Err(TingError::dependency(
+                DependencyErrorKind::Missing,
+                "test_install_plugin_dependency_failure::dependency",
+                "Missing dependency".to_string(),
+            ))
         })
         .await;
 
@@ -605,7 +624,9 @@ async fn test_dependency_check_missing_dependency() {
     // Dependency checker that fails
     let result = installer
         .install_plugin(&source_dir, |_metadata| {
-            Err(TingError::DependencyError(
+            Err(TingError::dependency(
+                DependencyErrorKind::Missing,
+                "test_dependency_check_missing_dependency::dependency",
                 "Missing dependency: missing-plugin".to_string(),
             ))
         })
@@ -646,7 +667,9 @@ async fn test_dependency_check_version_incompatible() {
     // Dependency checker that fails due to version incompatibility
     let result = installer
         .install_plugin(&source_dir, |_metadata| {
-            Err(TingError::DependencyError(
+            Err(TingError::dependency(
+                DependencyErrorKind::VersionMismatch,
+                "test_dependency_check_version_incompatible::dependency",
                 "Version incompatible: base-plugin requires ^2.0.0, found 1.0.0".to_string(),
             ))
         })
@@ -766,7 +789,9 @@ async fn test_rollback_on_dependency_failure() {
 
     let result = installer
         .install_plugin(&source_dir, |_metadata| {
-            Err(TingError::DependencyError(
+            Err(TingError::dependency(
+                DependencyErrorKind::Missing,
+                "test_rollback_on_dependency_failure::dependency",
                 "Dependency check failed".to_string(),
             ))
         })
@@ -796,7 +821,11 @@ async fn test_rollback_cleans_up_partial_installation() {
     // Simulate installation failure by providing invalid dependency checker
     let result = installer
         .install_plugin(&source_dir, |_metadata| {
-            Err(TingError::DependencyError("Simulated failure".to_string()))
+            Err(TingError::dependency(
+                DependencyErrorKind::Missing,
+                "test_rollback_cleans_up_partial_installation::dependency",
+                "Simulated failure".to_string(),
+            ))
         })
         .await;
 
@@ -829,7 +858,9 @@ async fn test_rollback_preserves_other_plugins() {
 
     let result = installer
         .install_plugin(&source_dir, |_metadata| {
-            Err(TingError::DependencyError(
+            Err(TingError::dependency(
+                DependencyErrorKind::Missing,
+                "test_rollback_preserves_other_plugins::dependency",
                 "Installation failed".to_string(),
             ))
         })

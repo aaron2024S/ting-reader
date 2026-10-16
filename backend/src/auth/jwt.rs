@@ -1,5 +1,6 @@
 //! JWT token generation and validation
 
+use crate::core::app::error::AuthenticationErrorKind;
 use crate::core::app::error::{Result, TingError};
 use jsonwebtoken::{
     DecodingKey, EncodingKey, Header, Validation, decode, encode, errors::ErrorKind,
@@ -17,7 +18,13 @@ pub struct Claims {
 pub fn generate_token(user_id: &str, secret: &str) -> Result<String> {
     let expiration = chrono::Utc::now()
         .checked_add_signed(chrono::Duration::days(7))
-        .ok_or_else(|| TingError::AuthenticationError("无法计算令牌过期时间".to_string()))?
+        .ok_or_else(|| {
+            TingError::authentication(
+                AuthenticationErrorKind::ExpiredCredentials,
+                "generate_token::authentication",
+                "无法计算令牌过期时间".to_string(),
+            )
+        })?
         .timestamp() as usize;
 
     let claims = Claims {
@@ -30,7 +37,15 @@ pub fn generate_token(user_id: &str, secret: &str) -> Result<String> {
         &claims,
         &EncodingKey::from_secret(secret.as_bytes()),
     )
-    .map_err(|e| TingError::AuthenticationError(format!("生成令牌失败: {}", e)))
+    .map_err(|e| {
+        let message = format!("生成令牌失败: {}", e);
+        TingError::authentication(
+            AuthenticationErrorKind::TokenCreation,
+            "generate_token::authentication",
+            message,
+        )
+        .with_source(anyhow::anyhow!(e))
+    })
 }
 
 /// Validate a JWT token and extract claims (single secret)
@@ -69,10 +84,18 @@ pub fn validate_token_with_secrets(token: &str, secrets: &[String]) -> Result<Cl
             ErrorKind::InvalidToken | ErrorKind::Base64(_) | ErrorKind::Json(_) => "令牌格式无效",
             _ => "令牌验证失败",
         };
-        return Err(TingError::AuthenticationError(message.to_string()));
+        return Err(TingError::authentication(
+            AuthenticationErrorKind::InvalidCredentials,
+            "validate_token_with_secrets::authentication",
+            message.to_string(),
+        ));
     }
 
-    Err(TingError::AuthenticationError("令牌验证失败".to_string()))
+    Err(TingError::authentication(
+        AuthenticationErrorKind::InvalidCredentials,
+        "validate_token_with_secrets::authentication",
+        "令牌验证失败".to_string(),
+    ))
 }
 
 #[cfg(test)]

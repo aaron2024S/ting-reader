@@ -1,3 +1,4 @@
+use crate::core::app::error::ConfigurationErrorKind;
 mod chapters;
 mod extraction;
 mod listing;
@@ -30,7 +31,9 @@ impl LibraryScanner {
         mode: ScanMode,
     ) -> Result<ScanResult> {
         if self.storage_service.is_none() {
-            return Err(TingError::ConfigError(
+            return Err(TingError::configuration(
+                ConfigurationErrorKind::Encoding,
+                "scan_webdav_library::configuration",
                 "Storage service not configured for WebDAV scan".to_string(),
             ));
         }

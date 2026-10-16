@@ -10,6 +10,7 @@
 //!
 //! This is a core system feature, not implemented as a plugin.
 
+use crate::core::app::error::SecurityErrorKind;
 use crate::core::app::error::{Result, TingError};
 use regex::Regex;
 use std::cmp::Ordering;
@@ -473,14 +474,18 @@ impl TextCleaner {
     pub fn validate_path(&self, path: &str) -> Result<()> {
         // Check for path traversal attempts
         if path.contains("..") {
-            return Err(TingError::SecurityViolation(
+            return Err(TingError::security(
+                SecurityErrorKind::PathEscape,
+                "validate_path::security",
                 "Path traversal detected: '..' is not allowed".to_string(),
             ));
         }
 
         // Check for absolute paths (Unix)
         if path.starts_with('/') {
-            return Err(TingError::SecurityViolation(
+            return Err(TingError::security(
+                SecurityErrorKind::PathEscape,
+                "validate_path::security",
                 "Absolute paths are not allowed".to_string(),
             ));
         }
@@ -489,7 +494,9 @@ impl TextCleaner {
         if path.len() >= 2 && path.chars().nth(1) == Some(':') {
             let first_char = path.chars().next().unwrap();
             if first_char.is_ascii_alphabetic() {
-                return Err(TingError::SecurityViolation(
+                return Err(TingError::security(
+                    SecurityErrorKind::PathEscape,
+                    "validate_path::security",
                     "Absolute paths are not allowed".to_string(),
                 ));
             }

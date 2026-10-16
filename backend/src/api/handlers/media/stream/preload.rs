@@ -1,5 +1,6 @@
 use crate::api::state::AppState;
 use crate::auth::middleware::AuthUser;
+use crate::core::app::error::InputErrorKind;
 use crate::db::models::{Book, Chapter, Library};
 use ting_plugin_contract::format::FormatOperation;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
@@ -182,7 +183,9 @@ async fn preload_chapter(
                 tokio::io::copy(&mut reader.take(disk_limit.saturating_add(1)), &mut writer)
                     .await?;
             if written > disk_limit {
-                return Err(crate::core::app::error::TingError::InvalidRequest(
+                return Err(crate::core::app::error::TingError::invalid_request(
+                    InputErrorKind::OutOfRange,
+                    "preload_chapter::invalid_request",
                     "Preload exceeds disk cache limit".to_string(),
                 ));
             }

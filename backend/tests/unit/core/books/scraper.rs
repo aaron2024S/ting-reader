@@ -1,4 +1,5 @@
 use super::*;
+use crate::core::app::error::PluginErrorKind;
 use crate::plugin::manager::{PluginConfig, PluginEntry};
 use crate::plugin::types::scraper::BookItem;
 use crate::plugin::types::{
@@ -114,7 +115,9 @@ impl Plugin for CountingScraper {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.requests.lock().unwrap().push(input.clone());
         if self.fail.load(Ordering::SeqCst) {
-            return Err(TingError::PluginExecutionError(
+            return Err(TingError::plugin_execution(
+                PluginErrorKind::Runtime,
+                "invoke::plugin_execution",
                 "test search failure".into(),
             ));
         }

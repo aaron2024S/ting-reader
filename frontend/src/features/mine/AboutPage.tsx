@@ -1,3 +1,4 @@
+import { apiErrorMessage } from '../../core/api/errors';
 import React, { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import apiClient from "../../core/api/client";
@@ -89,7 +90,7 @@ const AboutPage: React.FC = () => {
       }
     } catch (error) {
       console.error("检查后端更新失败", error);
-      alert(t("mine.checkBackendUpdateFailed"));
+      alert(apiErrorMessage(error, t("mine.checkBackendUpdateFailed")));
     } finally {
       setCheckingBackendUpdate(false);
     }

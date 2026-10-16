@@ -1,3 +1,6 @@
+use crate::core::app::error::{
+    ConfigurationErrorKind, DeadlineErrorKind, LookupErrorKind, PluginErrorKind,
+};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,7 +19,13 @@ impl PluginManager {
     /// Load a plugin from a directory
     pub async fn load_plugin(&self, plugin_path: &Path) -> Result<PluginId> {
         let _permit = self.load_semaphore.acquire().await.map_err(|e| {
-            TingError::PluginLoadError(format!("Failed to acquire load permit: {}", e))
+            let message = format!("Failed to acquire load permit: {}", e);
+            TingError::plugin_load(
+                PluginErrorKind::Loading,
+                "load_plugin::plugin_load",
+                message,
+            )
+            .with_source(anyhow::anyhow!(e))
         })?;
 
         info!("Acquired plugin load permit for: {}", plugin_path.display());
@@ -54,10 +63,11 @@ impl PluginManager {
         let (instance, state, error) = match preflight_result {
             Err(e) => {
                 error!("Plugin preflight failed {}: {}", plugin_id, e);
+                let error = Arc::new(e);
                 (
-                    Arc::new(FailedPlugin::new(metadata.clone(), e.to_string())) as Arc<dyn Plugin>,
+                    Arc::new(FailedPlugin::new(metadata.clone(), error.clone())) as Arc<dyn Plugin>,
                     PluginState::Failed,
-                    Some(e.to_string()),
+                    Some(error),
                 )
             }
             Ok(()) => match tokio::time::timeout(
@@ -69,15 +79,20 @@ impl PluginManager {
                 Ok(Ok(inst)) => (inst, PluginState::Loaded, None),
                 Ok(Err(e)) => {
                     error!("Failed to load plugin {}: {}", plugin_id, e);
+                    let error = Arc::new(e);
                     (
-                        Arc::new(FailedPlugin::new(metadata.clone(), e.to_string()))
+                        Arc::new(FailedPlugin::new(metadata.clone(), error.clone()))
                             as Arc<dyn Plugin>,
                         PluginState::Failed,
-                        Some(e.to_string()),
+                        Some(error),
                     )
                 }
                 Err(_) => {
-                    let timeout_err = "Plugin load timeout after 30s".to_string();
+                    let timeout_err = Arc::new(TingError::timeout(
+                        DeadlineErrorKind::Elapsed,
+                        "plugin.load",
+                        "Plugin load timeout after 30s".into(),
+                    ));
                     error!("{} for plugin {}", timeout_err, plugin_id);
                     (
                         Arc::new(FailedPlugin::new(metadata.clone(), timeout_err.clone()))
@@ -100,14 +115,16 @@ impl PluginManager {
                     Self::validate_capability_registration(&registry, &metadata, None)
             {
                 entry.state = PluginState::Failed;
-                entry.load_error = Some(error.to_string());
+                entry.load_error = Some(Arc::new(error));
             }
             let registered_state = entry.state;
             registry.insert(plugin_id.clone(), entry);
             drop(registry);
 
             if registered_state == PluginState::Failed && state != PluginState::Failed {
-                return Err(TingError::PluginLoadError(
+                return Err(TingError::plugin_load(
+                    PluginErrorKind::AbiMismatch,
+                    "load_plugin::plugin_load",
                     "Capability registration changed during plugin loading".into(),
                 ));
             }
@@ -125,7 +142,7 @@ impl PluginManager {
                 let mut registry = self.registry.write().await;
                 if let Some(entry) = registry.get_mut(&plugin_id) {
                     entry.state = PluginState::Failed;
-                    entry.load_error = Some(e.to_string());
+                    entry.load_error = Some(Arc::new(e));
                 }
             }
         } else {
@@ -153,7 +170,13 @@ impl PluginManager {
     ) -> Result<Arc<dyn Plugin>> {
         if metadata.entry_point.ends_with(".js") {
             let loader = JavaScriptPluginLoader::new(plugin_path.to_path_buf()).map_err(|e| {
-                TingError::PluginLoadError(format!("Failed to create JS loader: {}", e))
+                let message = format!("Failed to create JS loader: {}", e);
+                TingError::plugin_load(
+                    PluginErrorKind::Loading,
+                    "load_plugin_instance::plugin_load",
+                    message,
+                )
+                .with_source(anyhow::anyhow!(e))
             })?;
             let wrapper = JavaScriptPluginWrapper::new_with_limits(
                 loader,
@@ -189,10 +212,11 @@ impl PluginManager {
             );
             Ok(Arc::new(plugin))
         } else {
-            Err(TingError::PluginLoadError(format!(
-                "Unsupported entry point: {}",
-                metadata.entry_point
-            )))
+            Err(TingError::plugin_load(
+                PluginErrorKind::InvalidManifest,
+                "load_plugin_instance::plugin_load",
+                format!("Unsupported entry point: {}", metadata.entry_point),
+            ))
         }
     }
 
@@ -209,7 +233,11 @@ impl PluginManager {
             info!("Plugin unloaded: {}", plugin_id);
             Ok(())
         } else {
-            Err(TingError::PluginNotFound(plugin_id.clone()))
+            Err(TingError::plugin_not_found(
+                LookupErrorKind::Plugin,
+                "unload_plugin::plugin_not_found",
+                plugin_id.clone(),
+            ))
         }
     }
 
@@ -224,14 +252,24 @@ impl PluginManager {
         let (plugin_path, _old_metadata) = {
             let cache = self.metadata_cache.read().await;
             let path = cache.get(id).cloned().ok_or_else(|| {
-                TingError::PluginNotFound(format!("Plugin {} not found in cache", id))
+                TingError::plugin_not_found(
+                    LookupErrorKind::Plugin,
+                    "reload_plugin::plugin_not_found",
+                    format!("Plugin {} not found in cache", id),
+                )
             })?;
 
             let registry = self.registry.read().await;
             let metadata = registry
                 .get(id)
                 .map(|e| e.metadata.clone())
-                .ok_or_else(|| TingError::PluginNotFound(id.clone()))?;
+                .ok_or_else(|| {
+                    TingError::plugin_not_found(
+                        LookupErrorKind::Plugin,
+                        "reload_plugin::plugin_not_found",
+                        id.clone(),
+                    )
+                })?;
 
             (path, metadata)
         };
@@ -331,7 +369,11 @@ impl PluginManager {
                 && let Some(ref schema) = new_metadata.config_schema
             {
                 let manager = self.config_manager.read().map_err(|error| {
-                    TingError::ConfigError(format!("Failed to acquire config manager: {error}"))
+                    TingError::configuration(
+                        ConfigurationErrorKind::Synchronization,
+                        "reload_plugin",
+                        format!("Failed to acquire config manager: {error}"),
+                    )
                 })?;
                 if let Some(manager) = manager.as_ref() {
                     manager.migrate_config(
@@ -405,9 +447,13 @@ impl PluginManager {
     pub(crate) async fn initialize_plugin(&self, plugin_id: &PluginId) -> Result<()> {
         let (metadata, config_schema) = {
             let registry = self.registry.read().await;
-            let entry = registry
-                .get(plugin_id)
-                .ok_or_else(|| TingError::PluginNotFound(plugin_id.clone()))?;
+            let entry = registry.get(plugin_id).ok_or_else(|| {
+                TingError::plugin_not_found(
+                    LookupErrorKind::Plugin,
+                    "initialize_plugin::plugin_not_found",
+                    plugin_id.clone(),
+                )
+            })?;
             (entry.metadata.clone(), entry.metadata.config_schema.clone())
         };
 
@@ -439,9 +485,13 @@ impl PluginManager {
 
         let (instance, scope) = {
             let mut registry = self.registry.write().await;
-            let entry = registry
-                .get_mut(plugin_id)
-                .ok_or_else(|| TingError::PluginNotFound(plugin_id.clone()))?;
+            let entry = registry.get_mut(plugin_id).ok_or_else(|| {
+                TingError::plugin_not_found(
+                    LookupErrorKind::Plugin,
+                    "initialize_plugin::plugin_not_found",
+                    plugin_id.clone(),
+                )
+            })?;
             entry.set_state(PluginState::Initializing);
             let scope = Arc::new(crate::plugin::host_api::resources::ResourceScope::new(
                 plugin_id.clone(),
@@ -467,7 +517,7 @@ impl PluginManager {
                 "Plugin initialization failed",
                 Some(&failed_fields),
             );
-            return Err(error);
+            return Err(error.bind_plugin_error(&metadata.id, "lifecycle", "initialize"));
         }
 
         {
@@ -494,9 +544,13 @@ impl PluginManager {
     pub(crate) async fn shutdown_plugin(&self, plugin_id: &PluginId) -> Result<()> {
         let (instance, metadata) = {
             let mut registry = self.registry.write().await;
-            let entry = registry
-                .get_mut(plugin_id)
-                .ok_or_else(|| TingError::PluginNotFound(plugin_id.clone()))?;
+            let entry = registry.get_mut(plugin_id).ok_or_else(|| {
+                TingError::plugin_not_found(
+                    LookupErrorKind::Plugin,
+                    "shutdown_plugin::plugin_not_found",
+                    plugin_id.clone(),
+                )
+            })?;
             entry.set_state(PluginState::Unloading);
             (entry.instance.clone(), entry.metadata.clone())
         };
@@ -513,7 +567,7 @@ impl PluginManager {
                 "Plugin shutdown failed",
                 Some(&fields),
             );
-            return Err(error);
+            return Err(error.bind_plugin_error(&metadata.id, "lifecycle", "shutdown"));
         }
         let fields = serde_json::json!({
             "op": "plugin.lifecycle.shutdown",

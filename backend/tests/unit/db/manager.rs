@@ -1,4 +1,5 @@
 use super::*;
+use crate::core::app::error::InputErrorKind;
 use tempfile::TempDir;
 
 fn create_test_db() -> (DatabaseManager, TempDir) {
@@ -99,7 +100,11 @@ async fn test_transaction_rollback() {
             tx.execute("INSERT INTO test (value) VALUES (?)", [42])
                 .map_err(TingError::DatabaseError)?;
             // Simulate error
-            Err(TingError::InvalidRequest("test error".into()))
+            Err(TingError::invalid_request(
+                InputErrorKind::InvalidValue,
+                "test_transaction_rollback::invalid_request",
+                "test error".into(),
+            ))
         })
         .await;
 

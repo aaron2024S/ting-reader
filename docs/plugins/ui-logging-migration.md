@@ -149,7 +149,9 @@ request('host.invoke', {
 });
 ```
 
-响应的 `type` 为 `ting-plugin:response`，携带对应 `id`、`bridge_token` 和 `ok`；成功读取 `result`，失败读取 `error`。页面应设置超时、释放已完成请求，并在关闭时清理未完成请求。页面超时只结束本地等待，不代表服务端操作已经取消；写操作重试需要业务层避免重复执行。
+响应的 `type` 为 `ting-plugin:response`，携带对应 `id`、`bridge_token` 和 `ok`；成功读取 `result`，失败的 `error` 是包含 `error/message/details/trace_id` 的 REST 错误对象，并在可用时包含 HTTP `status`。使用 `window.__TING_PLUGIN_BRIDGE__.createError(data.error, 'Request failed')` 恢复异常，通过 `code/details/retryable/trace_id/status` 判断分类和提供问题反馈，直接展示 `message`。它与插件业务入口返回的 `PluginError` 信封用途不同，不要把对象拼成字符串。
+
+页面应设置超时、释放已完成请求，并在关闭时清理未完成请求。页面超时只结束本地等待，不代表服务端操作已经取消；写操作重试需要业务层避免重复执行。
 
 ### 可运行页面示例
 
@@ -260,7 +262,7 @@ pre { white-space: pre-wrap; overflow-wrap: anywhere; }
     clearTimeout(item.timer);
     pending.delete(data.id);
     if (data.ok) item.resolve(data.result);
-    else item.reject(new Error(data.error || 'Request failed'));
+    else item.reject(window.__TING_PLUGIN_BRIDGE__.createError(data.error, 'Request failed'));
   });
 
   send.addEventListener('click', async () => {

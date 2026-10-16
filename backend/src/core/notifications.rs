@@ -1,4 +1,7 @@
-use crate::core::app::error::{Result, TingError};
+use crate::core::app::error::{
+    CodecErrorKind, ExternalErrorKind, InputErrorKind, NetworkErrorKind,
+};
+use crate::core::app::error::{ErrorResponse, Result, TingError};
 use crate::db::models::NotificationWebhook;
 use crate::db::repository::NotificationWebhookRepository;
 use crate::plugin::manager::PluginManager;
@@ -65,7 +68,7 @@ pub struct WebhookDeliveryResult {
     pub status: u16,
     pub response_body: String,
     pub rendered_body: String,
-    pub error: Option<String>,
+    pub error: Option<ErrorResponse>,
 }
 
 pub fn default_body_template() -> String {
@@ -74,17 +77,31 @@ pub fn default_body_template() -> String {
 
 pub fn parse_headers(raw: &str) -> Result<HashMap<String, String>> {
     serde_json::from_str(raw).map_err(|error| {
-        TingError::DeserializationError(format!("Invalid webhook headers: {error}"))
+        let message = format!("Invalid webhook headers: {error}");
+        TingError::deserialization(
+            CodecErrorKind::InvalidData,
+            "parse_headers::deserialization",
+            message,
+        )
+        .with_source(anyhow::anyhow!(error))
     })
 }
 
 pub fn validate_headers(headers: &HashMap<String, String>) -> Result<()> {
     for (name, value) in headers {
         HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
-            TingError::ValidationError(format!("Invalid webhook header name: {name}"))
+            TingError::validation(
+                InputErrorKind::InvalidValue,
+                "validate_headers::validation",
+                format!("Invalid webhook header name: {name}"),
+            )
         })?;
         HeaderValue::from_str(value).map_err(|_| {
-            TingError::ValidationError(format!("Invalid value for webhook header: {name}"))
+            TingError::validation(
+                InputErrorKind::InvalidValue,
+                "validate_headers::validation",
+                format!("Invalid value for webhook header: {name}"),
+            )
         })?;
     }
     Ok(())
@@ -120,7 +137,11 @@ pub fn render_template(template: &str, payload: &NotificationEventPayload) -> Re
     });
 
     if let Some(error) = render_error {
-        return Err(TingError::ValidationError(error));
+        return Err(TingError::validation(
+            InputErrorKind::InvalidValue,
+            "render_template::validation",
+            error,
+        ));
     }
 
     Ok(rendered.into_owned())
@@ -129,7 +150,9 @@ pub fn render_template(template: &str, payload: &NotificationEventPayload) -> Re
 pub fn validate_template(template: &str) -> Result<String> {
     let template = template.trim();
     if template.is_empty() {
-        return Err(TingError::ValidationError(
+        return Err(TingError::validation(
+            InputErrorKind::InvalidValue,
+            "validate_template::validation",
             "Webhook body template cannot be empty".to_string(),
         ));
     }
@@ -248,7 +271,11 @@ async fn dispatch_notification_event_inner(
                 );
             }
             Ok(result) => {
-                let error_text = result.error.as_deref().unwrap_or("Unknown webhook error");
+                let error_text = result
+                    .error
+                    .as_ref()
+                    .map(|error| error.message.as_str())
+                    .unwrap_or("Unknown webhook error");
                 tracing::warn!(
                     target: "audit::notification",
                     message_key = "notification.webhook.status_failed",
@@ -264,6 +291,7 @@ async fn dispatch_notification_event_inner(
                     event = %payload.event,
                     status = result.status,
                     error = error_text,
+                    failure = ?result.error,
                     "Webhook notification returned failure"
                 );
             }
@@ -312,7 +340,11 @@ async fn deliver_webhook_with_client(
     headers.insert(
         HeaderName::from_static("x-ting-event"),
         HeaderValue::from_str(&payload.event).map_err(|_| {
-            TingError::ValidationError("Webhook event cannot be used as a header".to_string())
+            TingError::validation(
+                InputErrorKind::InvalidValue,
+                "deliver_webhook_with_client::validation",
+                "Webhook event cannot be used as a header".to_string(),
+            )
         })?,
     );
 
@@ -320,18 +352,30 @@ async fn deliver_webhook_with_client(
         headers.insert(
             HeaderName::from_static("x-ting-webhook-secret"),
             HeaderValue::from_str(secret).map_err(|_| {
-                TingError::ValidationError("Webhook secret contains invalid characters".to_string())
+                TingError::validation(
+                    InputErrorKind::InvalidValue,
+                    "deliver_webhook_with_client::validation",
+                    "Webhook secret contains invalid characters".to_string(),
+                )
             })?,
         );
     }
 
     for (name, value_template) in configured_headers {
         let name = HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
-            TingError::ValidationError(format!("Invalid webhook header name: {name}"))
+            TingError::validation(
+                InputErrorKind::InvalidValue,
+                "deliver_webhook_with_client::validation",
+                format!("Invalid webhook header name: {name}"),
+            )
         })?;
         let rendered_value = render_template(&value_template, payload)?;
         let value = HeaderValue::from_str(&rendered_value).map_err(|_| {
-            TingError::ValidationError(format!("Invalid value for webhook header: {name}"))
+            TingError::validation(
+                InputErrorKind::InvalidValue,
+                "deliver_webhook_with_client::validation",
+                format!("Invalid value for webhook header: {name}"),
+            )
         })?;
         headers.insert(name, value);
     }
@@ -342,22 +386,30 @@ async fn deliver_webhook_with_client(
         .body(rendered_body.clone())
         .send()
         .await
-        .map_err(|error| TingError::NetworkError(error.to_string()))?;
+        .map_err(|error| {
+            let message = error.to_string();
+            TingError::network(
+                NetworkErrorKind::Transport,
+                "deliver_webhook_with_client::network",
+                message,
+            )
+            .with_source(anyhow::anyhow!(error))
+        })?;
 
     let status = response.status();
-    let response_body = response
-        .text()
-        .await
-        .map_err(|error| TingError::NetworkError(error.to_string()))?;
+    let response_body = response.text().await.map_err(|error| {
+        let message = error.to_string();
+        TingError::network(
+            NetworkErrorKind::Transport,
+            "deliver_webhook_with_client::network",
+            message,
+        )
+        .with_source(anyhow::anyhow!(error))
+    })?;
     let response_body = truncate_chars(&response_body, MAX_RESPONSE_BODY_CHARS);
 
-    let business_error = detect_business_error(&response_body);
-    let success = status.is_success() && business_error.is_none();
-    let error = if !status.is_success() {
-        Some(format!("HTTP {}", status.as_u16()))
-    } else {
-        business_error
-    };
+    let error = webhook_failure(status, &response_body);
+    let success = error.is_none();
 
     Ok(WebhookDeliveryResult {
         success,
@@ -372,7 +424,15 @@ fn build_client() -> Result<reqwest::Client> {
     reqwest::Client::builder()
         .timeout(Duration::from_secs(8))
         .build()
-        .map_err(|error| TingError::ExternalError(error.to_string()))
+        .map_err(|error| {
+            let message = error.to_string();
+            TingError::external_tool(
+                ExternalErrorKind::Response,
+                "build_client::external_tool",
+                message,
+            )
+            .with_source(anyhow::anyhow!(error))
+        })
 }
 
 fn resolve_template_variable(variable: &str, payload: &NotificationEventPayload) -> Option<Value> {
@@ -403,7 +463,14 @@ fn raw_template_value(value: &Value) -> String {
     }
 }
 
-fn detect_business_error(response_body: &str) -> Option<String> {
+#[derive(Debug, thiserror::Error)]
+#[error("{message} (errcode: {code})")]
+struct WebhookBusinessError {
+    code: i64,
+    message: String,
+}
+
+fn detect_business_error(response_body: &str) -> Option<WebhookBusinessError> {
     let value = serde_json::from_str::<Value>(response_body).ok()?;
     let errcode = value.get("errcode")?.as_i64()?;
     if errcode == 0 {
@@ -414,7 +481,37 @@ fn detect_business_error(response_body: &str) -> Option<String> {
         .get("errmsg")
         .and_then(Value::as_str)
         .unwrap_or("Webhook service returned an error");
-    Some(format!("{message} (errcode: {errcode})"))
+    Some(WebhookBusinessError {
+        code: errcode,
+        message: message.into(),
+    })
+}
+
+fn webhook_failure(status: reqwest::StatusCode, response_body: &str) -> Option<ErrorResponse> {
+    if !status.is_success() {
+        let error = TingError::network(
+            NetworkErrorKind::HttpStatus,
+            "webhook.deliver",
+            format!("HTTP {}", status.as_u16()),
+        );
+        return Some(ErrorResponse::from_error_with_details(
+            &error,
+            serde_json::json!({ "upstream_status": status.as_u16() }),
+        ));
+    }
+    detect_business_error(response_body).map(|source| {
+        let code = source.code;
+        let error = TingError::external_service(
+            ExternalErrorKind::Response,
+            "webhook.deliver",
+            source.to_string(),
+        )
+        .with_source(source.into());
+        ErrorResponse::from_error_with_details(
+            &error,
+            serde_json::json!({ "upstream_status": status.as_u16(), "upstream_code": code }),
+        )
+    })
 }
 
 fn truncate_chars(value: &str, max_chars: usize) -> String {

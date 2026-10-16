@@ -1,3 +1,5 @@
+import type { ApiErrorBody } from '../api/errors';
+
 export interface PluginDependency {
   plugin_id: string;
   version_requirement: string;
@@ -169,7 +171,7 @@ export interface Plugin {
   failed_calls?: number;
   success_rate?: number;
   stats?: PluginStats;
-  error?: string;
+  error?: ApiErrorBody | null;
   capabilities?: PluginCapability[];
 }
 

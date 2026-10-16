@@ -1,6 +1,7 @@
 //! Standard-container tags, embedded covers and transactional metadata writes.
 
 use super::AudioService;
+use crate::core::app::error::{AccessErrorKind, InputErrorKind, TaskErrorKind};
 use crate::core::app::error::{Result, TingError};
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -104,8 +105,15 @@ struct ProbeOutput {
 }
 
 fn parse_probe(bytes: &[u8]) -> Result<(AudioFileMetadata, Option<usize>)> {
-    let probe: ProbeOutput = serde_json::from_slice(bytes)
-        .map_err(|error| TingError::InvalidRequest(format!("Invalid FFprobe metadata: {error}")))?;
+    let probe: ProbeOutput = serde_json::from_slice(bytes).map_err(|error| {
+        let message = format!("Invalid FFprobe metadata: {error}");
+        TingError::invalid_request(
+            InputErrorKind::InvalidValue,
+            "parse_probe::invalid_request",
+            message,
+        )
+        .with_source(anyhow::anyhow!(error))
+    })?;
     let mut tags = BTreeMap::new();
     for section in std::iter::once(&probe.format.tags).chain(
         probe
@@ -220,7 +228,9 @@ impl AudioService {
             Ok(image::ImageFormat::WebP) => "webp",
             Ok(image::ImageFormat::Gif) => "gif",
             _ => {
-                return Err(TingError::InvalidRequest(
+                return Err(TingError::invalid_request(
+                    InputErrorKind::InvalidValue,
+                    "extract_cover::invalid_request",
                     "Invalid embedded cover image".into(),
                 ));
             }
@@ -234,7 +244,11 @@ impl AudioService {
             Ok::<_, TingError>(target.to_string_lossy().replace('\\', "/"))
         })
         .await
-        .map_err(|error| TingError::TaskError(error.to_string()))?
+        .map_err(|error| {
+            let message = error.to_string();
+            TingError::task(TaskErrorKind::Join, "extract_cover::task", message)
+                .with_source(anyhow::anyhow!(error))
+        })?
     }
 
     pub(crate) async fn write_file_metadata(
@@ -244,7 +258,9 @@ impl AudioService {
     ) -> Result<()> {
         let original = tokio::fs::metadata(path).await?;
         if original.permissions().readonly() {
-            return Err(TingError::PermissionDenied(
+            return Err(TingError::permission(
+                AccessErrorKind::ResourceDenied,
+                "write_file_metadata::permission",
                 "Audio file is read-only".into(),
             ));
         }
@@ -259,13 +275,19 @@ impl AudioService {
             format.as_str(),
             "mp3" | "m4a" | "m4b" | "mp4" | "flac" | "ogg" | "opus" | "wav" | "aac" | "wma"
         ) {
-            return Err(TingError::InvalidRequest(format!(
-                "Unsupported audio container: {format}"
-            )));
+            return Err(TingError::invalid_request(
+                InputErrorKind::UnsupportedValue,
+                "write_file_metadata::invalid_request",
+                format!("Unsupported audio container: {format}"),
+            ));
         }
-        let parent = path
-            .parent()
-            .ok_or_else(|| TingError::InvalidRequest("Missing audio folder".into()))?;
+        let parent = path.parent().ok_or_else(|| {
+            TingError::invalid_request(
+                InputErrorKind::MissingField,
+                "write_file_metadata::invalid_request",
+                "Missing audio folder".into(),
+            )
+        })?;
         let staging = TemporaryAudioFile(parent.join(format!(
             ".metadata-{}.{}",
             uuid::Uuid::new_v4(),
@@ -277,7 +299,11 @@ impl AudioService {
             Some(
                 tokio::task::spawn_blocking(move || normalized_cover(&path, is_wma))
                     .await
-                    .map_err(|error| TingError::TaskError(error.to_string()))??,
+                    .map_err(|error| {
+                        let message = error.to_string();
+                        TingError::task(TaskErrorKind::Join, "write_file_metadata::task", message)
+                            .with_source(anyhow::anyhow!(error))
+                    })??,
             )
         } else {
             None
@@ -301,15 +327,23 @@ impl AudioService {
             Ok::<_, TingError>(staging)
         })
         .await
-        .map_err(|error| TingError::TaskError(error.to_string()))??;
+        .map_err(|error| {
+            let message = error.to_string();
+            TingError::task(TaskErrorKind::Join, "write_file_metadata::task", message)
+                .with_source(anyhow::anyhow!(error))
+        })??;
         if tokio::fs::metadata(&staging.0).await?.len() == 0 {
-            return Err(TingError::InvalidRequest(
+            return Err(TingError::invalid_request(
+                InputErrorKind::InvalidValue,
+                "write_file_metadata::invalid_request",
                 "Metadata writer created an empty audio file".into(),
             ));
         }
         let current = tokio::fs::metadata(path).await?;
         if current.len() != original.len() || current.modified()? != original.modified()? {
-            return Err(TingError::InvalidRequest(
+            return Err(TingError::invalid_request(
+                InputErrorKind::InvalidValue,
+                "write_file_metadata::invalid_request",
                 "Audio file changed during metadata writing".into(),
             ));
         }
@@ -334,7 +368,9 @@ pub(super) fn copy_audio(
     let mut buffer = [0; 64 * 1024];
     loop {
         if cancel.is_cancelled() {
-            return Err(TingError::TaskError(
+            return Err(TingError::task(
+                TaskErrorKind::InvalidState,
+                "copy_audio::task",
                 "Audio metadata writing was cancelled".into(),
             ));
         }
@@ -356,7 +392,11 @@ fn prepare_mp4_source(source: &mut std::fs::File) -> Result<bool> {
         return Ok(false);
     }
     if header[6..10].iter().any(|byte| byte & 0x80 != 0) {
-        return Err(TingError::InvalidRequest("Invalid leading ID3 tag".into()));
+        return Err(TingError::invalid_request(
+            InputErrorKind::InvalidValue,
+            "prepare_mp4_source::invalid_request",
+            "Invalid leading ID3 tag".into(),
+        ));
     }
     let offset = 10
         + ((u64::from(header[6]) & 0x7f) << 21)
@@ -373,7 +413,9 @@ fn prepare_mp4_source(source: &mut std::fs::File) -> Result<bool> {
     source.read_exact(&mut media)?;
     let repair = &media[1..5] == b"ftyp";
     if &media[4..8] != b"ftyp" && !repair {
-        return Err(TingError::InvalidRequest(
+        return Err(TingError::invalid_request(
+            InputErrorKind::InvalidValue,
+            "prepare_mp4_source::invalid_request",
             "Leading ID3 tag does not contain MP4 audio".into(),
         ));
     }
@@ -393,22 +435,39 @@ fn write_lofty_metadata(
         .read_properties(false)
         .parsing_mode(ParsingMode::Relaxed);
     let mut probe = lofty::probe::Probe::open(path)
-        .map_err(|error| TingError::InvalidRequest(error.to_string()))?
+        .map_err(|error| {
+            let message = error.to_string();
+            TingError::invalid_request(
+                InputErrorKind::InvalidValue,
+                "write_lofty_metadata::invalid_request",
+                message,
+            )
+            .with_source(anyhow::anyhow!(error))
+        })?
         .guess_file_type()?;
     if matches!(format, "m4a" | "mp4" | "m4b") {
         probe = probe.set_file_type(lofty::file::FileType::Mp4);
     }
-    let mut file = probe
-        .options(options)
-        .read()
-        .map_err(|error| TingError::InvalidRequest(error.to_string()))?;
+    let mut file = probe.options(options).read().map_err(|error| {
+        let message = error.to_string();
+        TingError::invalid_request(
+            InputErrorKind::InvalidValue,
+            "write_lofty_metadata::invalid_request",
+            message,
+        )
+        .with_source(anyhow::anyhow!(error))
+    })?;
     let kind = file.file_type().primary_tag_type();
     if file.tag(kind).is_none() {
         file.insert_tag(lofty::tag::Tag::new(kind));
     }
-    let tag = file
-        .tag_mut(kind)
-        .ok_or_else(|| TingError::InvalidRequest("Missing audio tag".into()))?;
+    let tag = file.tag_mut(kind).ok_or_else(|| {
+        TingError::invalid_request(
+            InputErrorKind::MissingField,
+            "write_lofty_metadata::invalid_request",
+            "Missing audio tag".into(),
+        )
+    })?;
     tag.set_title(update.title.clone());
     tag.set_artist(update.artist.clone());
     tag.set_album(update.album.clone());
@@ -421,12 +480,28 @@ fn write_lofty_metadata(
             tag.remove_picture(0);
         }
         let mut picture = lofty::picture::Picture::from_reader(&mut std::io::Cursor::new(bytes))
-            .map_err(|error| TingError::InvalidRequest(error.to_string()))?;
+            .map_err(|error| {
+                let message = error.to_string();
+                TingError::invalid_request(
+                    InputErrorKind::InvalidValue,
+                    "write_lofty_metadata::invalid_request",
+                    message,
+                )
+                .with_source(anyhow::anyhow!(error))
+            })?;
         picture.set_pic_type(lofty::picture::PictureType::CoverFront);
         tag.push_picture(picture);
     }
     file.save_to_path(path, WriteOptions::default())
-        .map_err(|error| TingError::InvalidRequest(error.to_string()))?;
+        .map_err(|error| {
+            let message = error.to_string();
+            TingError::invalid_request(
+                InputErrorKind::InvalidValue,
+                "write_lofty_metadata::invalid_request",
+                message,
+            )
+            .with_source(anyhow::anyhow!(error))
+        })?;
     Ok(())
 }
 
@@ -436,7 +511,11 @@ fn normalized_cover(path: &Path, small: bool) -> Result<Vec<u8>> {
         .take(MAX_COVER_BYTES as u64 + 1)
         .read_to_end(&mut bytes)?;
     if bytes.len() > MAX_COVER_BYTES {
-        return Err(TingError::InvalidRequest("Cover image is too large".into()));
+        return Err(TingError::invalid_request(
+            InputErrorKind::OutOfRange,
+            "normalized_cover::invalid_request",
+            "Cover image is too large".into(),
+        ));
     }
     let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format()?;
     let mut limits = image::Limits::default();
@@ -444,9 +523,15 @@ fn normalized_cover(path: &Path, small: bool) -> Result<Vec<u8>> {
     limits.max_image_height = Some(8192);
     limits.max_alloc = Some(128 * 1024 * 1024);
     reader.limits(limits);
-    let image = reader
-        .decode()
-        .map_err(|error| TingError::InvalidRequest(error.to_string()))?;
+    let image = reader.decode().map_err(|error| {
+        let message = error.to_string();
+        TingError::invalid_request(
+            InputErrorKind::InvalidValue,
+            "normalized_cover::invalid_request",
+            message,
+        )
+        .with_source(anyhow::anyhow!(error))
+    })?;
     for size in if small {
         &[600, 500, 400, 300, 240][..]
     } else {
@@ -465,13 +550,23 @@ fn normalized_cover(path: &Path, small: bool) -> Result<Vec<u8>> {
             let mut jpeg = Vec::new();
             image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, *quality)
                 .encode_image(&rgb)
-                .map_err(|error| TingError::InvalidRequest(error.to_string()))?;
+                .map_err(|error| {
+                    let message = error.to_string();
+                    TingError::invalid_request(
+                        InputErrorKind::InvalidValue,
+                        "normalized_cover::invalid_request",
+                        message,
+                    )
+                    .with_source(anyhow::anyhow!(error))
+                })?;
             if !small || jpeg.len() < 65_490 {
                 return Ok(jpeg);
             }
         }
     }
-    Err(TingError::InvalidRequest(
+    Err(TingError::invalid_request(
+        InputErrorKind::OutOfRange,
+        "normalized_cover::invalid_request",
         "Cannot fit cover into the ASF attribute limit".into(),
     ))
 }

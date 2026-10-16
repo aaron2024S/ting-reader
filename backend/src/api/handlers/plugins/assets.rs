@@ -3,6 +3,7 @@
 use super::authorization::decode_plugin_client_grant;
 use super::capabilities::find_ui_bridge_capability;
 use crate::api::state::AppState;
+use crate::core::app::error::{AccessErrorKind, InputErrorKind, LookupErrorKind, PluginErrorKind};
 use crate::core::app::error::{Result, TingError};
 use crate::db::repository::Repository;
 use crate::plugin::types::PluginState;
@@ -26,7 +27,9 @@ pub async fn get_plugin_asset(
 ) -> Result<Response> {
     let claims = decode_plugin_client_grant(&state, &client_grant).await?;
     if claims.plugin_id != id {
-        return Err(TingError::PermissionDenied(
+        return Err(TingError::permission(
+            AccessErrorKind::ResourceDenied,
+            "get_plugin_asset::permission",
             "Plugin client grant does not match this asset request".to_string(),
         ));
     }
@@ -34,27 +37,45 @@ pub async fn get_plugin_asset(
         .user_repo
         .find_by_id(&claims.sub)
         .await?
-        .ok_or_else(|| TingError::PermissionDenied("Plugin asset user no longer exists".into()))?;
+        .ok_or_else(|| {
+            TingError::permission(
+                AccessErrorKind::ResourceDenied,
+                "get_plugin_asset::permission",
+                "Plugin asset user no longer exists".into(),
+            )
+        })?;
     let plugin_info = state
         .plugin_manager
         .list_plugins()
         .await
         .into_iter()
         .find(|plugin| plugin.id == id)
-        .ok_or_else(|| TingError::PluginNotFound(id.clone()))?;
+        .ok_or_else(|| {
+            TingError::plugin_not_found(
+                LookupErrorKind::Plugin,
+                "get_plugin_asset::plugin_not_found",
+                id.clone(),
+            )
+        })?;
     if !plugin_assets_available(plugin_info.state) {
-        return Err(TingError::PermissionDenied(format!(
-            "Plugin assets are unavailable for inactive plugin {}",
-            id
-        )));
+        return Err(TingError::permission(
+            AccessErrorKind::ResourceDenied,
+            "get_plugin_asset::permission",
+            format!("Plugin assets are unavailable for inactive plugin {}", id),
+        ));
     }
-    let metadata = state
-        .plugin_manager
-        .get_plugin(&id)
-        .map_err(|_| TingError::PluginNotFound(id.clone()))?;
+    let metadata = state.plugin_manager.get_plugin(&id).map_err(|_| {
+        TingError::plugin_not_found(
+            LookupErrorKind::Plugin,
+            "get_plugin_asset::plugin_not_found",
+            id.clone(),
+        )
+    })?;
     find_ui_bridge_capability(&metadata, &claims.capability_id)?;
     if metadata.admin_only && asset_user.role != "admin" {
-        return Err(TingError::PermissionDenied(
+        return Err(TingError::permission(
+            AccessErrorKind::AdministratorRequired,
+            "get_plugin_asset::permission",
             "Administrator access is required for this plugin asset".to_string(),
         ));
     }
@@ -68,30 +89,42 @@ pub async fn get_plugin_asset(
     let candidate_path = canonical_root.join(&relative_path);
     let canonical_asset = tokio::fs::canonicalize(&candidate_path)
         .await
-        .map_err(|_| TingError::NotFound(format!("Plugin asset not found: {}", asset_path)))?;
+        .map_err(|_| {
+            TingError::not_found(
+                LookupErrorKind::Plugin,
+                "get_plugin_asset::not_found",
+                format!("Plugin asset not found: {}", asset_path),
+            )
+        })?;
 
     if !canonical_asset.starts_with(&canonical_root) {
-        return Err(TingError::PermissionDenied(format!(
-            "Plugin asset path escapes plugin package: {}",
-            asset_path
-        )));
+        return Err(TingError::permission(
+            AccessErrorKind::ResourceDenied,
+            "get_plugin_asset::permission",
+            format!("Plugin asset path escapes plugin package: {}", asset_path),
+        ));
     }
 
     let metadata = tokio::fs::metadata(&canonical_asset)
         .await
         .map_err(TingError::IoError)?;
     if !metadata.is_file() {
-        return Err(TingError::NotFound(format!(
-            "Plugin asset is not a file: {}",
-            asset_path
-        )));
+        return Err(TingError::not_found(
+            LookupErrorKind::Plugin,
+            "get_plugin_asset::not_found",
+            format!("Plugin asset is not a file: {}", asset_path),
+        ));
     }
     if metadata.len() > MAX_PLUGIN_ASSET_BYTES {
-        return Err(TingError::InvalidRequest(format!(
-            "Plugin asset exceeds the {} MiB response limit: {}",
-            MAX_PLUGIN_ASSET_BYTES / (1024 * 1024),
-            asset_path
-        )));
+        return Err(TingError::invalid_request(
+            InputErrorKind::OutOfRange,
+            "get_plugin_asset::invalid_request",
+            format!(
+                "Plugin asset exceeds the {} MiB response limit: {}",
+                MAX_PLUGIN_ASSET_BYTES / (1024 * 1024),
+                asset_path
+            ),
+        ));
     }
 
     let content_type = mime_guess::from_path(&canonical_asset)
@@ -116,7 +149,13 @@ pub async fn get_plugin_asset(
     }
 
     response.body(body).map_err(|e| {
-        TingError::PluginExecutionError(format!("Plugin asset response failed: {}", e))
+        let message = format!("Plugin asset response failed: {}", e);
+        TingError::plugin_execution(
+            PluginErrorKind::InvalidOutput,
+            "get_plugin_asset::plugin_execution",
+            message,
+        )
+        .with_source(anyhow::anyhow!(e))
     })
 }
 
@@ -137,7 +176,9 @@ pub(super) fn plugin_assets_available(state: PluginState) -> bool {
 pub(super) fn normalize_plugin_asset_path(asset_path: &str) -> Result<PathBuf> {
     let asset_path = asset_path.trim_start_matches('/');
     if asset_path.trim().is_empty() {
-        return Err(TingError::InvalidRequest(
+        return Err(TingError::invalid_request(
+            InputErrorKind::MissingField,
+            "normalize_plugin_asset_path::invalid_request",
             "Plugin asset path is required".to_string(),
         ));
     }
@@ -148,10 +189,11 @@ pub(super) fn normalize_plugin_asset_path(asset_path: &str) -> Result<PathBuf> {
             Component::Normal(part) => normalized.push(part),
             Component::CurDir => {}
             _ => {
-                return Err(TingError::PermissionDenied(format!(
-                    "Invalid plugin asset path: {}",
-                    asset_path
-                )));
+                return Err(TingError::permission(
+                    AccessErrorKind::ResourceDenied,
+                    "normalize_plugin_asset_path::permission",
+                    format!("Invalid plugin asset path: {}", asset_path),
+                ));
             }
         }
     }
@@ -166,10 +208,14 @@ pub(super) fn normalize_plugin_asset_path(asset_path: &str) -> Result<PathBuf> {
         .unwrap_or_default();
 
     if !matches!(first_component, "ui" | "assets") {
-        return Err(TingError::PermissionDenied(format!(
-            "Plugin assets must live under ui/ or assets/: {}",
-            asset_path
-        )));
+        return Err(TingError::permission(
+            AccessErrorKind::ResourceDenied,
+            "normalize_plugin_asset_path::permission",
+            format!(
+                "Plugin assets must live under ui/ or assets/: {}",
+                asset_path
+            ),
+        ));
     }
 
     Ok(normalized)

@@ -1,5 +1,6 @@
 //! User-scoped book bookmarks shared by HTTP and plugin Host calls.
 
+use crate::core::app::error::{AccessErrorKind, InputErrorKind, LookupErrorKind};
 use crate::core::app::error::{Result, TingError};
 use crate::db::repository::reading::{ActivityBook, Bookmark, Page, ReadingRepository};
 use crate::db::repository::{BookRepository, ChapterRepository, Repository};
@@ -64,7 +65,13 @@ impl<'a> BookmarkService<'a> {
             .repository
             .bookmark(self.user_id, bookmark_id)
             .await?
-            .ok_or_else(|| TingError::NotFound("Bookmark not found".into()))?;
+            .ok_or_else(|| {
+                TingError::not_found(
+                    LookupErrorKind::Bookmark,
+                    "get::not_found",
+                    "Bookmark not found".into(),
+                )
+            })?;
         self.ensure_book_access(&bookmark.book_id).await?;
         Ok(bookmark)
     }
@@ -73,7 +80,9 @@ impl<'a> BookmarkService<'a> {
         self.ensure_book_access(&request.book_id).await?;
         validate_note(&request.note)?;
         if !request.position.is_finite() || request.position < 0.0 {
-            return Err(TingError::InvalidRequest(
+            return Err(TingError::invalid_request(
+                InputErrorKind::InvalidValue,
+                "create::invalid_request",
                 "Invalid bookmark position".into(),
             ));
         }
@@ -81,9 +90,17 @@ impl<'a> BookmarkService<'a> {
             .chapters
             .find_by_id(&request.chapter_id)
             .await?
-            .ok_or_else(|| TingError::NotFound("Chapter not found".into()))?;
+            .ok_or_else(|| {
+                TingError::not_found(
+                    LookupErrorKind::Chapter,
+                    "create::not_found",
+                    "Chapter not found".into(),
+                )
+            })?;
         if chapter.book_id != request.book_id {
-            return Err(TingError::InvalidRequest(
+            return Err(TingError::invalid_request(
+                InputErrorKind::OutOfRange,
+                "create::invalid_request",
                 "Chapter does not belong to book".into(),
             ));
         }
@@ -106,7 +123,11 @@ impl<'a> BookmarkService<'a> {
             .change_bookmark(self.user_id, bookmark_id, Some(note))
             .await?;
         if changed == 0 {
-            return Err(TingError::NotFound("Bookmark not found".into()));
+            return Err(TingError::not_found(
+                LookupErrorKind::Bookmark,
+                "update::not_found",
+                "Bookmark not found".into(),
+            ));
         }
         self.get(bookmark_id).await
     }
@@ -119,21 +140,33 @@ impl<'a> BookmarkService<'a> {
             .await?
             == 0
         {
-            return Err(TingError::NotFound("Bookmark not found".into()));
+            return Err(TingError::not_found(
+                LookupErrorKind::Bookmark,
+                "delete::not_found",
+                "Bookmark not found".into(),
+            ));
         }
         Ok(())
     }
 
     async fn ensure_book_access(&self, book_id: &str) -> Result<()> {
         if self.books.find_by_id(book_id).await?.is_none() {
-            return Err(TingError::NotFound("Book not found".into()));
+            return Err(TingError::not_found(
+                LookupErrorKind::Book,
+                "ensure_book_access::not_found",
+                "Book not found".into(),
+            ));
         }
         if !self
             .books
             .check_access(book_id, self.user_id, self.is_admin)
             .await?
         {
-            return Err(TingError::PermissionDenied("Book access denied".into()));
+            return Err(TingError::permission(
+                AccessErrorKind::ResourceDenied,
+                "ensure_book_access::permission",
+                "Book access denied".into(),
+            ));
         }
         Ok(())
     }
@@ -145,7 +178,9 @@ fn page_bounds(page: usize, page_size: usize) -> (usize, usize) {
 
 fn validate_note(note: &str) -> Result<()> {
     if note.chars().count() > 2000 {
-        return Err(TingError::InvalidRequest(
+        return Err(TingError::invalid_request(
+            InputErrorKind::OutOfRange,
+            "validate_note::invalid_request",
             "Bookmark note exceeds 2000 characters".into(),
         ));
     }

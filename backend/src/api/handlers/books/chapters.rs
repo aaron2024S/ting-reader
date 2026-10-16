@@ -5,6 +5,7 @@ use crate::api::models::{
     MoveChaptersRequest, UpdateChapterRequest,
 };
 use crate::api::state::AppState;
+use crate::core::app::error::LookupErrorKind;
 use crate::core::app::error::{Result, TingError};
 use crate::db::repository::{ChapterRepository, Repository};
 use axum::{
@@ -21,10 +22,11 @@ pub async fn get_book_chapters(
     user: crate::auth::middleware::AuthUser,
 ) -> Result<impl IntoResponse> {
     if state.book_repo.find_by_id(&book_id).await?.is_none() {
-        return Err(TingError::NotFound(format!(
-            "Book with id {} not found",
-            book_id
-        )));
+        return Err(TingError::not_found(
+            LookupErrorKind::Book,
+            "get_book_chapters::not_found",
+            format!("Book with id {} not found", book_id),
+        ));
     }
 
     let chapter_repo = ChapterRepository::new(state.book_repo.db().clone());
@@ -148,10 +150,13 @@ pub async fn update_chapter(
 ) -> Result<impl IntoResponse> {
     let chapter_repo = ChapterRepository::new(state.book_repo.db().clone());
 
-    let existing_chapter = chapter_repo
-        .find_by_id(&id)
-        .await?
-        .ok_or_else(|| TingError::NotFound(format!("Chapter with id {} not found", id)))?;
+    let existing_chapter = chapter_repo.find_by_id(&id).await?.ok_or_else(|| {
+        TingError::not_found(
+            LookupErrorKind::Chapter,
+            "update_chapter::not_found",
+            format!("Chapter with id {} not found", id),
+        )
+    })?;
 
     let updated_chapter = crate::db::models::Chapter {
         id: existing_chapter.id,
@@ -174,10 +179,11 @@ pub async fn update_chapter(
         .find_by_id(&updated_chapter.book_id)
         .await?
         .ok_or_else(|| {
-            TingError::NotFound(format!(
-                "Book with id {} not found",
-                updated_chapter.book_id
-            ))
+            TingError::not_found(
+                LookupErrorKind::Chapter,
+                "update_chapter::not_found",
+                format!("Book with id {} not found", updated_chapter.book_id),
+            )
         })?;
 
     if state
@@ -213,10 +219,11 @@ pub async fn batch_update_chapters(
     crate::api::require_admin(&user)?;
 
     if state.book_repo.find_by_id(&id).await?.is_none() {
-        return Err(TingError::NotFound(format!(
-            "Book with id {} not found",
-            id
-        )));
+        return Err(TingError::not_found(
+            LookupErrorKind::Book,
+            "batch_update_chapters::not_found",
+            format!("Book with id {} not found", id),
+        ));
     }
 
     let chapter_repo = ChapterRepository::new(state.book_repo.db().clone());
@@ -246,11 +253,13 @@ pub async fn batch_update_chapters(
     }
 
     // Regenerate metadata.json if enabled
-    let book = state
-        .book_repo
-        .find_by_id(&id)
-        .await?
-        .ok_or_else(|| TingError::NotFound(format!("Book with id {} not found", id)))?;
+    let book = state.book_repo.find_by_id(&id).await?.ok_or_else(|| {
+        TingError::not_found(
+            LookupErrorKind::Book,
+            "batch_update_chapters::not_found",
+            format!("Book with id {} not found", id),
+        )
+    })?;
 
     if state
         .library_repo

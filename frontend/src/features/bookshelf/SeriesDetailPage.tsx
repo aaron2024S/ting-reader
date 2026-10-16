@@ -1,3 +1,4 @@
+import { apiErrorMessage } from '../../core/api/errors';
 import { useBookOperations } from '../../core/hooks/useBooks';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams, useNavigate } from 'react-router';
@@ -203,7 +204,7 @@ const SeriesDetailPage: React.FC = () => {
       fetchSeries();
     } catch (err) {
       console.error('Failed to update series', err);
-      alert(t('bookshelf.updateSeriesFailed'));
+      alert(apiErrorMessage(err, t('bookshelf.updateSeriesFailed')));
     } finally {
       setSaving(false);
     }
@@ -217,7 +218,7 @@ const SeriesDetailPage: React.FC = () => {
       navigate('/bookshelf');
     } catch (err) {
       console.error('Failed to delete series', err);
-      alert(t('bookshelf.deleteSeriesFailed'));
+      alert(apiErrorMessage(err, t('bookshelf.deleteSeriesFailed')));
     } finally {
       setDeleting(false);
       setIsDeleteModalOpen(false);
@@ -264,7 +265,7 @@ const SeriesDetailPage: React.FC = () => {
     } catch (error) {
       console.error('Failed to update selected series books', error);
       if (version === pageVersion.current) {
-        alert(t(action === 'delete' ? 'bookshelf.deleteBookFailed' : 'common.saveFailed'));
+        alert(apiErrorMessage(error, t(action === 'delete' ? 'bookshelf.deleteBookFailed' : 'common.saveFailed')));
         setConfirmation(null);
         // Refresh any batches that completed before a later batch failed.
         await fetchSeries();

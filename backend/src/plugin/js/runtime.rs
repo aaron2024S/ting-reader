@@ -389,7 +389,25 @@ impl JsRuntimeWrapper {
                 if status == "pending" {
                     Err(anyhow::anyhow!(err_msg))
                 } else if status == "error" {
-                    Err(JsError::FunctionCallError(err_msg).into())
+                    #[derive(Deserialize)]
+                    struct InvocationFailure {
+                        message: String,
+                        plugin_error: Option<ting_plugin_contract::protocol::PluginError>,
+                    }
+                    match serde_json::from_str::<InvocationFailure>(&err_msg) {
+                        Ok(failure) => {
+                            if let Some(error) = failure.plugin_error
+                                && error.validate().is_ok()
+                            {
+                                return Err(crate::core::app::error::TingError::PluginReported(
+                                    Box::new(error),
+                                )
+                                .into());
+                            }
+                            Err(JsError::FunctionCallError(anyhow::anyhow!(failure.message)).into())
+                        }
+                        Err(error) => Err(JsError::SerializationError(error).into()),
+                    }
                 } else {
                     Err(anyhow::anyhow!(err_msg))
                 }
@@ -526,24 +544,24 @@ impl Drop for InvocationCleanup {
 #[derive(Debug, thiserror::Error)]
 pub enum JsError {
     #[error("JavaScript execution error: {0}")]
-    ExecutionError(String),
+    ExecutionError(#[source] anyhow::Error),
 
     #[error("JavaScript module load error: {0}")]
-    ModuleLoadError(String),
+    ModuleLoadError(#[source] anyhow::Error),
 
     #[error("JavaScript function call error: {0}")]
-    FunctionCallError(String),
+    FunctionCallError(#[source] anyhow::Error),
 
     #[error("JavaScript serialization error: {0}")]
-    SerializationError(String),
+    SerializationError(#[source] serde_json::Error),
 
     #[error("JavaScript runtime error: {0}")]
-    RuntimeError(String),
+    RuntimeError(#[source] anyhow::Error),
 }
 
 impl From<anyhow::Error> for JsError {
     fn from(err: anyhow::Error) -> Self {
-        JsError::RuntimeError(err.to_string())
+        JsError::RuntimeError(err)
     }
 }
 

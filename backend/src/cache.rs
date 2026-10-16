@@ -12,11 +12,11 @@ pub enum CacheError {
     #[error("IO error: {0}")]
     Io(#[from] io::Error),
 
-    #[error("Cache file not found: {0}")]
-    NotFound(String),
+    #[error("Cache file not found: {chapter_id}")]
+    NotFound { chapter_id: String },
 
-    #[error("Invalid cache path: {0}")]
-    InvalidPath(String),
+    #[error("Invalid cache path: {path}", path = .path.display())]
+    InvalidPath { path: PathBuf },
 }
 
 pub type Result<T> = std::result::Result<T, CacheError>;
@@ -81,7 +81,9 @@ impl CacheManager {
         let cache_path = self.get_cache_path(chapter_id);
 
         if !cache_path.exists() {
-            return Err(CacheError::NotFound(chapter_id.to_string()));
+            return Err(CacheError::NotFound {
+                chapter_id: chapter_id.to_string(),
+            });
         }
 
         let metadata = tokio::fs::metadata(&cache_path).await?;
@@ -132,7 +134,9 @@ impl CacheManager {
         let cache_path = self.get_cache_path(chapter_id);
 
         if !cache_path.exists() {
-            return Err(CacheError::NotFound(chapter_id.to_string()));
+            return Err(CacheError::NotFound {
+                chapter_id: chapter_id.to_string(),
+            });
         }
 
         tokio::fs::remove_file(cache_path).await?;

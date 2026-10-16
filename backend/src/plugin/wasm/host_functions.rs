@@ -194,31 +194,11 @@ async fn invoke_host_request(
 }
 
 fn resource_error_status(code: ting_plugin_contract::protocol::PluginErrorCode) -> i32 {
-    match code {
-        ting_plugin_contract::protocol::PluginErrorCode::Cancelled => -6,
-        ting_plugin_contract::protocol::PluginErrorCode::ResourceLimit => -5,
-        ting_plugin_contract::protocol::PluginErrorCode::PermissionDenied => -4,
-        _ => -1,
-    }
+    crate::plugin::host_api::status_for_plugin_error(code) as i32
 }
 
 fn host_error_status(error: crate::core::app::error::TingError) -> i32 {
-    match error {
-        crate::core::app::error::TingError::PermissionDenied(_)
-        | crate::core::app::error::TingError::SecurityViolation(_) => {
-            NativeStatus::PermissionDenied as i32
-        }
-        crate::core::app::error::TingError::ResourceLimitExceeded(_) => {
-            NativeStatus::ResourceLimit as i32
-        }
-        crate::core::app::error::TingError::NotFound(_)
-        | crate::core::app::error::TingError::PluginNotFound(_) => NativeStatus::NotFound as i32,
-        crate::core::app::error::TingError::InvalidRequest(_)
-        | crate::core::app::error::TingError::ValidationError(_) => {
-            NativeStatus::InvalidInput as i32
-        }
-        _ => NativeStatus::InternalError as i32,
-    }
+    crate::plugin::host_api::status_for_plugin_error(error.plugin_error_code()) as i32
 }
 
 fn read_wasm_bytes(

@@ -1,3 +1,4 @@
+import { apiErrorMessage } from '../../core/api/errors';
 import { Loader2, MoreHorizontal, X } from "lucide-react";
 import type { ReactNode } from "react";
 import { useState, useRef, useEffect, useCallback } from "react";
@@ -186,7 +187,7 @@ const PluginActionView = ({
     } catch (error) {
       if (signal.aborted) return;
       setFailed(true);
-      setMessage(error instanceof Error ? error.message : String(error));
+      setMessage(apiErrorMessage(error, 'Plugin operation failed'));
     } finally {
       if (!signal.aborted) setRunning(false);
     }

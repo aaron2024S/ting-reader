@@ -117,13 +117,26 @@ pub fn generate_init_code(
             return __tingWriteLog(level, args.map(__tingFormatLogValue).join(" "), null);
         }}
 
+        async function __tingHostInvoke(method, params) {{
+            const result = await Deno.core.ops.op_host_invoke(method, params ?? {{}});
+            if (result.ok) return result.data;
+            const failure = result.error;
+            const error = new Error(failure.message);
+            error.name = "PluginHostError";
+            error.code = failure.code;
+            error.details = failure.details;
+            error.retryable = failure.retryable;
+            error.pluginError = failure;
+            throw error;
+        }}
+
         // Ting Plugin API for JavaScript
         globalThis.Ting = {{
             pluginName: "{plugin_name}",
             config: {config_json},
 
             resources: Object.freeze({{
-                invoke: (operation, input = {{}}) => Deno.core.ops.op_host_invoke("resources." + operation, input),
+                invoke: (operation, input = {{}}) => __tingHostInvoke("resources." + operation, input),
                 chunkCreate: (bytes) => Deno.core.ops.op_chunk_create(bytes),
                 chunkCopy: (id) => Deno.core.ops.op_chunk_copy(id),
                 writeAt: (resource, offset, bytes) => Deno.core.ops.op_resource_write(resource, offset, bytes),
@@ -171,7 +184,7 @@ pub fn generate_init_code(
                     if (!method || typeof method !== 'string') {{
                         throw new Error("Ting.host.invoke requires a method string");
                     }}
-                    return await Deno.core.ops.op_host_invoke(method, params ?? {{}});
+                    return await __tingHostInvoke(method, params);
                 }},
             }},
 
@@ -257,7 +270,10 @@ pub fn generate_init_code(
                 globalThis._ting_result = JSON.stringify(result);
                 globalThis._ting_status = 'success';
             }} catch (e) {{
-                globalThis._ting_error = e.toString();
+                globalThis._ting_error = JSON.stringify({{
+                    message: e && typeof e.message === 'string' ? e.message : String(e),
+                    plugin_error: e && e.pluginError || null,
+                }});
                 globalThis._ting_status = 'error';
             }} finally {{
                 globalThis._ting_context = undefined;

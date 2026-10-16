@@ -11,6 +11,7 @@ use crate::auth::models::{
 use crate::auth::password::{
     DEFAULT_ADMIN_PASSWORD, DEFAULT_ADMIN_USERNAME, hash_password, verify_password,
 };
+use crate::core::app::error::{AuthenticationErrorKind, InputErrorKind};
 use crate::core::app::error::{Result, TingError};
 use crate::db::models::User;
 use crate::db::repository::Repository;
@@ -139,7 +140,11 @@ async fn user_from_token(
                 login_method = %login_method,
                 "JWT token login failed: user does not exist"
             );
-            Err(TingError::AuthenticationError("用户不存在".to_string()))
+            Err(TingError::authentication(
+                AuthenticationErrorKind::UserNotFound,
+                "user_from_token::authentication",
+                "用户不存在".to_string(),
+            ))
         }
     }
 }
@@ -229,7 +234,11 @@ pub async fn register(
                 error = %e,
                 "User registration failed"
             );
-            Err(TingError::InvalidRequest("用户名已存在".to_string()))
+            Err(TingError::invalid_request(
+                InputErrorKind::Conflict,
+                "register::invalid_request",
+                "用户名已存在".to_string(),
+            ))
         }
     }
 }
@@ -263,7 +272,9 @@ pub async fn login(
                 device = %request_info.device,
                 "User login failed: user not found"
             );
-            return Err(TingError::AuthenticationError(
+            return Err(TingError::authentication(
+                AuthenticationErrorKind::InvalidCredentials,
+                "login::authentication",
                 "用户名或密码错误".to_string(),
             ));
         }
@@ -287,7 +298,9 @@ pub async fn login(
             device = %request_info.device,
             "User login failed: bad password"
         );
-        return Err(TingError::AuthenticationError(
+        return Err(TingError::authentication(
+            AuthenticationErrorKind::InvalidCredentials,
+            "login::authentication",
             "用户名或密码错误".to_string(),
         ));
     }
@@ -335,7 +348,9 @@ pub async fn token_login(
             login_method = "jwt_token",
             "JWT token login failed: token is empty"
         );
-        return Err(TingError::AuthenticationError(
+        return Err(TingError::authentication(
+            AuthenticationErrorKind::InvalidCredentials,
+            "token_login::authentication",
             "JWT Token 不能为空".to_string(),
         ));
     }
@@ -368,7 +383,13 @@ pub async fn session_restore(
         .map(ToOwned::to_owned)
         .or_else(|| bearer_token_from_headers(&headers))
         .or_else(|| cookie_token_from_headers(&headers))
-        .ok_or_else(|| TingError::AuthenticationError("登录凭证不存在".to_string()))?;
+        .ok_or_else(|| {
+            TingError::authentication(
+                AuthenticationErrorKind::MissingCredentials,
+                "session_restore::authentication",
+                "登录凭证不存在".to_string(),
+            )
+        })?;
 
     let user = user_from_token(&state, &token, &request_info, "session_restore").await?;
     if should_record_session_restore(&user, &request_info, req.session_id.as_deref()) {
@@ -401,11 +422,13 @@ pub async fn get_me(
     tracing::debug!(user_id = %user.id, username = %user.username, "Fetching current user");
 
     // Fetch full user info from database
-    let db_user = state
-        .user_repo
-        .find_by_id(&user.id)
-        .await?
-        .ok_or_else(|| TingError::AuthenticationError("用户不存在".to_string()))?;
+    let db_user = state.user_repo.find_by_id(&user.id).await?.ok_or_else(|| {
+        TingError::authentication(
+            AuthenticationErrorKind::UserNotFound,
+            "get_me::authentication",
+            "用户不存在".to_string(),
+        )
+    })?;
 
     Ok(Json(user_info_from_user(&db_user)?))
 }
@@ -419,11 +442,13 @@ pub async fn update_me(
     tracing::info!(user_id = %user.id, username = %user.username, "Updating current user");
 
     // Fetch current user
-    let mut db_user = state
-        .user_repo
-        .find_by_id(&user.id)
-        .await?
-        .ok_or_else(|| TingError::AuthenticationError("用户不存在".to_string()))?;
+    let mut db_user = state.user_repo.find_by_id(&user.id).await?.ok_or_else(|| {
+        TingError::authentication(
+            AuthenticationErrorKind::UserNotFound,
+            "update_me::authentication",
+            "用户不存在".to_string(),
+        )
+    })?;
 
     // Update username if provided
     if let Some(new_username) = req.username

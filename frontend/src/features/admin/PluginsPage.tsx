@@ -3,6 +3,7 @@ import { isAxiosError } from 'axios';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router';
 import apiClient from '../../core/api/client';
+import { apiErrorMessage } from '../../core/api/errors';
 import type { Plugin, StorePlugin, UnverifiedPluginInstallConfirmation } from '../../core/types';
 import { refreshClientExtensions } from '../../core/stores/pluginExtensionsStore';
 import PluginConfigDialog from '../../shared/modals/PluginConfigDialog';
@@ -183,10 +184,8 @@ const PluginsPage: React.FC = () => {
       await Promise.all([fetchPlugins(), refreshClientExtensions()]);
       alert(t('adminPlugins.installSuccess'));
     } catch (err: unknown) {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const response = (err as any)?.response;
       console.error('Failed to install plugin', err);
-      const msg = response?.data?.error || (err as Error)?.message || t('adminPlugins.unknownError');
+      const msg = apiErrorMessage(err, t('adminPlugins.unknownError'));
       alert(t('adminPlugins.installFailed', { message: msg }));
     } finally {
       setUploading(false);
@@ -249,8 +248,7 @@ const PluginsPage: React.FC = () => {
               }
             } catch (err: unknown) {
               console.error(t('adminPlugins.dependencyInstallFailed', { id: depId }), err);
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              const msg = (err as any)?.response?.data?.error || (err as Error)?.message || t('adminPlugins.unknownError');
+              const msg = apiErrorMessage(err, t('adminPlugins.unknownError'));
               alert(t('adminPlugins.dependencyInstallAlert', { id: depId, message: msg }));
               setInstallingId(null);
               return;
@@ -271,8 +269,7 @@ const PluginsPage: React.FC = () => {
       alert(t('adminPlugins.installSuccess'));
     } catch (err: unknown) {
       console.error('Failed to install plugin from store', err);
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const msg = (err as any)?.response?.data?.error || (err as Error)?.message || t('adminPlugins.unknownError');
+      const msg = apiErrorMessage(err, t('adminPlugins.unknownError'));
       alert(t('adminPlugins.installFailed', { message: msg }));
     } finally {
       setInstallingId(null);
@@ -286,8 +283,7 @@ const PluginsPage: React.FC = () => {
       alert(t('adminPlugins.reloadSuccess'));
     } catch (err: unknown) {
       console.error('Failed to reload plugin', err);
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const msg = (err as any)?.response?.data?.error || (err as Error)?.message || t('adminPlugins.unknownError');
+      const msg = apiErrorMessage(err, t('adminPlugins.unknownError'));
       alert(t('adminPlugins.reloadFailed', { message: msg }));
     }
   };
@@ -301,8 +297,7 @@ const PluginsPage: React.FC = () => {
       alert(t('adminPlugins.uninstallSuccess'));
     } catch (err: unknown) {
       console.error('Failed to uninstall plugin', err);
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const msg = (err as any)?.response?.data?.error || (err as Error)?.message || t('adminPlugins.unknownError');
+      const msg = apiErrorMessage(err, t('adminPlugins.unknownError'));
       alert(t('adminPlugins.uninstallFailed', { message: msg }));
     }
   };

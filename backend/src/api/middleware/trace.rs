@@ -1,3 +1,4 @@
+use crate::core::app::error::REQUEST_TRACE_ID;
 use axum::{
     extract::Request,
     http::{HeaderValue, Uri},
@@ -49,19 +50,20 @@ pub async fn trace_id_middleware(request: Request, next: Next) -> Response {
     request.extensions_mut().insert(TraceId(trace_id.clone()));
 
     // Process the request within the span context
-    let response = async move {
-        let response = next.run(request).await;
+    let response = REQUEST_TRACE_ID
+        .scope(trace_id.clone(), async move {
+            let response = next.run(request).await;
 
-        // Log the response
-        tracing::debug!(
-            status = %response.status(),
-            "Request completed"
-        );
+            // Log the response
+            tracing::debug!(
+                status = %response.status(),
+                "Request completed"
+            );
 
-        response
-    }
-    .instrument(span)
-    .await;
+            response
+        })
+        .instrument(span)
+        .await;
 
     // Add trace ID to response headers
     let (mut parts, body) = response.into_parts();

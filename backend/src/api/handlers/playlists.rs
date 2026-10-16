@@ -4,6 +4,7 @@ use crate::api::models::{
 };
 use crate::api::state::AppState;
 use crate::auth::middleware::AuthUser;
+use crate::core::app::error::{InputErrorKind, LookupErrorKind};
 use crate::core::app::error::{Result, TingError};
 use crate::db::models::{Playlist, PlaylistItem};
 use crate::db::repository::Repository;
@@ -39,7 +40,13 @@ pub async fn get_playlist(
         .playlist_repo
         .find_by_user_and_id(&id, &user.id)
         .await?
-        .ok_or_else(|| TingError::NotFound(format!("Playlist with id {} not found", id)))?;
+        .ok_or_else(|| {
+            TingError::not_found(
+                LookupErrorKind::Playlist,
+                "get_playlist::not_found",
+                format!("Playlist with id {} not found", id),
+            )
+        })?;
 
     let response =
         build_playlist_response(&state, playlist, &user.id, user.role == "admin").await?;
@@ -53,7 +60,9 @@ pub async fn create_playlist(
 ) -> Result<impl IntoResponse> {
     let title = req.title.trim();
     if title.is_empty() {
-        return Err(TingError::InvalidRequest(
+        return Err(TingError::invalid_request(
+            InputErrorKind::InvalidValue,
+            "create_playlist::invalid_request",
             "Playlist title cannot be empty".to_string(),
         ));
     }
@@ -90,7 +99,13 @@ pub async fn update_playlist(
         .playlist_repo
         .find_by_user_and_id(&id, &user.id)
         .await?
-        .ok_or_else(|| TingError::NotFound(format!("Playlist with id {} not found", id)))?;
+        .ok_or_else(|| {
+            TingError::not_found(
+                LookupErrorKind::Playlist,
+                "update_playlist::not_found",
+                format!("Playlist with id {} not found", id),
+            )
+        })?;
 
     let title = req
         .title
@@ -99,7 +114,9 @@ pub async fn update_playlist(
         .unwrap_or(existing.title.clone());
 
     if title.is_empty() {
-        return Err(TingError::InvalidRequest(
+        return Err(TingError::invalid_request(
+            InputErrorKind::InvalidValue,
+            "update_playlist::invalid_request",
             "Playlist title cannot be empty".to_string(),
         ));
     }
@@ -148,10 +165,11 @@ pub async fn delete_playlist(
         .await?;
 
     if existing.is_none() {
-        return Err(TingError::NotFound(format!(
-            "Playlist with id {} not found",
-            id
-        )));
+        return Err(TingError::not_found(
+            LookupErrorKind::Playlist,
+            "delete_playlist::not_found",
+            format!("Playlist with id {} not found", id),
+        ));
     }
 
     state.playlist_repo.delete(&id).await?;
@@ -178,7 +196,9 @@ fn normalize_playlist_items(
         let item_id = item.item_id.trim().to_string();
 
         if item_id.is_empty() || !matches!(item_type.as_str(), "book" | "series") {
-            return Err(TingError::InvalidRequest(
+            return Err(TingError::invalid_request(
+                InputErrorKind::InvalidValue,
+                "normalize_playlist_items::invalid_request",
                 "Playlist items must be books or series with a valid id".to_string(),
             ));
         }

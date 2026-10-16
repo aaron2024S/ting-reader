@@ -1,6 +1,7 @@
 //! Authentication middleware
 
 use crate::auth::jwt::{Claims, validate_token_with_secrets};
+use crate::core::app::error::AuthenticationErrorKind;
 use crate::core::app::error::{Result, TingError};
 use axum::{
     extract::{Request, State},
@@ -74,7 +75,13 @@ fn validate_token_candidates(candidates: &[String], secrets: &[String]) -> Resul
         }
     }
 
-    Err(last_error.unwrap_or_else(|| TingError::AuthenticationError("缺少认证令牌".to_string())))
+    Err(last_error.unwrap_or_else(|| {
+        TingError::authentication(
+            AuthenticationErrorKind::MissingCredentials,
+            "validate_token_candidates::authentication",
+            "缺少认证令牌".to_string(),
+        )
+    }))
 }
 
 /// Extension to store authenticated user info in request
@@ -113,7 +120,11 @@ pub async fn authenticate(
     let user = match user_result {
         Ok(Some(u)) => u,
         Ok(None) => {
-            let error = TingError::AuthenticationError("用户不存在".to_string());
+            let error = TingError::authentication(
+                AuthenticationErrorKind::UserNotFound,
+                "authenticate::authentication",
+                "用户不存在".to_string(),
+            );
             return error.into_response();
         }
         Err(e) => return e.into_response(), // Database error
@@ -136,7 +147,13 @@ pub fn get_auth_user(request: &Request) -> Result<AuthUser> {
         .extensions()
         .get::<AuthUser>()
         .cloned()
-        .ok_or_else(|| TingError::AuthenticationError("用户未认证".to_string()))
+        .ok_or_else(|| {
+            TingError::authentication(
+                AuthenticationErrorKind::MissingCredentials,
+                "get_auth_user::authentication",
+                "用户未认证".to_string(),
+            )
+        })
 }
 
 // Implement FromRequestParts for AuthUser to enable extraction in handlers
@@ -150,11 +167,13 @@ where
     type Rejection = TingError;
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self> {
-        parts
-            .extensions
-            .get::<AuthUser>()
-            .cloned()
-            .ok_or_else(|| TingError::AuthenticationError("用户未认证".to_string()))
+        parts.extensions.get::<AuthUser>().cloned().ok_or_else(|| {
+            TingError::authentication(
+                AuthenticationErrorKind::MissingCredentials,
+                "from_request_parts::authentication",
+                "用户未认证".to_string(),
+            )
+        })
     }
 }
 

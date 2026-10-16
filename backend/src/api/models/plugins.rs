@@ -1,3 +1,4 @@
+use crate::core::app::error::ErrorResponse;
 use crate::plugin::types::{LocalizedText, Permission, PluginCapability, ScraperCapabilities};
 use serde::{Deserialize, Serialize};
 
@@ -36,7 +37,7 @@ pub struct PluginInfoResponse {
     /// Plugin state (loading, loaded, active, unloading, unloaded, failed)
     pub state: String,
     /// Plugin load error, available when state is failed
-    pub error: Option<String>,
+    pub error: Option<ErrorResponse>,
     /// Plugin statistics
     pub stats: Option<PluginStatsResponse>,
     /// Configuration schema (JSON Schema format)
@@ -119,7 +120,7 @@ pub struct PluginDetailResponse {
     /// Plugin state
     pub state: String,
     /// Plugin load error, available when state is failed
-    pub error: Option<String>,
+    pub error: Option<ErrorResponse>,
     /// Plugin entry point
     pub entry_point: String,
     /// Plugin dependencies

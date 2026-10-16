@@ -9,6 +9,7 @@ use crate::api::models::{
 use crate::api::require_admin;
 use crate::api::state::AppState;
 use crate::auth::middleware::AuthUser;
+use crate::core::app::error::InputErrorKind;
 use crate::core::app::error::{Result, TingError};
 use crate::plugin::installer::confirmation::inspect_install_confirmation;
 use crate::plugin::installer::tr_package;
@@ -43,39 +44,60 @@ pub async fn install_plugin(
     let mut accept_unverified = false;
     let mut confirmed_package_sha256 = None;
 
-    while let Some(field) = multipart
-        .next_field()
-        .await
-        .map_err(|e| TingError::InvalidRequest(e.to_string()))?
-    {
+    while let Some(field) = multipart.next_field().await.map_err(|e| {
+        let message = e.to_string();
+        TingError::invalid_request(
+            InputErrorKind::InvalidValue,
+            "install_plugin::invalid_request",
+            message,
+        )
+        .with_source(anyhow::anyhow!(e))
+    })? {
         let field_name = field.name().map(ToOwned::to_owned);
         if field_name.as_deref() == Some("file") {
-            let data = field
-                .bytes()
-                .await
-                .map_err(|e| TingError::InvalidRequest(e.to_string()))?;
+            let data = field.bytes().await.map_err(|e| {
+                let message = e.to_string();
+                TingError::invalid_request(
+                    InputErrorKind::InvalidValue,
+                    "install_plugin::invalid_request",
+                    message,
+                )
+                .with_source(anyhow::anyhow!(e))
+            })?;
             tokio::fs::write(&temp_path, data)
                 .await
                 .map_err(TingError::IoError)?;
             file_saved = true;
         } else if field_name.as_deref() == Some("accept_unverified") {
-            let value = field
-                .text()
-                .await
-                .map_err(|e| TingError::InvalidRequest(e.to_string()))?;
+            let value = field.text().await.map_err(|e| {
+                let message = e.to_string();
+                TingError::invalid_request(
+                    InputErrorKind::InvalidValue,
+                    "install_plugin::invalid_request",
+                    message,
+                )
+                .with_source(anyhow::anyhow!(e))
+            })?;
             accept_unverified = matches!(value.trim(), "true" | "1" | "yes" | "on");
         } else if field_name.as_deref() == Some("confirmed_package_sha256") {
-            confirmed_package_sha256 = Some(
-                field
-                    .text()
-                    .await
-                    .map_err(|error| TingError::InvalidRequest(error.to_string()))?,
-            );
+            confirmed_package_sha256 = Some(field.text().await.map_err(|error| {
+                let message = error.to_string();
+                TingError::invalid_request(
+                    InputErrorKind::InvalidValue,
+                    "install_plugin::invalid_request",
+                    message,
+                )
+                .with_source(anyhow::anyhow!(error))
+            })?);
         }
     }
 
     if !file_saved {
-        return Err(TingError::InvalidRequest("No file uploaded".to_string()));
+        return Err(TingError::invalid_request(
+            InputErrorKind::InvalidValue,
+            "install_plugin::invalid_request",
+            "No file uploaded".to_string(),
+        ));
     }
 
     install_reviewed_package(

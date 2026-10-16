@@ -1,3 +1,4 @@
+use crate::core::app::error::{InputErrorKind, LookupErrorKind};
 use crate::core::books::metadata::{MetadataChange, MetadataPatch};
 
 use crate::api::models::{BookResponse, ScrapeApplyRequest, ScrapeDiffRequest, ScrapeDiffResponse};
@@ -20,11 +21,13 @@ pub async fn scrape_book_diff(
 ) -> Result<impl IntoResponse> {
     crate::api::require_admin(&user)?;
 
-    let existing_book = state
-        .book_repo
-        .find_by_id(&id)
-        .await?
-        .ok_or_else(|| TingError::NotFound(format!("Book with id {} not found", id)))?;
+    let existing_book = state.book_repo.find_by_id(&id).await?.ok_or_else(|| {
+        TingError::not_found(
+            LookupErrorKind::Book,
+            "scrape_book_diff::not_found",
+            format!("Book with id {} not found", id),
+        )
+    })?;
 
     // 1. Get Library Config
     let library = state
@@ -32,10 +35,11 @@ pub async fn scrape_book_diff(
         .find_by_id(&existing_book.library_id)
         .await?
         .ok_or_else(|| {
-            TingError::NotFound(format!(
-                "Library with id {} not found",
-                existing_book.library_id
-            ))
+            TingError::not_found(
+                LookupErrorKind::Book,
+                "scrape_book_diff::not_found",
+                format!("Library with id {} not found", existing_book.library_id),
+            )
         })?;
 
     let config: ScraperConfig = if let Some(json) = &library.scraper_config {
@@ -66,7 +70,9 @@ pub async fn scrape_book_diff(
     let primary_source_id = match primary_source_id {
         Some(s) => s,
         None => {
-            return Err(TingError::PluginNotFound(
+            return Err(TingError::plugin_not_found(
+                LookupErrorKind::Plugin,
+                "scrape_book_diff::plugin_not_found",
                 "No active scraper plugins found".to_string(),
             ));
         }
@@ -87,7 +93,9 @@ pub async fn scrape_book_diff(
         .await?;
 
     if search_results.items.is_empty() {
-        return Err(TingError::NotFound(
+        return Err(TingError::not_found(
+            LookupErrorKind::Book,
+            "scrape_book_diff::not_found",
             "No matching book found in scrapers".to_string(),
         ));
     }
@@ -290,11 +298,13 @@ pub async fn apply_scrape_result(
 ) -> Result<impl IntoResponse> {
     crate::api::require_admin(&user)?;
 
-    let mut book = state
-        .book_repo
-        .find_by_id(&id)
-        .await?
-        .ok_or_else(|| TingError::NotFound(format!("Book with id {} not found", id)))?;
+    let mut book = state.book_repo.find_by_id(&id).await?.ok_or_else(|| {
+        TingError::not_found(
+            LookupErrorKind::Book,
+            "apply_scrape_result::not_found",
+            format!("Book with id {} not found", id),
+        )
+    })?;
 
     if let Some(fields) = &req.fields {
         let mut extended = MetadataPatch::default();
@@ -409,7 +419,9 @@ pub async fn apply_scrape_result(
 
     if req.apply_metadata {
         let detail = req.metadata.as_ref().ok_or_else(|| {
-            TingError::ValidationError(
+            TingError::validation(
+                InputErrorKind::MissingField,
+                "apply_scrape_result::validation",
                 "metadata is required when apply_metadata is true".to_string(),
             )
         })?;

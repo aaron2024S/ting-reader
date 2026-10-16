@@ -1,4 +1,7 @@
 use super::{Task, TaskPayload, TaskQueue};
+use crate::core::app::error::{
+    AccessErrorKind, InputErrorKind, LookupErrorKind, NetworkErrorKind, TaskErrorKind,
+};
 use crate::core::app::error::{Result, TingError};
 use crate::core::audio::metadata::AudioMetadataUpdate;
 use crate::db::repository::Repository;
@@ -19,7 +22,9 @@ impl TaskQueue {
         match &task.payload {
             TaskPayload::ScraperSearch { plugin_id, query } => {
                 let scraper_service = self.scraper_service.as_ref().ok_or_else(|| {
-                    crate::core::app::error::TingError::TaskError(
+                    crate::core::app::error::TingError::task(
+                        TaskErrorKind::Unavailable,
+                        "run_task::task",
                         "Scraper service not configured".to_string(),
                     )
                 })?;
@@ -37,7 +42,9 @@ impl TaskQueue {
                 params,
             } => {
                 let plugin_manager = self.plugin_manager.as_ref().ok_or_else(|| {
-                    crate::core::app::error::TingError::TaskError(
+                    crate::core::app::error::TingError::task(
+                        TaskErrorKind::Unavailable,
+                        "run_task::task",
                         "Plugin manager not configured".to_string(),
                     )
                 })?;
@@ -85,7 +92,9 @@ impl TaskQueue {
         task_id: &str,
     ) -> Result<()> {
         let plugin_manager = self.plugin_manager.as_ref().ok_or_else(|| {
-            crate::core::app::error::TingError::TaskError(
+            crate::core::app::error::TingError::task(
+                TaskErrorKind::Unavailable,
+                "handle_plugin_task::task",
                 "Plugin manager not configured".to_string(),
             )
         })?;
@@ -98,10 +107,11 @@ impl TaskQueue {
             .find(|handler| owner.is_none_or(|owner| handler.registration.plugin_id == owner))
         else {
             warn!(task_type = %task_type, "Unknown task type");
-            return Err(crate::core::app::error::TingError::TaskError(format!(
-                "Unknown task type: {}",
-                task_type
-            )));
+            return Err(crate::core::app::error::TingError::task(
+                TaskErrorKind::Execution,
+                "handle_plugin_task::task",
+                format!("Unknown task type: {}", task_type),
+            ));
         };
 
         info!(
@@ -137,10 +147,18 @@ impl TaskQueue {
     /// Handle library scan task
     async fn handle_library_scan(&self, data: &serde_json::Value, task_id: &str) -> Result<()> {
         let library_id = data["library_id"].as_str().ok_or_else(|| {
-            crate::core::app::error::TingError::TaskError("Missing library_id".to_string())
+            crate::core::app::error::TingError::task(
+                TaskErrorKind::Unavailable,
+                "handle_library_scan::task",
+                "Missing library_id".to_string(),
+            )
         })?;
         let library_path = data["library_path"].as_str().ok_or_else(|| {
-            crate::core::app::error::TingError::TaskError("Missing library_path".to_string())
+            crate::core::app::error::TingError::task(
+                TaskErrorKind::Unavailable,
+                "handle_library_scan::task",
+                "Missing library_path".to_string(),
+            )
         })?;
         let scan_mode = data["mode"]
             .as_str()
@@ -163,46 +181,67 @@ impl TaskQueue {
 
         // Get repositories
         let book_repo = self.book_repo.as_ref().ok_or_else(|| {
-            crate::core::app::error::TingError::TaskError(
+            crate::core::app::error::TingError::task(
+                TaskErrorKind::Unavailable,
+                "handle_library_scan::task",
                 "Book repository not configured".to_string(),
             )
         })?;
         let chapter_repo = self.chapter_repo.as_ref().ok_or_else(|| {
-            crate::core::app::error::TingError::TaskError(
+            crate::core::app::error::TingError::task(
+                TaskErrorKind::Unavailable,
+                "handle_library_scan::task",
                 "Chapter repository not configured".to_string(),
             )
         })?;
         let series_repo = self.series_repo.as_ref().ok_or_else(|| {
-            crate::core::app::error::TingError::TaskError(
+            crate::core::app::error::TingError::task(
+                TaskErrorKind::Unavailable,
+                "handle_library_scan::task",
                 "Series repository not configured".to_string(),
             )
         })?;
         let library_repo = self.library_repo.as_ref().ok_or_else(|| {
-            crate::core::app::error::TingError::TaskError(
+            crate::core::app::error::TingError::task(
+                TaskErrorKind::Unavailable,
+                "handle_library_scan::task",
                 "Library repository not configured".to_string(),
             )
         })?;
         let library = library_repo.find_by_id(library_id).await?.ok_or_else(|| {
-            crate::core::app::error::TingError::NotFound(format!(
-                "Library {} not found",
-                library_id
-            ))
+            crate::core::app::error::TingError::not_found(
+                LookupErrorKind::Library,
+                "handle_library_scan::not_found",
+                format!("Library {} not found", library_id),
+            )
         })?;
 
         // Get services
         let text_cleaner = self.text_cleaner.as_ref().ok_or_else(|| {
-            crate::core::app::error::TingError::TaskError("Text cleaner not configured".to_string())
+            crate::core::app::error::TingError::task(
+                TaskErrorKind::Unavailable,
+                "handle_library_scan::task",
+                "Text cleaner not configured".to_string(),
+            )
         })?;
         let nfo_manager = self.nfo_manager.as_ref().ok_or_else(|| {
-            crate::core::app::error::TingError::TaskError("NFO manager not configured".to_string())
+            crate::core::app::error::TingError::task(
+                TaskErrorKind::Unavailable,
+                "handle_library_scan::task",
+                "NFO manager not configured".to_string(),
+            )
         })?;
         let audio_streamer = self.audio_streamer.as_ref().ok_or_else(|| {
-            crate::core::app::error::TingError::TaskError(
+            crate::core::app::error::TingError::task(
+                TaskErrorKind::Unavailable,
+                "handle_library_scan::task",
                 "Audio streamer not configured".to_string(),
             )
         })?;
         let plugin_manager = self.plugin_manager.as_ref().ok_or_else(|| {
-            crate::core::app::error::TingError::TaskError(
+            crate::core::app::error::TingError::task(
+                TaskErrorKind::Unavailable,
+                "handle_library_scan::task",
                 "Plugin manager not configured".to_string(),
             )
         })?;
@@ -329,38 +368,51 @@ impl TaskQueue {
     /// Handle write metadata task
     async fn handle_write_metadata(&self, data: &serde_json::Value, task_id: &str) -> Result<()> {
         let book_id = data["book_id"].as_str().ok_or_else(|| {
-            crate::core::app::error::TingError::TaskError("Missing book_id".to_string())
+            crate::core::app::error::TingError::task(
+                TaskErrorKind::Unavailable,
+                "handle_write_metadata::task",
+                "Missing book_id".to_string(),
+            )
         })?;
 
         info!(book_id = %book_id, "Handling write metadata task");
 
         // Get repositories
         let book_repo = self.book_repo.as_ref().ok_or_else(|| {
-            crate::core::app::error::TingError::TaskError(
+            crate::core::app::error::TingError::task(
+                TaskErrorKind::Unavailable,
+                "handle_write_metadata::task",
                 "Book repository not configured".to_string(),
             )
         })?;
         let library_repo = self.library_repo.as_ref().ok_or_else(|| {
-            crate::core::app::error::TingError::TaskError(
+            crate::core::app::error::TingError::task(
+                TaskErrorKind::Unavailable,
+                "handle_write_metadata::task",
                 "Library repository not configured".to_string(),
             )
         })?;
         let chapter_repo = self.chapter_repo.as_ref().ok_or_else(|| {
-            crate::core::app::error::TingError::TaskError(
+            crate::core::app::error::TingError::task(
+                TaskErrorKind::Unavailable,
+                "handle_write_metadata::task",
                 "Chapter repository not configured".to_string(),
             )
         })?;
         let plugin_manager = self.plugin_manager.as_ref().ok_or_else(|| {
-            crate::core::app::error::TingError::TaskError(
+            crate::core::app::error::TingError::task(
+                TaskErrorKind::Unavailable,
+                "handle_write_metadata::task",
                 "Plugin manager not configured".to_string(),
             )
         })?;
 
         let book = book_repo.find_by_id(book_id).await?.ok_or_else(|| {
-            crate::core::app::error::TingError::NotFound(format!(
-                "Book with id {} not found",
-                book_id
-            ))
+            crate::core::app::error::TingError::not_found(
+                LookupErrorKind::Book,
+                "handle_write_metadata::not_found",
+                format!("Book with id {} not found", book_id),
+            )
         })?;
 
         // Recheck the setting when executing a previously queued task.
@@ -368,21 +420,28 @@ impl TaskQueue {
             .find_by_id(&book.library_id)
             .await?
             .ok_or_else(|| {
-                crate::core::app::error::TingError::NotFound(format!(
-                    "Library with id {} not found",
-                    book.library_id
-                ))
+                crate::core::app::error::TingError::not_found(
+                    LookupErrorKind::Book,
+                    "handle_write_metadata::not_found",
+                    format!("Library with id {} not found", book.library_id),
+                )
             })?;
 
         if !library.can_write_metadata_files() {
-            return Err(TingError::InvalidRequest(
+            return Err(TingError::invalid_request(
+                InputErrorKind::InvalidValue,
+                "handle_write_metadata::invalid_request",
                 "Metadata file writing is disabled for this library".to_string(),
             ));
         }
         let remote = library.library_type == "webdav";
         let storage = if remote {
             Some(self.storage_service.as_ref().ok_or_else(|| {
-                TingError::TaskError("WebDAV storage service is not configured".into())
+                TingError::task(
+                    TaskErrorKind::Unavailable,
+                    "handle_write_metadata::task",
+                    "WebDAV storage service is not configured".into(),
+                )
             })?)
         } else {
             None
@@ -426,7 +485,15 @@ impl TaskQueue {
                     let client = reqwest::Client::builder()
                         .timeout(std::time::Duration::from_secs(30))
                         .build()
-                        .map_err(|error| TingError::NetworkError(error.to_string()))?;
+                        .map_err(|error| {
+                            let message = error.to_string();
+                            TingError::network(
+                                NetworkErrorKind::Transport,
+                                "handle_write_metadata::network",
+                                message,
+                            )
+                            .with_source(anyhow::anyhow!(error))
+                        })?;
                     let mut req = client.get(&fetch_url).header(
                         reqwest::header::USER_AGENT,
                         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -439,16 +506,30 @@ impl TaskQueue {
                         .send()
                         .await
                         .and_then(reqwest::Response::error_for_status)
-                        .map_err(|error| TingError::NetworkError(error.to_string()))?;
+                        .map_err(|error| {
+                            let message = error.to_string();
+                            TingError::network(
+                                NetworkErrorKind::Transport,
+                                "handle_write_metadata::network",
+                                message,
+                            )
+                            .with_source(anyhow::anyhow!(error))
+                        })?;
                     let mut bytes = Vec::new();
-                    while let Some(chunk) = response
-                        .chunk()
-                        .await
-                        .map_err(|error| TingError::NetworkError(error.to_string()))?
-                    {
+                    while let Some(chunk) = response.chunk().await.map_err(|error| {
+                        let message = error.to_string();
+                        TingError::network(
+                            NetworkErrorKind::Transport,
+                            "handle_write_metadata::network",
+                            message,
+                        )
+                        .with_source(anyhow::anyhow!(error))
+                    })? {
                         if bytes.len() + chunk.len() > crate::core::audio::metadata::MAX_COVER_BYTES
                         {
-                            return Err(TingError::InvalidRequest(
+                            return Err(TingError::invalid_request(
+                                InputErrorKind::OutOfRange,
+                                "handle_write_metadata::invalid_request",
                                 "Metadata cover is too large".into(),
                             ));
                         }
@@ -460,7 +541,11 @@ impl TaskQueue {
                         Ok::<_, TingError>(temporary)
                     })
                     .await
-                    .map_err(|error| TingError::TaskError(error.to_string()))??;
+                    .map_err(|error| {
+                        let message = error.to_string();
+                        TingError::task(TaskErrorKind::Join, "handle_write_metadata::task", message)
+                            .with_source(anyhow::anyhow!(error))
+                    })??;
                     cover_path_str = Some(temporary.0.to_string_lossy().to_string());
                     temp_cover_path = Some(temporary);
                 }
@@ -502,7 +587,9 @@ impl TaskQueue {
                 .await?
                 .is_some_and(|task| task.status == "cancelled")
             {
-                return Err(TingError::TaskError(
+                return Err(TingError::task(
+                    TaskErrorKind::InvalidState,
+                    "handle_write_metadata::task",
                     "Metadata writing was cancelled".into(),
                 ));
             }
@@ -549,7 +636,9 @@ impl TaskQueue {
                     let mut file = tokio::fs::File::create(&temporary.0).await?;
                     let copied = tokio::io::copy(&mut reader, &mut file).await?;
                     if source.length > 0 && copied != source.length {
-                        return Err(TingError::NetworkError(
+                        return Err(TingError::network(
+                            NetworkErrorKind::Transport,
+                            "handle_write_metadata::network",
                             "Incomplete WebDAV audio download".into(),
                         ));
                     }
@@ -680,10 +769,16 @@ impl TaskQueue {
                 // take effect before committing anything to the drive.
                 let commit = async {
                     let current = library_repo.find_by_id(&library.id).await?.ok_or_else(|| {
-                        TingError::NotFound("WebDAV library no longer exists".into())
+                        TingError::not_found(
+                            LookupErrorKind::Library,
+                            "handle_write_metadata::not_found",
+                            "WebDAV library no longer exists".into(),
+                        )
                     })?;
                     if !current.can_write_metadata_files() {
-                        return Err(TingError::PermissionDenied(
+                        return Err(TingError::permission(
+                            AccessErrorKind::ResourceDenied,
+                            "handle_write_metadata::permission",
                             "WebDAV metadata writing has been disabled".into(),
                         ));
                     }
@@ -693,7 +788,9 @@ impl TaskQueue {
                         .await?
                         .is_some_and(|task| task.status == "cancelled")
                     {
-                        return Err(TingError::TaskError(
+                        return Err(TingError::task(
+                            TaskErrorKind::InvalidState,
+                            "handle_write_metadata::task",
                             "Metadata writing was cancelled".into(),
                         ));
                     }
@@ -752,9 +849,13 @@ impl TaskQueue {
         );
 
         if error_count > 0 {
-            return Err(TingError::TaskError(format!(
-                "Audio metadata writing: {success_count} succeeded, {error_count} failed, {skipped_count} skipped"
-            )));
+            return Err(TingError::task(
+                TaskErrorKind::Execution,
+                "handle_write_metadata::task",
+                format!(
+                    "Audio metadata writing: {success_count} succeeded, {error_count} failed, {skipped_count} skipped"
+                ),
+            ));
         }
         Ok(())
     }

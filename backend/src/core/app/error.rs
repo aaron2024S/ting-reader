@@ -1,10 +1,4 @@
-//! Error type system for Ting Reader
-//!
-//! This module provides a comprehensive error type system with:
-//! - Hierarchical error classification
-//! - Error context and chaining support
-//! - HTTP status code mapping
-//! - Detailed error messages with trace IDs
+//! Typed domain failures, owned error chains, and their HTTP presentation.
 
 use axum::{
     Json,
@@ -13,220 +7,405 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use ting_plugin_contract::protocol::{PluginError, PluginErrorCode};
 use uuid::Uuid;
 
-/// Main error type for the Ting Reader system
+tokio::task_local! {
+    pub(crate) static REQUEST_TRACE_ID: String;
+}
+
+fn response_trace_id() -> String {
+    REQUEST_TRACE_ID
+        .try_with(Clone::clone)
+        .unwrap_or_else(|_| Uuid::new_v4().to_string())
+}
+
+macro_rules! error_reasons {
+    ($($name:ident { $($variant:ident),+ $(,)? })+) => {$(
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+        #[serde(rename_all = "snake_case")]
+        pub enum $name { $($variant),+ }
+    )+};
+}
+
+error_reasons! {
+    SystemErrorKind { Initialization }
+    ConfigurationErrorKind { Missing, InvalidValue, Persistence, Synchronization, Encoding }
+    LookupErrorKind { Plugin, Book, Chapter, Bookmark, Library, Series, Playlist, User, Task, Session, File, Resource }
+    PluginErrorKind { Synchronization, AbiMismatch, InvalidManifest, Dependency, Cancelled, Unavailable, UnsupportedOperation, InvalidOutput, Communication, Loading, Runtime }
+    DependencyErrorKind { Cycle, VersionMismatch, Conflict, Missing }
+    InputErrorKind { MissingField, UnsupportedValue, OutOfRange, Conflict, InvalidPath, InvalidFormat, InvalidValue }
+    AuthenticationErrorKind { PasswordProcessing, UserNotFound, MissingCredentials, ExpiredCredentials, TokenCreation, InvalidCredentials }
+    AccessErrorKind { UserRequired, CapabilityDenied, AdministratorRequired, OwnershipMismatch, ResourceDenied }
+    SecurityErrorKind { PathEscape, Integrity, NetworkTarget, InvalidIdentity }
+    LimitErrorKind { Memory, Execution, Concurrency, Handles, Payload }
+    DeadlineErrorKind { Cancelled, Elapsed }
+    NetworkErrorKind { HttpStatus, Redirect, InvalidResponse, Transport }
+    CodecErrorKind { InvalidData }
+    TaskErrorKind { Join, Unavailable, InvalidState, Execution, Unclassified }
+    EventErrorKind { Delivery }
+    ExternalErrorKind { Process, Unavailable, Response }
+}
+
+/// The reason controls behavior; the message is only a diagnostic description.
+#[derive(Debug)]
+pub struct Failure<R> {
+    pub reason: R,
+    pub operation: &'static str,
+    pub message: String,
+    pub resource: Option<ErrorResource>,
+    source: Option<anyhow::Error>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ErrorResource {
+    pub kind: LookupErrorKind,
+    pub id: String,
+}
+
+impl<R> Failure<R> {
+    fn new(reason: R, operation: &'static str, message: String) -> Self {
+        Self {
+            reason,
+            operation,
+            message,
+            resource: None,
+            source: None,
+        }
+    }
+}
+
+impl<R> fmt::Display for Failure<R> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl<R> std::ops::Deref for Failure<R> {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        &self.message
+    }
+}
+
+impl<R> AsRef<str> for Failure<R> {
+    fn as_ref(&self) -> &str {
+        &self.message
+    }
+}
+
+impl<R: fmt::Debug> std::error::Error for Failure<R> {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.source.as_ref().map(|error| error.as_ref())
+    }
+}
+
+/// An error's domain is independent of its display text and attached context.
 #[derive(Debug, thiserror::Error)]
 pub enum TingError {
+    #[error("{0}")]
+    Shared(#[source] std::sync::Arc<TingError>),
     #[error("{context}: {source}")]
     Context {
         context: String,
         #[source]
         source: Box<TingError>,
     },
-    // System-level errors
     #[error("System initialization failed: {0}")]
-    InitializationError(String),
-
+    InitializationError(#[source] Failure<SystemErrorKind>),
     #[error("Configuration error: {0}")]
-    ConfigError(String),
-
+    ConfigError(#[source] Failure<ConfigurationErrorKind>),
     #[error("Database error: {0}")]
     DatabaseError(#[from] rusqlite::Error),
-
-    // Plugin-related errors
     #[error("Plugin not found: {0}")]
-    PluginNotFound(String),
-
+    PluginNotFound(#[source] Failure<LookupErrorKind>),
     #[error("Plugin load failed: {0}")]
-    PluginLoadError(String),
-
+    PluginLoadError(#[source] Failure<PluginErrorKind>),
     #[error("Plugin execution error: {0}")]
-    PluginExecutionError(String),
-
+    PluginExecutionError(#[source] Failure<PluginErrorKind>),
     #[error("Plugin execution error: {0}")]
-    LoggedPluginExecutionError(String),
-
+    LoggedPluginExecutionError(#[source] Failure<PluginErrorKind>),
+    #[error("Plugin execution error: {}", .0.message)]
+    PluginReported(Box<PluginError>),
     #[error("Plugin dependency error: {0}")]
-    DependencyError(String),
-
-    // API-related errors
+    DependencyError(#[source] Failure<DependencyErrorKind>),
     #[error("Invalid request: {0}")]
-    InvalidRequest(String),
-
+    InvalidRequest(#[source] Failure<InputErrorKind>),
     #[error("Authentication failed: {0}")]
-    AuthenticationError(String),
-
+    AuthenticationError(#[source] Failure<AuthenticationErrorKind>),
     #[error("Resource not found: {0}")]
-    NotFound(String),
-
-    // Security-related errors
+    NotFound(#[source] Failure<LookupErrorKind>),
     #[error("Permission denied: {0}")]
-    PermissionDenied(String),
-
+    PermissionDenied(#[source] Failure<AccessErrorKind>),
     #[error("Security violation: {0}")]
-    SecurityViolation(String),
-
-    // Resource-related errors
+    SecurityViolation(#[source] Failure<SecurityErrorKind>),
     #[error("Resource limit exceeded: {0}")]
-    ResourceLimitExceeded(String),
-
+    ResourceLimitExceeded(#[source] Failure<LimitErrorKind>),
     #[error("Timeout: {0}")]
-    Timeout(String),
-
-    // I/O errors
+    Timeout(#[source] Failure<DeadlineErrorKind>),
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
-
     #[error("Network error: {0}")]
-    NetworkError(String),
-
+    NetworkError(#[source] Failure<NetworkErrorKind>),
     #[error("Network error: {0}")]
     NetworkFailure(#[source] Box<reqwest::Error>),
-
-    // Serialization errors
     #[error("Serialization error: {0}")]
-    SerializationError(String),
-
+    SerializationError(#[source] Failure<CodecErrorKind>),
     #[error("Deserialization error: {0}")]
-    DeserializationError(String),
-
+    DeserializationError(#[source] Failure<CodecErrorKind>),
     #[error("Validation error: {0}")]
-    ValidationError(String),
-
-    // Task queue errors
+    ValidationError(#[source] Failure<InputErrorKind>),
     #[error("Task error: {0}")]
-    TaskError(String),
-
-    // Event bus errors
+    TaskError(#[source] Failure<TaskErrorKind>),
     #[error("Event error: {0}")]
-    EventError(String),
-
+    EventError(#[source] Failure<EventErrorKind>),
     #[error("External tool error: {0}")]
-    ExternalError(String),
-
+    ExternalError(#[source] Failure<ExternalErrorKind>),
     #[error("External service error: {0}")]
-    ExternalServiceError(String),
+    ExternalServiceError(#[source] Failure<ExternalErrorKind>),
+}
+
+macro_rules! failure_constructors {
+    ($($method:ident => $variant:ident($kind:ty)),+ $(,)?) => {
+        impl TingError {
+            $(pub fn $method(reason: $kind, operation: &'static str, message: String) -> Self {
+                Self::$variant(Failure::new(reason, operation, message))
+            })+
+
+            /// Attach an owned cause, retaining its concrete type for downcasting.
+            pub fn with_source(self, source: anyhow::Error) -> Self {
+                let source = match source.downcast::<reqwest::Error>() {
+                    Ok(error) => anyhow::Error::new(error.without_url()),
+                    Err(error) => error,
+                };
+                match self {
+                    $(Self::$variant(mut failure) => {
+                        failure.source = Some(source);
+                        Self::$variant(failure)
+                    },)+
+                    Self::LoggedPluginExecutionError(mut failure) => {
+                        failure.source = Some(source);
+                        Self::LoggedPluginExecutionError(failure)
+                    }
+                    Self::Context { context, source: inner } => Self::Context {
+                        context, source: Box::new(inner.with_source(source)),
+                    },
+                    error => error,
+                }
+            }
+
+            pub fn with_resource(self, kind: LookupErrorKind, id: impl Into<String>) -> Self {
+                let resource = ErrorResource { kind, id: id.into() };
+                match self {
+                    $(Self::$variant(mut failure) => {
+                        failure.resource = Some(resource);
+                        Self::$variant(failure)
+                    },)+
+                    Self::LoggedPluginExecutionError(mut failure) => {
+                        failure.resource = Some(resource);
+                        Self::LoggedPluginExecutionError(failure)
+                    }
+                    Self::Context { context, source } => Self::Context {
+                        context, source: Box::new(source.with_resource(resource.kind, resource.id)),
+                    },
+                    error => error,
+                }
+            }
+
+            /// Export classification, never the raw source chain or plugin details.
+            pub fn diagnostic_details(&self) -> serde_json::Value {
+                let mut details = match self.root_error() {
+                    $(Self::$variant(failure) => serde_json::json!({
+                        "reason": failure.reason,
+                        "operation": failure.operation,
+                        "resource": failure.resource,
+                    }),)+
+                    Self::LoggedPluginExecutionError(failure) => serde_json::json!({
+                        "reason": failure.reason, "operation": failure.operation, "resource": failure.resource,
+                    }),
+                    Self::PluginReported(error) => serde_json::json!({
+                        "reason": error.code, "operation": error.operation,
+                        "resource": { "kind": "plugin", "id": error.plugin_id },
+                        "capability_id": error.capability_id,
+                    }),
+                    Self::DatabaseError(_) => serde_json::json!({ "reason": "database" }),
+                    Self::IoError(error) => serde_json::json!({ "reason": format!("{:?}", error.kind()) }),
+                    Self::NetworkFailure(_) => serde_json::json!({ "reason": "transport" }),
+                    Self::Context { .. } | Self::Shared(_) => unreachable!("root_error unwraps wrappers"),
+                };
+                details["context"] = serde_json::json!(self.context_chain());
+                details["retryable"] = serde_json::json!(self.is_retryable());
+                details
+            }
+        }
+    };
+}
+
+failure_constructors! {
+    initialization => InitializationError(SystemErrorKind),
+    configuration => ConfigError(ConfigurationErrorKind),
+    plugin_not_found => PluginNotFound(LookupErrorKind),
+    plugin_load => PluginLoadError(PluginErrorKind),
+    plugin_execution => PluginExecutionError(PluginErrorKind),
+    dependency => DependencyError(DependencyErrorKind),
+    invalid_request => InvalidRequest(InputErrorKind),
+    authentication => AuthenticationError(AuthenticationErrorKind),
+    not_found => NotFound(LookupErrorKind),
+    permission => PermissionDenied(AccessErrorKind),
+    security => SecurityViolation(SecurityErrorKind),
+    resource_limit => ResourceLimitExceeded(LimitErrorKind),
+    timeout => Timeout(DeadlineErrorKind),
+    network => NetworkError(NetworkErrorKind),
+    serialization => SerializationError(CodecErrorKind),
+    deserialization => DeserializationError(CodecErrorKind),
+    validation => ValidationError(InputErrorKind),
+    task => TaskError(TaskErrorKind),
+    event => EventError(EventErrorKind),
+    external_tool => ExternalError(ExternalErrorKind),
+    external_service => ExternalServiceError(ExternalErrorKind),
 }
 
 impl TingError {
-    /// Get the HTTP status code for this error
-    pub fn status_code(&self) -> StatusCode {
-        match self {
-            TingError::Context { source, .. } => source.status_code(),
-            // 400 Bad Request
-            TingError::InvalidRequest(_)
-            | TingError::SerializationError(_)
-            | TingError::DeserializationError(_)
-            | TingError::ValidationError(_) => StatusCode::BAD_REQUEST,
-
-            // 401 Unauthorized
-            TingError::AuthenticationError(_) => StatusCode::UNAUTHORIZED,
-
-            // 403 Forbidden
-            TingError::PermissionDenied(_) | TingError::SecurityViolation(_) => {
-                StatusCode::FORBIDDEN
+    /// Classification shared by Host transports; context never changes a code.
+    pub fn plugin_error_code(&self) -> PluginErrorCode {
+        match self.root_error() {
+            Self::PluginReported(error) => error.code,
+            Self::InvalidRequest(_) | Self::ValidationError(_) => PluginErrorCode::InvalidInput,
+            Self::AuthenticationError(_)
+            | Self::PermissionDenied(_)
+            | Self::SecurityViolation(_) => PluginErrorCode::PermissionDenied,
+            Self::NotFound(_) | Self::PluginNotFound(_) => PluginErrorCode::NotFound,
+            Self::ResourceLimitExceeded(_) => PluginErrorCode::ResourceLimit,
+            Self::Timeout(failure) if failure.reason == DeadlineErrorKind::Cancelled => {
+                PluginErrorCode::Cancelled
             }
-
-            // 404 Not Found
-            TingError::NotFound(_) | TingError::PluginNotFound(_) => StatusCode::NOT_FOUND,
-
-            // 408 Request Timeout
-            TingError::Timeout(_) => StatusCode::REQUEST_TIMEOUT,
-
-            // 429 Too Many Requests
-            TingError::ResourceLimitExceeded(_) => StatusCode::TOO_MANY_REQUESTS,
-
-            // 500 Internal Server Error
-            TingError::InitializationError(_)
-            | TingError::ConfigError(_)
-            | TingError::DatabaseError(_)
-            | TingError::PluginLoadError(_)
-            | TingError::PluginExecutionError(_)
-            | TingError::LoggedPluginExecutionError(_)
-            | TingError::DependencyError(_)
-            | TingError::IoError(_)
-            | TingError::NetworkError(_)
-            | TingError::NetworkFailure(_)
-            | TingError::TaskError(_)
-            | TingError::EventError(_)
-            | TingError::ExternalError(_)
-            | TingError::ExternalServiceError(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::Timeout(_) => PluginErrorCode::Timeout,
+            Self::NetworkError(_) | Self::NetworkFailure(_) => PluginErrorCode::NetworkError,
+            Self::SerializationError(_) | Self::DeserializationError(_) => {
+                PluginErrorCode::ParseError
+            }
+            Self::DependencyError(_) => PluginErrorCode::DependencyError,
+            Self::PluginLoadError(failure)
+            | Self::PluginExecutionError(failure)
+            | Self::LoggedPluginExecutionError(failure) => match failure.reason {
+                PluginErrorKind::Cancelled => PluginErrorCode::Cancelled,
+                PluginErrorKind::Unavailable => PluginErrorCode::PluginUnavailable,
+                PluginErrorKind::UnsupportedOperation => PluginErrorCode::UnsupportedOperation,
+                PluginErrorKind::InvalidManifest => PluginErrorCode::InvalidManifest,
+                PluginErrorKind::InvalidOutput => PluginErrorCode::InvalidOutput,
+                PluginErrorKind::AbiMismatch => PluginErrorCode::AbiMismatch,
+                PluginErrorKind::Dependency => PluginErrorCode::DependencyError,
+                _ => PluginErrorCode::InternalError,
+            },
+            _ => PluginErrorCode::InternalError,
         }
     }
 
-    /// Get the error type name for API responses
+    pub fn status_code(&self) -> StatusCode {
+        match self.root_error() {
+            Self::InvalidRequest(_)
+            | Self::SerializationError(_)
+            | Self::DeserializationError(_)
+            | Self::ValidationError(_) => StatusCode::BAD_REQUEST,
+            Self::AuthenticationError(_) => StatusCode::UNAUTHORIZED,
+            Self::PermissionDenied(_) | Self::SecurityViolation(_) => StatusCode::FORBIDDEN,
+            Self::NotFound(_) | Self::PluginNotFound(_) => StatusCode::NOT_FOUND,
+            Self::Timeout(_) => StatusCode::REQUEST_TIMEOUT,
+            Self::ResourceLimitExceeded(_) => StatusCode::TOO_MANY_REQUESTS,
+            Self::PluginReported(error) => {
+                StatusCode::from_u16(error.http_status(false)).unwrap_or(StatusCode::BAD_GATEWAY)
+            }
+            _ => StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+
+    /// Stable names retained in the REST response's `error` field.
     pub fn error_type(&self) -> &'static str {
-        match self {
-            TingError::Context { source, .. } => source.error_type(),
-            TingError::InitializationError(_) => "InitializationError",
-            TingError::ConfigError(_) => "ConfigError",
-            TingError::DatabaseError(_) => "DatabaseError",
-            TingError::PluginNotFound(_) => "PluginNotFound",
-            TingError::PluginLoadError(_) => "PluginLoadError",
-            TingError::PluginExecutionError(_) => "PluginExecutionError",
-            TingError::LoggedPluginExecutionError(_) => "PluginExecutionError",
-            TingError::DependencyError(_) => "DependencyError",
-            TingError::InvalidRequest(_) => "InvalidRequest",
-            TingError::AuthenticationError(_) => "AuthenticationError",
-            TingError::NotFound(_) => "NotFound",
-            TingError::PermissionDenied(_) => "PermissionDenied",
-            TingError::SecurityViolation(_) => "SecurityViolation",
-            TingError::ResourceLimitExceeded(_) => "ResourceLimitExceeded",
-            TingError::Timeout(_) => "Timeout",
-            TingError::IoError(_) => "IoError",
-            TingError::NetworkError(_) => "NetworkError",
-            TingError::NetworkFailure(_) => "NetworkError",
-            TingError::SerializationError(_) => "SerializationError",
-            TingError::DeserializationError(_) => "DeserializationError",
-            TingError::ValidationError(_) => "ValidationError",
-            TingError::TaskError(_) => "TaskError",
-            TingError::EventError(_) => "EventError",
-            TingError::ExternalError(_) => "ExternalError",
-            TingError::ExternalServiceError(_) => "ExternalServiceError",
+        match self.root_error() {
+            Self::InitializationError(_) => "InitializationError",
+            Self::ConfigError(_) => "ConfigError",
+            Self::DatabaseError(_) => "DatabaseError",
+            Self::PluginNotFound(_) => "PluginNotFound",
+            Self::PluginLoadError(_) => "PluginLoadError",
+            Self::PluginExecutionError(_)
+            | Self::LoggedPluginExecutionError(_)
+            | Self::PluginReported(_) => "PluginExecutionError",
+            Self::DependencyError(_) => "DependencyError",
+            Self::InvalidRequest(_) => "InvalidRequest",
+            Self::AuthenticationError(_) => "AuthenticationError",
+            Self::NotFound(_) => "NotFound",
+            Self::PermissionDenied(_) => "PermissionDenied",
+            Self::SecurityViolation(_) => "SecurityViolation",
+            Self::ResourceLimitExceeded(_) => "ResourceLimitExceeded",
+            Self::Timeout(_) => "Timeout",
+            Self::IoError(_) => "IoError",
+            Self::NetworkError(_) | Self::NetworkFailure(_) => "NetworkError",
+            Self::SerializationError(_) => "SerializationError",
+            Self::DeserializationError(_) => "DeserializationError",
+            Self::ValidationError(_) => "ValidationError",
+            Self::TaskError(_) => "TaskError",
+            Self::EventError(_) => "EventError",
+            Self::ExternalError(_) => "ExternalError",
+            Self::ExternalServiceError(_) => "ExternalServiceError",
+            Self::Context { .. } | Self::Shared(_) => unreachable!("root_error unwraps wrappers"),
         }
     }
 
-    /// Check if this error is retryable
     pub fn is_retryable(&self) -> bool {
-        if let TingError::Context { source, .. } = self {
-            return source.is_retryable();
+        match self.root_error() {
+            Self::PluginReported(error) => error.retryable,
+            Self::DatabaseError(rusqlite::Error::SqliteFailure(error, _)) => matches!(
+                error.code,
+                rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+            ),
+            Self::NetworkError(failure) => failure.reason == NetworkErrorKind::Transport,
+            Self::NetworkFailure(error) => error.is_timeout() || error.is_connect(),
+            Self::Timeout(failure) => failure.reason == DeadlineErrorKind::Elapsed,
+            Self::ResourceLimitExceeded(_) => true,
+            _ => false,
         }
-        matches!(
-            self,
-            TingError::DatabaseError(_)
-                | TingError::NetworkError(_)
-                | TingError::NetworkFailure(_)
-                | TingError::Timeout(_)
-                | TingError::ResourceLimitExceeded(_)
-        )
     }
 
     pub fn mark_plugin_execution_logged(self) -> Self {
         match self {
-            TingError::Context { context, source } => TingError::Context {
+            Self::Context { context, source } => Self::Context {
                 context,
                 source: Box::new(source.mark_plugin_execution_logged()),
             },
-            TingError::LoggedPluginExecutionError(_) => self,
-            TingError::PluginExecutionError(message) => {
-                TingError::LoggedPluginExecutionError(message)
-            }
+            Self::PluginExecutionError(failure) => Self::LoggedPluginExecutionError(failure),
             error => error,
         }
     }
 
     pub fn with_plugin_execution_context(self, context: impl AsRef<str>) -> Self {
-        let context = context.as_ref();
-        match self {
-            TingError::LoggedPluginExecutionError(message) => {
-                TingError::LoggedPluginExecutionError(format!("{context}: {message}"))
-            }
-            error => TingError::PluginExecutionError(format!("{context}: {error}")),
-        }
+        self.with_context(context.as_ref().to_owned())
     }
 
-    /// Attach diagnostic information without changing the HTTP/error category.
+    /// Plugin-supplied error identities describe no authority. Bind them to the
+    /// validated call before exposing diagnostics or retaining a failure.
+    pub(crate) fn bind_plugin_error(
+        self,
+        plugin_id: &str,
+        capability_id: &str,
+        operation: &str,
+    ) -> Self {
+        let Self::PluginReported(error) = self.root_error() else {
+            return self;
+        };
+        let mut error = (**error).clone();
+        error.plugin_id = plugin_id.into();
+        error.capability_id = capability_id.into();
+        error.operation = operation.into();
+        error.request_id = Uuid::new_v4().to_string();
+        self.context_chain()
+            .into_iter()
+            .rev()
+            .fold(Self::PluginReported(Box::new(error)), |error, context| {
+                error.with_context(context)
+            })
+    }
+
     pub fn with_context(self, context: impl Into<String>) -> Self {
         Self::Context {
             context: context.into(),
@@ -234,47 +413,48 @@ impl TingError {
         }
     }
 
-    fn root_error(&self) -> &Self {
+    pub fn root_error(&self) -> &Self {
         match self {
             Self::Context { source, .. } => source.root_error(),
+            Self::Shared(source) => source.root_error(),
             error => error,
+        }
+    }
+
+    pub fn context_chain(&self) -> Vec<&str> {
+        match self {
+            Self::Context { context, source } => {
+                let mut contexts = vec![context.as_str()];
+                contexts.extend(source.context_chain());
+                contexts
+            }
+            Self::Shared(source) => source.context_chain(),
+            _ => Vec::new(),
         }
     }
 }
 
 impl From<reqwest::Error> for TingError {
     fn from(error: reqwest::Error) -> Self {
-        // URLs can contain user credentials, tokens and third-party signatures.
         Self::NetworkFailure(Box::new(error.without_url()))
     }
 }
 
-/// Error response structure for API endpoints
-#[derive(Debug, Serialize, Deserialize)]
+/// The REST envelope remains stable; structured classification lives in details.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErrorResponse {
-    /// Error type identifier
     pub error: String,
-    /// Human-readable error message
     pub message: String,
-    /// Optional additional details
     #[serde(skip_serializing_if = "Option::is_none")]
     pub details: Option<serde_json::Value>,
-    /// Unique trace ID for this error
     pub trace_id: String,
 }
 
 impl ErrorResponse {
-    /// Create a new error response with a generated trace ID
     pub fn new(error: String, message: String) -> Self {
-        Self {
-            error,
-            message,
-            details: None,
-            trace_id: Uuid::new_v4().to_string(),
-        }
+        Self::with_trace_id(error, message, response_trace_id())
     }
 
-    /// Create a new error response with a specific trace ID
     pub fn with_trace_id(error: String, message: String, trace_id: String) -> Self {
         Self {
             error,
@@ -284,17 +464,10 @@ impl ErrorResponse {
         }
     }
 
-    /// Create an error response with additional details
     pub fn with_details(error: String, message: String, details: serde_json::Value) -> Self {
-        Self {
-            error,
-            message,
-            details: Some(details),
-            trace_id: Uuid::new_v4().to_string(),
-        }
+        Self::with_details_and_trace_id(error, message, details, response_trace_id())
     }
 
-    /// Create an error response with additional details and a specific trace ID
     pub fn with_details_and_trace_id(
         error: String,
         message: String,
@@ -309,177 +482,107 @@ impl ErrorResponse {
         }
     }
 
-    /// Create an error response from a TingError
     pub fn from_error(error: &TingError) -> Self {
-        Self::new(error.error_type().to_string(), error.to_string())
+        Self::from_error_with_trace_id(error, response_trace_id())
     }
 
-    /// Create an error response from a TingError with a specific trace ID
     pub fn from_error_with_trace_id(error: &TingError, trace_id: String) -> Self {
-        Self::with_trace_id(error.error_type().to_string(), error.to_string(), trace_id)
+        Self::with_details_and_trace_id(
+            error.error_type().into(),
+            error.to_string(),
+            error.diagnostic_details(),
+            trace_id,
+        )
     }
 
-    /// Create an error response from a TingError with details
     pub fn from_error_with_details(error: &TingError, details: serde_json::Value) -> Self {
-        Self::with_details(error.error_type().to_string(), error.to_string(), details)
+        Self::from_error_with_details_and_trace_id(error, details, response_trace_id())
     }
 
-    /// Create an error response from a TingError with details and a specific trace ID
     pub fn from_error_with_details_and_trace_id(
         error: &TingError,
         details: serde_json::Value,
         trace_id: String,
     ) -> Self {
-        Self::with_details_and_trace_id(
-            error.error_type().to_string(),
-            error.to_string(),
-            details,
-            trace_id,
-        )
+        let mut response = Self::from_error_with_trace_id(error, trace_id);
+        if let (Some(base), Some(extra)) = (
+            response
+                .details
+                .as_mut()
+                .and_then(serde_json::Value::as_object_mut),
+            details.as_object(),
+        ) {
+            for (key, value) in extra {
+                base.entry(key.clone()).or_insert_with(|| value.clone());
+            }
+        }
+        response
     }
 }
 
 impl fmt::Display for ErrorResponse {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
-            f,
-            "[{}] {}: {} (trace_id: {})",
-            self.error,
-            self.message,
-            self.details.as_ref().map_or("", |_| "with details"),
-            self.trace_id
+            formatter,
+            "[{}] {} (trace_id: {})",
+            self.error, self.message, self.trace_id
         )
     }
 }
 
-/// Implement IntoResponse for TingError to enable automatic error handling in Axum
 impl IntoResponse for TingError {
     fn into_response(self) -> Response {
-        let status_code = self.status_code();
+        let status = self.status_code();
         let error_response = ErrorResponse::from_error(&self);
-        let error_message = self.to_string();
         let log_params = serde_json::json!({
-            "error": error_message.clone(),
-            "error_type": self.error_type(),
-            "status_code": status_code.as_u16(),
+            "error": self.to_string(), "error_type": self.error_type(), "status_code": status.as_u16(),
+            "details": error_response.details,
         });
-
-        // Log the error with appropriate level based on error type
-        match self.root_error() {
-            // Authentication errors are warnings, not errors (expected failures)
-            TingError::AuthenticationError(_) => {
-                tracing::warn!(
-                    error_type = self.error_type(),
-                    error = %error_message,
-                    trace_id = %error_response.trace_id,
-                    status_code = %status_code,
-                    message_key = "http.error.authentication",
-                    message_params = %log_params,
-                    "Authentication failed"
-                );
+        let (message_key, warning) = match self.root_error() {
+            Self::AuthenticationError(_) => ("http.error.authentication", true),
+            Self::PermissionDenied(_) | Self::SecurityViolation(_) => {
+                ("http.error.permission", true)
             }
-            // Invalid requests are also warnings (client errors)
-            TingError::InvalidRequest(_)
-            | TingError::ValidationError(_)
-            | TingError::NotFound(_) => {
+            Self::PluginExecutionError(_) | Self::PluginReported(_) => ("http.error.plugin", false),
+            Self::DatabaseError(_) if self.is_retryable() => ("http.error.database_busy", true),
+            _ => ("http.error.request", status.is_client_error()),
+        };
+        if !matches!(self.root_error(), Self::LoggedPluginExecutionError(_)) {
+            if warning {
                 tracing::warn!(
-                    error_type = self.error_type(),
-                    error = %error_message,
-                    trace_id = %error_response.trace_id,
-                    status_code = %status_code,
-                    message_key = "http.error.request",
-                    message_params = %log_params,
-                    "Request failed"
+                    error_type = self.error_type(), error = %self, trace_id = %error_response.trace_id,
+                    status_code = %status, message_key, message_params = %log_params, "Request failed"
                 );
-            }
-            // Permission errors are warnings
-            TingError::PermissionDenied(_) => {
-                tracing::warn!(
-                    error_type = self.error_type(),
-                    error = %error_message,
-                    trace_id = %error_response.trace_id,
-                    status_code = %status_code,
-                    message_key = "http.error.permission",
-                    message_params = %log_params,
-                    "Permission denied"
-                );
-            }
-            // PluginManager already recorded these failures with the host-bound plugin identity.
-            TingError::LoggedPluginExecutionError(_) => {}
-            TingError::PluginExecutionError(_) => {
+            } else if message_key == "http.error.plugin" {
                 tracing::error!(
                     target: "ting_reader::api::plugin",
-                    error_type = self.error_type(),
-                    error = %error_message,
-                    trace_id = %error_response.trace_id,
-                    status_code = %status_code,
-                    message_key = "http.error.plugin",
-                    message_params = %log_params,
-                    "Plugin request failed"
+                    error_type = self.error_type(), error = %self, trace_id = %error_response.trace_id,
+                    status_code = %status, message_key, message_params = %log_params, "Plugin request failed"
                 );
-            }
-            // All other errors are actual system errors
-            _ => {
-                // Check if it's a database lock error (should be warning, not error)
-                if let TingError::DatabaseError(rusqlite::Error::SqliteFailure(err, _)) =
-                    self.root_error()
-                    && (err.code == rusqlite::ErrorCode::DatabaseBusy
-                        || err.code == rusqlite::ErrorCode::DatabaseLocked)
-                {
-                    tracing::warn!(
-                        error_type = self.error_type(),
-                        error = %error_message,
-                        trace_id = %error_response.trace_id,
-                        status_code = %status_code,
-                        message_key = "http.error.database_busy",
-                        message_params = %log_params,
-                        "Database busy"
-                    );
-                    return (status_code, Json(error_response)).into_response();
-                }
-
+            } else {
                 tracing::error!(
-                    error_type = self.error_type(),
-                    error = %error_message,
-                    trace_id = %error_response.trace_id,
-                    status_code = %status_code,
-                    message_key = "http.error.request",
-                    message_params = %log_params,
-                    "Request failed"
+                    error_type = self.error_type(), error = %self, trace_id = %error_response.trace_id,
+                    status_code = %status, message_key, message_params = %log_params, "Request failed"
                 );
             }
         }
-
-        (status_code, Json(error_response)).into_response()
+        (status, Json(error_response)).into_response()
     }
 }
 
-/// Result type alias for operations that can fail with TingError
 pub type Result<T> = std::result::Result<T, TingError>;
 
-/// Context extension trait for adding context to errors
 pub trait ErrorContext<T> {
-    /// Add context to an error
     fn context(self, context: impl Into<String>) -> Result<T>;
-
-    /// Add context to an error using a closure
-    fn with_context<F>(self, f: F) -> Result<T>
-    where
-        F: FnOnce() -> String;
+    fn with_context<F: FnOnce() -> String>(self, context: F) -> Result<T>;
 }
 
-impl<T, E> ErrorContext<T> for std::result::Result<T, E>
-where
-    E: Into<TingError>,
-{
+impl<T, E: Into<TingError>> ErrorContext<T> for std::result::Result<T, E> {
     fn context(self, context: impl Into<String>) -> Result<T> {
-        self.map_err(|e| e.into().with_context(context))
+        self.map_err(|error| error.into().with_context(context))
     }
 
-    fn with_context<F>(self, f: F) -> Result<T>
-    where
-        F: FnOnce() -> String,
-    {
-        self.map_err(|e| e.into().with_context(f()))
+    fn with_context<F: FnOnce() -> String>(self, context: F) -> Result<T> {
+        self.map_err(|error| error.into().with_context(context()))
     }
 }

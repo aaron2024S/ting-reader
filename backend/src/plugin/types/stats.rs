@@ -1,5 +1,6 @@
 //! Plugin performance statistics, thresholds, alerts, and comparison
 
+use crate::core::app::error::CodecErrorKind;
 use serde::{Deserialize, Serialize};
 
 /// Plugin performance and usage statistics
@@ -273,8 +274,15 @@ impl PluginStats {
     }
 
     pub fn export_json(&self) -> crate::core::app::error::Result<String> {
-        serde_json::to_string_pretty(self)
-            .map_err(|e| crate::core::app::error::TingError::SerializationError(e.to_string()))
+        serde_json::to_string_pretty(self).map_err(|e| {
+            let message = e.to_string();
+            crate::core::app::error::TingError::serialization(
+                CodecErrorKind::InvalidData,
+                "export_json::serialization",
+                message,
+            )
+            .with_source(anyhow::anyhow!(e))
+        })
     }
 
     pub fn export_csv(&self) -> String {

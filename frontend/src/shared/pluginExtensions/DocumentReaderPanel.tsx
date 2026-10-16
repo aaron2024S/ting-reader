@@ -1,3 +1,4 @@
+import { apiErrorMessage } from '../../core/api/errors';
 import { Loader2 } from "lucide-react";
 import { useMemo, useState } from "react";
 import {
@@ -97,7 +98,7 @@ const DocumentReaderPanel = ({ context }: DocumentReaderPanelProps) => {
       setSections(nextSections);
       setSectionId(nextSections[0]?.id || "");
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(apiErrorMessage(err, 'Document request failed'));
     } finally {
       setLoading(false);
     }
@@ -116,7 +117,7 @@ const DocumentReaderPanel = ({ context }: DocumentReaderPanelProps) => {
         ),
       );
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(apiErrorMessage(err, 'Document request failed'));
     } finally {
       setLoading(false);
     }
@@ -129,7 +130,7 @@ const DocumentReaderPanel = ({ context }: DocumentReaderPanelProps) => {
     try {
       setPage(await renderDocumentPage(session.resource, pageNumber, session));
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(apiErrorMessage(err, 'Document request failed'));
     } finally {
       setLoading(false);
     }

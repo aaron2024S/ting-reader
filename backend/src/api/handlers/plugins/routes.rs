@@ -7,6 +7,9 @@ use crate::api::models::{SignPluginRouteRequest, SignPluginRouteResponse};
 use crate::api::require_admin;
 use crate::api::state::AppState;
 use crate::auth::middleware::AuthUser;
+use crate::core::app::error::{
+    AccessErrorKind, CodecErrorKind, InputErrorKind, LookupErrorKind, PluginErrorKind,
+};
 use crate::core::app::error::{Result, TingError};
 use crate::core::security::signing::{
     DEFAULT_PLUGIN_ROUTE_SIGNATURE_TTL_SECONDS, MAX_PLUGIN_ROUTE_SIGNATURE_TTL_SECONDS,
@@ -74,7 +77,9 @@ pub async fn sign_plugin_route(
 ) -> Result<impl IntoResponse> {
     let method = req.method.trim().to_uppercase();
     if method.is_empty() {
-        return Err(TingError::InvalidRequest(
+        return Err(TingError::invalid_request(
+            InputErrorKind::MissingField,
+            "sign_plugin_route::invalid_request",
             "Plugin route method is required".to_string(),
         ));
     }
@@ -85,11 +90,11 @@ pub async fn sign_plugin_route(
         .find_http_route(&method, &path)
         .await
         .ok_or_else(|| {
-            TingError::NotFound(format!(
-                "Plugin route not found: {} {}",
-                method.as_str(),
-                path
-            ))
+            TingError::not_found(
+                LookupErrorKind::Plugin,
+                "sign_plugin_route::not_found",
+                format!("Plugin route not found: {} {}", method.as_str(), path),
+            )
         })?;
 
     if matched.registration.admin_only {
@@ -97,11 +102,15 @@ pub async fn sign_plugin_route(
     }
 
     if !plugin_route_allows_public_access(&matched.registration.capability) {
-        return Err(TingError::PermissionDenied(format!(
-            "Plugin route cannot be exposed through public plugin-routes: {} {}",
-            method.as_str(),
-            path
-        )));
+        return Err(TingError::permission(
+            AccessErrorKind::ResourceDenied,
+            "sign_plugin_route::permission",
+            format!(
+                "Plugin route cannot be exposed through public plugin-routes: {} {}",
+                method.as_str(),
+                path
+            ),
+        ));
     }
 
     let expires = signature_expires_from_ttl(
@@ -114,7 +123,9 @@ pub async fn sign_plugin_route(
         .unwrap_or(true)
         .then(|| user.id.clone());
     if matched.registration.admin_only && signed_user_id.is_none() {
-        return Err(TingError::PermissionDenied(
+        return Err(TingError::permission(
+            AccessErrorKind::AdministratorRequired,
+            "sign_plugin_route::permission",
             "Admin-only plugin routes must bind the current admin user".to_string(),
         ));
     }
@@ -164,11 +175,11 @@ async fn call_plugin_route_inner(
         .find_http_route(method.as_str(), &route_path)
         .await
         .ok_or_else(|| {
-            TingError::NotFound(format!(
-                "Plugin route not found: {} {}",
-                method.as_str(),
-                route_path
-            ))
+            TingError::not_found(
+                LookupErrorKind::Plugin,
+                "call_plugin_route_inner::not_found",
+                format!("Plugin route not found: {} {}", method.as_str(), route_path),
+            )
         })?;
 
     let mut route_user = user;
@@ -186,7 +197,11 @@ async fn call_plugin_route_inner(
 
         if let Some(user_id) = signed_plugin_route_user(&uri) {
             let signed_user = state.user_repo.find_by_id(&user_id).await?.ok_or_else(|| {
-                TingError::PermissionDenied("Signed route user not found".to_string())
+                TingError::permission(
+                    AccessErrorKind::ResourceDenied,
+                    "call_plugin_route_inner::permission",
+                    "Signed route user not found".to_string(),
+                )
             })?;
             route_user = Some(AuthUser {
                 user_id: signed_user.id.clone(),
@@ -200,7 +215,9 @@ async fn call_plugin_route_inner(
     if matched.registration.admin_only {
         let is_route_admin = route_user.as_ref().map(is_admin_user).unwrap_or(false);
         if !is_route_admin {
-            return Err(TingError::PermissionDenied(
+            return Err(TingError::permission(
+                AccessErrorKind::AdministratorRequired,
+                "call_plugin_route_inner::permission",
                 "Admin access required for this plugin route".to_string(),
             ));
         }
@@ -339,11 +356,15 @@ pub(super) fn validate_public_plugin_route_access_with_revocations(
             signing_key,
             revocations,
         ),
-        PluginRouteAuthPolicy::User => Err(TingError::PermissionDenied(format!(
-            "Plugin route is not public: {} {}",
-            method.as_str(),
-            route_path
-        ))),
+        PluginRouteAuthPolicy::User => Err(TingError::permission(
+            AccessErrorKind::ResourceDenied,
+            "validate_public_plugin_route_access_with_revocations::permission",
+            format!(
+                "Plugin route is not public: {} {}",
+                method.as_str(),
+                route_path
+            ),
+        )),
     }
 }
 
@@ -368,23 +389,40 @@ fn validate_plugin_route_signature_with_revocations(
 ) -> Result<()> {
     let expires = query_param(uri, "expires")
         .ok_or_else(|| {
-            TingError::PermissionDenied("Missing plugin route signature expiry".to_string())
+            TingError::permission(
+                AccessErrorKind::ResourceDenied,
+                "validate_plugin_route_signature_with_revocations::permission",
+                "Missing plugin route signature expiry".to_string(),
+            )
         })?
         .parse::<i64>()
         .map_err(|_| {
-            TingError::PermissionDenied("Invalid plugin route signature expiry".to_string())
+            TingError::permission(
+                AccessErrorKind::ResourceDenied,
+                "validate_plugin_route_signature_with_revocations::permission",
+                "Invalid plugin route signature expiry".to_string(),
+            )
         })?;
 
     if signature_has_expired(expires) {
-        return Err(TingError::PermissionDenied(
+        return Err(TingError::permission(
+            AccessErrorKind::ResourceDenied,
+            "validate_plugin_route_signature_with_revocations::permission",
             "Plugin route signature has expired".to_string(),
         ));
     }
 
-    let signature = query_param(uri, "signature")
-        .ok_or_else(|| TingError::PermissionDenied("Missing plugin route signature".to_string()))?;
+    let signature = query_param(uri, "signature").ok_or_else(|| {
+        TingError::permission(
+            AccessErrorKind::ResourceDenied,
+            "validate_plugin_route_signature_with_revocations::permission",
+            "Missing plugin route signature".to_string(),
+        )
+    })?;
     if revocations.is_some_and(|revocations| revocations.is_revoked(&signature)) {
-        return Err(TingError::PermissionDenied(
+        return Err(TingError::permission(
+            AccessErrorKind::ResourceDenied,
+            "validate_plugin_route_signature_with_revocations::permission",
             "Plugin route signature has been revoked".to_string(),
         ));
     }
@@ -398,7 +436,9 @@ fn validate_plugin_route_signature_with_revocations(
     );
 
     if !constant_time_eq(signature.as_bytes(), expected.as_bytes()) {
-        return Err(TingError::PermissionDenied(
+        return Err(TingError::permission(
+            AccessErrorKind::ResourceDenied,
+            "validate_plugin_route_signature_with_revocations::permission",
             "Invalid plugin route signature".to_string(),
         ));
     }
@@ -422,7 +462,11 @@ pub(super) fn plugin_route_result_to_response(value: Value) -> Result<Response> 
         .ok()
         .and_then(|status| StatusCode::from_u16(status).ok())
         .ok_or_else(|| {
-            TingError::PluginExecutionError("Plugin returned invalid HTTP status".to_string())
+            TingError::plugin_execution(
+                PluginErrorKind::InvalidOutput,
+                "plugin_route_result_to_response::plugin_execution",
+                "Plugin returned invalid HTTP status".to_string(),
+            )
         })?;
 
     let mut builder = Response::builder().status(status);
@@ -432,16 +476,25 @@ pub(super) fn plugin_route_result_to_response(value: Value) -> Result<Response> 
                 continue;
             };
             let header_name = HeaderName::from_bytes(name.as_bytes()).map_err(|e| {
-                TingError::PluginExecutionError(format!(
-                    "Plugin returned invalid HTTP header name '{}': {}",
-                    name, e
-                ))
+                let message = format!("Plugin returned invalid HTTP header name '{}': {}", name, e);
+                TingError::plugin_execution(
+                    PluginErrorKind::InvalidOutput,
+                    "plugin_route_result_to_response::plugin_execution",
+                    message,
+                )
+                .with_source(anyhow::anyhow!(e))
             })?;
             let header_value = HeaderValue::from_str(value).map_err(|e| {
-                TingError::PluginExecutionError(format!(
+                let message = format!(
                     "Plugin returned invalid HTTP header value for '{}': {}",
                     name, e
-                ))
+                );
+                TingError::plugin_execution(
+                    PluginErrorKind::InvalidOutput,
+                    "plugin_route_result_to_response::plugin_execution",
+                    message,
+                )
+                .with_source(anyhow::anyhow!(e))
             })?;
             builder = builder.header(header_name, header_value);
         }
@@ -449,7 +502,13 @@ pub(super) fn plugin_route_result_to_response(value: Value) -> Result<Response> 
 
     let body = plugin_route_response_body(&value)?;
     builder.body(Body::from(body)).map_err(|e| {
-        TingError::PluginExecutionError(format!("Plugin HTTP response build failed: {}", e))
+        let message = format!("Plugin HTTP response build failed: {}", e);
+        TingError::plugin_execution(
+            PluginErrorKind::InvalidOutput,
+            "plugin_route_result_to_response::plugin_execution",
+            message,
+        )
+        .with_source(anyhow::anyhow!(e))
     })
 }
 
@@ -458,10 +517,13 @@ pub(super) fn plugin_route_response_body(value: &Value) -> Result<Vec<u8>> {
         return base64::engine::general_purpose::STANDARD
             .decode(body_base64)
             .map_err(|e| {
-                TingError::PluginExecutionError(format!(
-                    "Plugin returned invalid base64 response body: {}",
-                    e
-                ))
+                let message = format!("Plugin returned invalid base64 response body: {}", e);
+                TingError::plugin_execution(
+                    PluginErrorKind::InvalidOutput,
+                    "plugin_route_response_body::plugin_execution",
+                    message,
+                )
+                .with_source(anyhow::anyhow!(e))
             });
     }
 
@@ -471,10 +533,13 @@ pub(super) fn plugin_route_response_body(value: &Value) -> Result<Vec<u8>> {
         }
 
         return serde_json::to_vec(body).map_err(|e| {
-            TingError::SerializationError(format!(
-                "Plugin response body serialization failed: {}",
-                e
-            ))
+            let message = format!("Plugin response body serialization failed: {}", e);
+            TingError::serialization(
+                CodecErrorKind::InvalidData,
+                "plugin_route_response_body::serialization",
+                message,
+            )
+            .with_source(anyhow::anyhow!(e))
         });
     }
 
@@ -482,7 +547,13 @@ pub(super) fn plugin_route_response_body(value: &Value) -> Result<Vec<u8>> {
         Ok(Vec::new())
     } else {
         serde_json::to_vec(value).map_err(|e| {
-            TingError::SerializationError(format!("Plugin response serialization failed: {}", e))
+            let message = format!("Plugin response serialization failed: {}", e);
+            TingError::serialization(
+                CodecErrorKind::InvalidData,
+                "plugin_route_response_body::serialization",
+                message,
+            )
+            .with_source(anyhow::anyhow!(e))
         })
     }
 }

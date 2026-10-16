@@ -28,6 +28,7 @@ import {
   XCircle,
 } from "lucide-react";
 import GithubIcon from "../../shared/ui/GithubIcon";
+import { apiErrorMessage } from "../../core/api/errors";
 
 const PluginName = ({
   name,
@@ -377,7 +378,7 @@ const toInstalledCardData = (
     supported_extensions: getCapabilitySupportedExtensions(capabilities),
     capabilities,
     state: plugin.state,
-    error: plugin.error,
+    error: plugin.error ? apiErrorMessage(plugin.error, "") : undefined,
     isInstalled: true,
   };
 };

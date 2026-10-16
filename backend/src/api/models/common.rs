@@ -1,10 +1,4 @@
-use serde::Serialize;
-
-#[derive(Debug, Serialize)]
-pub struct ErrorResponse {
-    pub error: String,
-    pub message: String,
-}
+pub use crate::core::app::error::ErrorResponse;
 
 pub fn deserialize_tags_or_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
 where

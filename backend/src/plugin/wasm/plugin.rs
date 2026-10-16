@@ -1,5 +1,6 @@
 use super::runtime::WasmRuntime;
 use super::sandbox::Permission;
+use crate::core::app::error::PluginErrorKind;
 use crate::core::app::error::{Result, TingError};
 use crate::plugin::types::{
     Plugin, PluginContext, PluginId, PluginInvocationContext, PluginMetadata,
@@ -79,7 +80,13 @@ impl Plugin for WasmPlugin {
             .invoke_raw_json_with_context(operation, input, context)
             .await?;
         serde_json::from_str(&json).map_err(|error| {
-            TingError::PluginExecutionError(format!("Invalid WASM response JSON: {error}"))
+            let message = format!("Invalid WASM response JSON: {error}");
+            TingError::plugin_execution(
+                PluginErrorKind::InvalidOutput,
+                "invoke::plugin_execution",
+                message,
+            )
+            .with_source(anyhow::anyhow!(error))
         })
     }
 
@@ -92,10 +99,11 @@ impl Plugin for WasmPlugin {
     async fn initialize(&self, context: &PluginContext) -> Result<()> {
         let res = self.initialize_wasm().await?;
         if res != 0 {
-            return Err(TingError::PluginExecutionError(format!(
-                "Initialize returned error code: {}",
-                res
-            )));
+            return Err(TingError::plugin_execution(
+                PluginErrorKind::Runtime,
+                "initialize::plugin_execution",
+                format!("Initialize returned error code: {}", res),
+            ));
         }
         let result = Plugin::invoke(
             self,
@@ -125,10 +133,11 @@ impl Plugin for WasmPlugin {
         crate::plugin::require_successful_lifecycle_result(result, "shutdown")?;
         let res = self.shutdown_wasm().await?;
         if res != 0 {
-            return Err(TingError::PluginExecutionError(format!(
-                "Shutdown returned error code: {}",
-                res
-            )));
+            return Err(TingError::plugin_execution(
+                PluginErrorKind::Runtime,
+                "shutdown::plugin_execution",
+                format!("Shutdown returned error code: {}", res),
+            ));
         }
         Ok(())
     }
@@ -167,19 +176,37 @@ impl WasmExports {
         let initialize = instance
             .get_typed_func::<(), i32>(&mut *store, "initialize")
             .map_err(|e| {
-                TingError::PluginLoadError(format!("Failed to get 'initialize' function: {}", e))
+                let message = format!("Failed to get 'initialize' function: {}", e);
+                TingError::plugin_load(
+                    PluginErrorKind::Runtime,
+                    "from_instance::plugin_load",
+                    message,
+                )
+                .with_source(anyhow::anyhow!(e))
             })?;
 
         let shutdown = instance
             .get_typed_func::<(), i32>(&mut *store, "shutdown")
             .map_err(|e| {
-                TingError::PluginLoadError(format!("Failed to get 'shutdown' function: {}", e))
+                let message = format!("Failed to get 'shutdown' function: {}", e);
+                TingError::plugin_load(
+                    PluginErrorKind::Runtime,
+                    "from_instance::plugin_load",
+                    message,
+                )
+                .with_source(anyhow::anyhow!(e))
             })?;
 
         let invoke = instance
             .get_typed_func::<(i32, i32), i32>(&mut *store, "invoke")
             .map_err(|e| {
-                TingError::PluginLoadError(format!("Failed to get 'invoke' function: {}", e))
+                let message = format!("Failed to get 'invoke' function: {}", e);
+                TingError::plugin_load(
+                    PluginErrorKind::Runtime,
+                    "from_instance::plugin_load",
+                    message,
+                )
+                .with_source(anyhow::anyhow!(e))
             })?;
 
         Ok(Self {

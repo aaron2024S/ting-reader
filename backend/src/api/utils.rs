@@ -1,6 +1,7 @@
 //! API utility helpers
 
 use crate::auth::AuthUser;
+use crate::core::app::error::AccessErrorKind;
 use crate::core::app::error::{Result, TingError};
 use axum::http::{HeaderMap, header};
 use std::net::{IpAddr, SocketAddr};
@@ -15,7 +16,9 @@ pub struct RequestInfo {
 /// Require admin role, returning PermissionDenied if not admin
 pub fn require_admin(user: &AuthUser) -> Result<()> {
     if user.role != "admin" {
-        return Err(TingError::PermissionDenied(
+        return Err(TingError::permission(
+            AccessErrorKind::AdministratorRequired,
+            "require_admin::permission",
             "Admin access required".to_string(),
         ));
     }

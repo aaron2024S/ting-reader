@@ -70,6 +70,8 @@
 
 `state` 为 `discovered/loading/loaded/initializing/active/executing/unloading/unloaded/failed`。`is_enabled` 表示实例已注册，判断是否可调用应同时检查 `state` 和 `error`。
 
+失败状态的 `error` 是统一的 `error/message/details/trace_id` 对象，正常状态为 `null`。`error.message` 用于展示；`error.details.reason` 和 `error.details.retryable` 保留加载、依赖、超时等分类，格式见[错误处理](errors.md)。
+
 ### GET /api/v1/plugins/:id
 
 返回指定实例的详情。除列表中的业务字段外，包含：

@@ -89,3 +89,59 @@ fn test_task_with_custom_retry_policy() {
     assert_eq!(task.retry_policy.max_retries, 5);
     assert_eq!(task.timeout, Duration::from_secs(300));
 }
+
+#[test]
+fn retry_policy_distinguishes_transient_failures_from_invalid_requests_and_cancellation() {
+    use crate::core::app::error::DeadlineErrorKind;
+    let policy = RetryPolicy::default();
+    let transient = TingError::timeout(DeadlineErrorKind::Elapsed, "task.test", "Delayed".into());
+    assert!(policy.should_retry(&transient, 1));
+    assert!(!policy.should_retry(&transient, policy.max_retries));
+    for error in [
+        TingError::invalid_request(InputErrorKind::InvalidValue, "task.test", "Invalid".into()),
+        TingError::timeout(
+            DeadlineErrorKind::Cancelled,
+            "task.test",
+            "Cancelled".into(),
+        ),
+        TingError::DatabaseError(rusqlite::Error::InvalidQuery),
+    ] {
+        assert!(!policy.should_retry(&error, 1));
+    }
+}
+
+#[test]
+fn persisted_task_failures_round_trip_classification_and_keep_legacy_history_readable() {
+    use crate::core::app::error::{DeadlineErrorKind, ErrorResponse};
+    let failure = ErrorResponse::from_error_with_trace_id(
+        &TingError::timeout(DeadlineErrorKind::Elapsed, "task.execute", "Delayed".into())
+            .with_resource(LookupErrorKind::Book, "book-1"),
+        "original-task-trace".into(),
+    );
+    let mut record = TaskRecord {
+        id: "task-1".into(),
+        task_type: "test".into(),
+        status: "failed".into(),
+        payload: None,
+        message: None,
+        message_key: None,
+        message_params: None,
+        error: TaskRecord::encode_failure(Some(&failure)).unwrap(),
+        retries: 1,
+        max_retries: 3,
+        created_at: String::new(),
+        updated_at: String::new(),
+    };
+    let restored = record.failure().unwrap();
+    assert_eq!(restored.error, "Timeout");
+    assert_eq!(restored.trace_id, "original-task-trace");
+    assert_eq!(restored.details.unwrap()["resource"]["id"], "book-1");
+    record.error = Some("An older task failed".into());
+    let historical = record.failure().unwrap();
+    assert!(historical.message.contains("An older task failed"));
+    assert_eq!(historical.trace_id, "legacy-task-task-1");
+    assert_eq!(historical.details.unwrap()["reason"], "unclassified");
+    record.error = None;
+    assert!(record.failure().is_none());
+    assert!(TaskRecord::encode_failure(None).unwrap().is_none());
+}

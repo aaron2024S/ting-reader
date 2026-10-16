@@ -1,3 +1,4 @@
+use crate::core::app::error::LookupErrorKind;
 mod chapters;
 mod source;
 pub use chapters::{batch_update_chapters, get_book_chapters, move_chapters, update_chapter};
@@ -73,18 +74,24 @@ pub async fn get_book(
     Path(id): Path<String>,
     user: crate::auth::middleware::AuthUser,
 ) -> Result<impl IntoResponse> {
-    let book = state
-        .book_repo
-        .find_by_id(&id)
-        .await?
-        .ok_or_else(|| TingError::NotFound(format!("Book with id {} not found", id)))?;
+    let book = state.book_repo.find_by_id(&id).await?.ok_or_else(|| {
+        TingError::not_found(
+            LookupErrorKind::Book,
+            "get_book::not_found",
+            format!("Book with id {} not found", id),
+        )
+    })?;
 
     let library = state
         .library_repo
         .find_by_id(&book.library_id)
         .await?
         .ok_or_else(|| {
-            TingError::NotFound(format!("Library with id {} not found", book.library_id))
+            TingError::not_found(
+                LookupErrorKind::Book,
+                "get_book::not_found",
+                format!("Library with id {} not found", book.library_id),
+            )
         })?;
 
     let is_fav = state.favorite_repo.is_favorited(&user.id, &id).await?;
@@ -218,11 +225,13 @@ pub async fn update_book(
     Path(id): Path<String>,
     Json(req): Json<UpdateBookRequest>,
 ) -> Result<impl IntoResponse> {
-    let existing_book = state
-        .book_repo
-        .find_by_id(&id)
-        .await?
-        .ok_or_else(|| TingError::NotFound(format!("Book with id {} not found", id)))?;
+    let existing_book = state.book_repo.find_by_id(&id).await?.ok_or_else(|| {
+        TingError::not_found(
+            LookupErrorKind::Book,
+            "update_book::not_found",
+            format!("Book with id {} not found", id),
+        )
+    })?;
 
     let mut theme_color = req.theme_color.clone();
     let book_path_str = req.path.clone().unwrap_or(existing_book.path.clone());

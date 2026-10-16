@@ -1,4 +1,5 @@
 use crate::core::app::config::Config;
+use crate::core::app::error::{InputErrorKind, SecurityErrorKind};
 use crate::core::app::error::{Result, TingError};
 use crate::db::models::Library;
 use serde::Serialize;
@@ -53,7 +54,9 @@ pub fn discover_authorized_roots(config: &Config) -> Vec<AuthorizedRoot> {
 pub fn resolve_local_library_path(input: &str, config: &Config) -> Result<PathBuf> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
-        return Err(TingError::ValidationError(
+        return Err(TingError::validation(
+            InputErrorKind::InvalidPath,
+            "resolve_local_library_path::validation",
             "Local library path cannot be empty".to_string(),
         ));
     }
@@ -74,10 +77,11 @@ pub fn resolve_local_library_path(input: &str, config: &Config) -> Result<PathBu
 
 pub fn resolve_existing_local_library_root(library: &Library, config: &Config) -> Result<PathBuf> {
     if library.library_type != "local" {
-        return Err(TingError::InvalidRequest(format!(
-            "Library {} is not a local library",
-            library.id
-        )));
+        return Err(TingError::invalid_request(
+            InputErrorKind::InvalidValue,
+            "resolve_existing_local_library_root::invalid_request",
+            format!("Library {} is not a local library", library.id),
+        ));
     }
 
     resolve_local_library_path(&library.url, config)
@@ -86,7 +90,9 @@ pub fn resolve_existing_local_library_root(library: &Library, config: &Config) -
 pub fn resolve_authorized_root(input: &str, config: &Config) -> Result<PathBuf> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
-        return Err(TingError::ValidationError(
+        return Err(TingError::validation(
+            InputErrorKind::InvalidValue,
+            "resolve_authorized_root::validation",
             "Storage root cannot be empty".to_string(),
         ));
     }
@@ -97,10 +103,11 @@ pub fn resolve_authorized_root(input: &str, config: &Config) -> Result<PathBuf> 
         return Ok(requested);
     }
 
-    Err(TingError::SecurityViolation(format!(
-        "Storage root '{}' is not authorized",
-        trimmed
-    )))
+    Err(TingError::security(
+        SecurityErrorKind::PathEscape,
+        "resolve_authorized_root::security",
+        format!("Storage root '{}' is not authorized", trimmed),
+    ))
 }
 
 pub fn resolve_storage_folder_target(
@@ -138,10 +145,14 @@ pub fn ensure_path_inside_authorized_roots(path: &Path, roots: &[AuthorizedRoot]
         return Ok(());
     }
 
-    Err(TingError::SecurityViolation(format!(
-        "Path '{}' is outside authorized local roots",
-        path.display()
-    )))
+    Err(TingError::security(
+        SecurityErrorKind::PathEscape,
+        "ensure_path_inside_authorized_roots::security",
+        format!(
+            "Path '{}' is outside authorized local roots",
+            path.display()
+        ),
+    ))
 }
 
 pub fn ensure_path_inside_root(root: &Path, path: &Path) -> Result<()> {
@@ -149,7 +160,9 @@ pub fn ensure_path_inside_root(root: &Path, path: &Path) -> Result<()> {
         return Ok(());
     }
 
-    Err(TingError::SecurityViolation(
+    Err(TingError::security(
+        SecurityErrorKind::PathEscape,
+        "ensure_path_inside_root::security",
         "Path escapes the authorized root".to_string(),
     ))
 }
@@ -157,14 +170,18 @@ pub fn ensure_path_inside_root(root: &Path, path: &Path) -> Result<()> {
 pub fn normalize_relative_sub_path(value: &str) -> Result<PathBuf> {
     let trimmed = value.trim();
     if trimmed.contains("..") {
-        return Err(TingError::ValidationError(
+        return Err(TingError::validation(
+            InputErrorKind::InvalidPath,
+            "normalize_relative_sub_path::validation",
             "Invalid path: contains '..'".to_string(),
         ));
     }
 
     let raw = Path::new(trimmed);
     if raw.is_absolute() {
-        return Err(TingError::ValidationError(
+        return Err(TingError::validation(
+            InputErrorKind::InvalidPath,
+            "normalize_relative_sub_path::validation",
             "Invalid path: sub_path must be relative".to_string(),
         ));
     }
@@ -175,7 +192,9 @@ pub fn normalize_relative_sub_path(value: &str) -> Result<PathBuf> {
             Component::CurDir => {}
             Component::Normal(part) => normalized.push(part),
             Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
-                return Err(TingError::ValidationError(
+                return Err(TingError::validation(
+                    InputErrorKind::InvalidPath,
+                    "normalize_relative_sub_path::validation",
                     "Invalid path: sub_path cannot escape the root".to_string(),
                 ));
             }
@@ -233,17 +252,26 @@ fn push_authorized_root(
 fn canonicalize_existing_directory(path: &Path, display: &str) -> Result<PathBuf> {
     let canonical = std::fs::canonicalize(path).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
-            TingError::ValidationError(format!("Path '{}' does not exist", display))
+            {
+                let message = format!("Path '{}' does not exist", display);
+                TingError::validation(
+                    InputErrorKind::Conflict,
+                    "canonicalize_existing_directory::validation",
+                    message,
+                )
+                .with_source(anyhow::anyhow!(e))
+            }
         } else {
             TingError::IoError(e)
         }
     })?;
 
     if !canonical.is_dir() {
-        return Err(TingError::ValidationError(format!(
-            "Path '{}' is not a directory",
-            display
-        )));
+        return Err(TingError::validation(
+            InputErrorKind::InvalidPath,
+            "canonicalize_existing_directory::validation",
+            format!("Path '{}' is not a directory", display),
+        ));
     }
 
     Ok(canonical)

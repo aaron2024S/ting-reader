@@ -1,5 +1,6 @@
 //! Plugin manager - core orchestration for the plugin system
 
+use crate::core::app::error::{LookupErrorKind, NetworkErrorKind, PluginErrorKind};
 pub mod capabilities;
 mod compatibility;
 pub mod discovery;
@@ -16,7 +17,7 @@ use std::sync::Arc;
 use tokio::sync::{RwLock, Semaphore};
 use tracing::info;
 
-use crate::core::app::error::{Result, TingError};
+use crate::core::app::error::{ErrorResponse, Result, TingError};
 use crate::plugin::config::PluginConfigManager;
 use crate::plugin::host_api::{PluginHostGateway, PluginHostGatewayHandle};
 use crate::plugin::types::{
@@ -42,7 +43,7 @@ pub(crate) struct PluginEntry {
     resource_scopes:
         std::sync::Mutex<Vec<std::sync::Weak<crate::plugin::host_api::resources::ResourceScope>>>,
     pub(crate) state: PluginState,
-    pub(crate) load_error: Option<String>,
+    pub(crate) load_error: Option<Arc<TingError>>,
     pub(crate) stats: PluginStats,
     pub(crate) _active_tasks: Arc<std::sync::atomic::AtomicUsize>,
 }
@@ -70,11 +71,17 @@ impl PluginEntry {
         scope: &Arc<crate::plugin::host_api::resources::ResourceScope>,
     ) -> Result<()> {
         let mut scopes = self.resource_scopes.lock().map_err(|_| {
-            TingError::PluginExecutionError("Resource scope registry unavailable".into())
+            TingError::plugin_execution(
+                PluginErrorKind::Unavailable,
+                "track_resource_scope::plugin_execution",
+                "Resource scope registry unavailable".into(),
+            )
         })?;
         scopes.retain(|scope| scope.strong_count() != 0);
         if scopes.len() >= 128 {
-            return Err(TingError::PluginExecutionError(
+            return Err(TingError::plugin_execution(
+                PluginErrorKind::Runtime,
+                "track_resource_scope::plugin_execution",
                 "Plugin scope limit reached".into(),
             ));
         }
@@ -118,7 +125,7 @@ pub struct PluginInfo {
     pub supported_extensions: Option<Vec<String>>,
     #[serde(default)]
     pub dependencies: Vec<PluginDependency>,
-    pub error: Option<String>,
+    pub error: Option<ErrorResponse>,
     #[serde(default)]
     pub config_schema: Option<serde_json::Value>,
     #[serde(default)]
@@ -168,26 +175,11 @@ impl PluginInfo {
         }
     }
 
-    pub fn from_metadata_with_error(
-        metadata: &PluginMetadata,
-        state: &PluginState,
-        error: String,
-    ) -> Self {
-        let mut info = Self::from_metadata(metadata, state);
-        info.error = Some(error);
-        info
-    }
-
     pub(crate) fn from_entry(entry: &PluginEntry) -> Self {
-        let mut info = if entry.state == PluginState::Failed {
-            Self::from_metadata_with_error(
-                &entry.metadata,
-                &entry.state,
-                entry.load_error.clone().unwrap_or_default(),
-            )
-        } else {
-            Self::from_metadata(&entry.metadata, &entry.state)
-        };
+        let mut info = Self::from_metadata(&entry.metadata, &entry.state);
+        if entry.state == PluginState::Failed {
+            info.error = entry.load_error.as_deref().map(ErrorResponse::from_error);
+        }
 
         info.total_calls = entry.stats.total_calls;
         info.successful_calls = entry.stats.successful_calls;
@@ -199,11 +191,11 @@ impl PluginInfo {
 /// A placeholder plugin implementation for failed plugins
 pub(crate) struct FailedPlugin {
     metadata: PluginMetadata,
-    error: String,
+    error: Arc<TingError>,
 }
 
 impl FailedPlugin {
-    pub(crate) fn new(metadata: PluginMetadata, error: String) -> Self {
+    pub(crate) fn new(metadata: PluginMetadata, error: Arc<TingError>) -> Self {
         Self { metadata, error }
     }
 }
@@ -214,7 +206,7 @@ impl Plugin for FailedPlugin {
         &self.metadata
     }
     async fn initialize(&self, _context: &PluginContext) -> Result<()> {
-        Err(TingError::PluginLoadError(self.error.clone()))
+        Err(TingError::Shared(self.error.clone()))
     }
     async fn shutdown(&self) -> Result<()> {
         Ok(())
@@ -253,7 +245,11 @@ impl PluginManager {
             .timeout(std::time::Duration::from_secs(120))
             .no_proxy()
             .build()
-            .map_err(|e| TingError::NetworkError(e.to_string()))?;
+            .map_err(|e| {
+                let message = e.to_string();
+                TingError::network(NetworkErrorKind::Transport, "new::network", message)
+                    .with_source(anyhow::anyhow!(e))
+            })?;
 
         Ok(Self {
             config,
@@ -376,18 +372,25 @@ impl PluginManager {
 
     pub fn get_plugin(&self, id: &PluginId) -> Result<PluginMetadata> {
         let registry = futures::executor::block_on(self.registry.read());
-        let entry = registry
-            .get(id)
-            .ok_or_else(|| TingError::PluginNotFound(id.clone()))?;
+        let entry = registry.get(id).ok_or_else(|| {
+            TingError::plugin_not_found(
+                LookupErrorKind::Plugin,
+                "get_plugin::plugin_not_found",
+                id.clone(),
+            )
+        })?;
         Ok(entry.metadata.clone())
     }
 
     pub async fn get_plugin_package_path(&self, id: &PluginId) -> Result<PathBuf> {
         let cache = self.metadata_cache.read().await;
-        cache
-            .get(id)
-            .cloned()
-            .ok_or_else(|| TingError::PluginNotFound(id.clone()))
+        cache.get(id).cloned().ok_or_else(|| {
+            TingError::plugin_not_found(
+                LookupErrorKind::Plugin,
+                "get_plugin_package_path::plugin_not_found",
+                id.clone(),
+            )
+        })
     }
 
     pub async fn find_plugins_by_capability_kind(&self, kind: &str) -> Vec<PluginInfo> {
@@ -400,17 +403,7 @@ impl PluginManager {
                     .iter()
                     .any(|capability| capability.kind() == kind)
             })
-            .map(|entry| {
-                if entry.state == PluginState::Failed {
-                    PluginInfo::from_metadata_with_error(
-                        &entry.metadata,
-                        &entry.state,
-                        entry.load_error.clone().unwrap_or_default(),
-                    )
-                } else {
-                    PluginInfo::from_metadata(&entry.metadata, &entry.state)
-                }
-            })
+            .map(PluginInfo::from_entry)
             .collect()
     }
 }

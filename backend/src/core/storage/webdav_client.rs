@@ -1,3 +1,4 @@
+use crate::core::app::error::{AuthenticationErrorKind, NetworkErrorKind};
 use crate::core::app::error::{ErrorContext, Result, TingError};
 use reqwest::Client;
 use std::sync::Arc;
@@ -43,7 +44,9 @@ impl WebDavClient {
     ) -> Result<String> {
         // Acquire semaphore permit to limit concurrent requests
         let _permit = self.request_limiter.acquire().await.map_err(|e| {
-            TingError::NetworkError(format!("Failed to acquire request permit: {}", e))
+            let message = format!("Failed to acquire request permit: {}", e);
+            TingError::network(NetworkErrorKind::Transport, "propfind::network", message)
+                .with_source(anyhow::anyhow!(e))
         })?;
 
         // Ensure minimum interval between requests
@@ -82,21 +85,26 @@ impl WebDavClient {
                 .context("Failed to read WebDAV response")?;
             Ok(xml)
         } else if response.status().as_u16() == 401 {
-            Err(TingError::AuthenticationError(
+            Err(TingError::authentication(
+                AuthenticationErrorKind::InvalidCredentials,
+                "propfind::authentication",
                 "WebDAV authentication failed".to_string(),
             ))
         } else if response.status().as_u16() == 429 {
             warn!("WebDAV server returned 429 Too Many Requests, implementing backoff");
             // Implement exponential backoff for 429 responses
             tokio::time::sleep(Duration::from_secs(2)).await;
-            Err(TingError::NetworkError(
+            Err(TingError::network(
+                NetworkErrorKind::Transport,
+                "propfind::network",
                 "Rate limited by server".to_string(),
             ))
         } else {
-            Err(TingError::NetworkError(format!(
-                "WebDAV request failed with status: {}",
-                response.status()
-            )))
+            Err(TingError::network(
+                NetworkErrorKind::HttpStatus,
+                "propfind::network",
+                format!("WebDAV request failed with status: {}", response.status()),
+            ))
         }
     }
 
@@ -110,7 +118,9 @@ impl WebDavClient {
     ) -> Result<reqwest::Response> {
         // Acquire semaphore permit
         let _permit = self.request_limiter.acquire().await.map_err(|e| {
-            TingError::NetworkError(format!("Failed to acquire request permit: {}", e))
+            let message = format!("Failed to acquire request permit: {}", e);
+            TingError::network(NetworkErrorKind::Transport, "get::network", message)
+                .with_source(anyhow::anyhow!(e))
         })?;
 
         // Rate limiting
@@ -147,20 +157,25 @@ impl WebDavClient {
         if response.status().is_success() || response.status().as_u16() == 206 {
             Ok(response)
         } else if response.status().as_u16() == 401 {
-            Err(TingError::AuthenticationError(
+            Err(TingError::authentication(
+                AuthenticationErrorKind::InvalidCredentials,
+                "get::authentication",
                 "WebDAV authentication failed".to_string(),
             ))
         } else if response.status().as_u16() == 429 {
             warn!("WebDAV server returned 429 Too Many Requests");
             tokio::time::sleep(Duration::from_secs(2)).await;
-            Err(TingError::NetworkError(
+            Err(TingError::network(
+                NetworkErrorKind::Transport,
+                "get::network",
                 "Rate limited by server".to_string(),
             ))
         } else {
-            Err(TingError::NetworkError(format!(
-                "GET request failed with status: {}",
-                response.status()
-            )))
+            Err(TingError::network(
+                NetworkErrorKind::HttpStatus,
+                "get::network",
+                format!("GET request failed with status: {}", response.status()),
+            ))
         }
     }
 

@@ -1,6 +1,7 @@
 //! ASF tag updates preserve unknown header objects and the complete audio payload.
 
 use super::metadata::AudioMetadataUpdate;
+use crate::core::app::error::{InputErrorKind, TaskErrorKind};
 use crate::core::app::error::{Result, TingError};
 use std::io::{Cursor, Read, Write};
 use std::path::Path;
@@ -28,7 +29,11 @@ const LIBRARY: [u8; 16] = [
 ];
 
 fn invalid() -> TingError {
-    TingError::InvalidRequest("Invalid or oversized ASF metadata".into())
+    TingError::invalid_request(
+        InputErrorKind::InvalidValue,
+        "invalid::invalid_request",
+        "Invalid or oversized ASF metadata".into(),
+    )
 }
 
 fn read<const N: usize>(cursor: &mut Cursor<&[u8]>) -> Result<[u8; N]> {
@@ -302,7 +307,9 @@ pub(super) fn write_metadata(
     let mut buffer = [0; 64 * 1024];
     loop {
         if cancel.is_cancelled() {
-            return Err(TingError::TaskError(
+            return Err(TingError::task(
+                TaskErrorKind::InvalidState,
+                "write_metadata::task",
                 "Audio metadata writing was cancelled".into(),
             ));
         }

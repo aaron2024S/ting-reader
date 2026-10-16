@@ -1,4 +1,5 @@
 use super::{PluginHostGateway, PluginHostUser, required_string_param};
+use crate::core::app::error::{AccessErrorKind, InputErrorKind, LimitErrorKind};
 use crate::core::app::error::{Result, TingError};
 use crate::plugin::sandbox::Permission;
 use crate::plugin::types::PluginInvocationContext;
@@ -20,13 +21,17 @@ impl PluginHostGateway {
             .or_else(|_| required_string_param(params, "target_capability_id"))?;
         let operation = required_string_param(params, "operation")?;
         if operation == "capabilities.invoke" {
-            return Err(TingError::InvalidRequest(
+            return Err(TingError::invalid_request(
+                InputErrorKind::InvalidValue,
+                "capabilities_invoke::invalid_request",
                 "Recursive capability invocation is not allowed".into(),
             ));
         }
         let input = params.get("params").cloned().unwrap_or(Value::Null);
         if input.to_string().len() > 1024 * 1024 {
-            return Err(TingError::ResourceLimitExceeded(
+            return Err(TingError::resource_limit(
+                LimitErrorKind::Payload,
+                "capabilities_invoke::resource_limit",
                 "Capability input exceeds 1 MiB".into(),
             ));
         }
@@ -41,13 +46,19 @@ impl PluginHostGateway {
             )
         });
         if !permitted {
-            return Err(TingError::PermissionDenied(format!(
-                "Plugin {} is not permitted to invoke {} on {}",
-                caller_plugin_id, target_capability_id, target_plugin_id
-            )));
+            return Err(TingError::permission(
+                AccessErrorKind::CapabilityDenied,
+                "capabilities_invoke::permission",
+                format!(
+                    "Plugin {} is not permitted to invoke {} on {}",
+                    caller_plugin_id, target_capability_id, target_plugin_id
+                ),
+            ));
         }
         if caller_plugin_id == target_plugin_id {
-            return Err(TingError::InvalidRequest(
+            return Err(TingError::invalid_request(
+                InputErrorKind::InvalidValue,
+                "capabilities_invoke::invalid_request",
                 "A plugin cannot invoke its own capability through the cross-plugin gateway".into(),
             ));
         }

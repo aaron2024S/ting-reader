@@ -3,6 +3,7 @@
 //! Builds ship FFmpeg and FFprobe in `bin/` beside the service executable.
 //! Plugin declarations and PATH never affect binary selection.
 
+use crate::core::app::error::DeadlineErrorKind;
 use crate::core::app::error::{Result, TingError};
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
@@ -101,7 +102,9 @@ impl AudioService {
                 let _ = child.kill().await;
                 match result {
                     Ok(Err(error)) => Err(error.into()),
-                    Err(_) => Err(TingError::Timeout(
+                    Err(_) => Err(TingError::timeout(
+                        DeadlineErrorKind::Elapsed,
+                        "bounded_output::timeout",
                         "Audio metadata operation timed out".into(),
                     )),
                     Ok(Ok(_)) => unreachable!(),

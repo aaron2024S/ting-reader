@@ -33,20 +33,23 @@ pub async fn list_tasks(
 
     let tasks: Vec<TaskInfoResponse> = task_records
         .into_iter()
-        .map(|record| TaskInfoResponse {
-            id: record.id,
-            task_type: record.task_type,
-            status: record.status,
-            payload: record.payload,
-            message: record.message,
-            message_key: record.message_key,
-            message_params: record.message_params,
-            error: record.error,
-            retries: record.retries,
-            max_retries: record.max_retries,
-            created_at: record.created_at,
-            started_at: None,  // TODO: Add started_at to TaskRecord
-            finished_at: None, // TODO: Add finished_at to TaskRecord
+        .map(|record| {
+            let error = record.failure();
+            TaskInfoResponse {
+                id: record.id,
+                task_type: record.task_type,
+                status: record.status,
+                payload: record.payload,
+                message: record.message,
+                message_key: record.message_key,
+                message_params: record.message_params,
+                error,
+                retries: record.retries,
+                max_retries: record.max_retries,
+                created_at: record.created_at,
+                started_at: None,  // TODO: Add started_at to TaskRecord
+                finished_at: None, // TODO: Add finished_at to TaskRecord
+            }
         })
         .collect();
 
@@ -75,6 +78,7 @@ pub async fn get_task(
         None
     };
 
+    let error = task_record.failure();
     let response = TaskDetailResponse {
         id: task_record.id,
         task_type: task_record.task_type,
@@ -84,7 +88,7 @@ pub async fn get_task(
         message_key: task_record.message_key,
         message_params: task_record.message_params,
         result,
-        error: task_record.error,
+        error,
         retries: task_record.retries,
         max_retries: task_record.max_retries,
         created_at: task_record.created_at,

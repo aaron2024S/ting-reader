@@ -3,6 +3,7 @@
 //! 基于机器特征自动生成主密钥，无需用户配置。
 //! 使用多种机器特征确保密钥的唯一性和稳定性。
 
+use crate::core::app::error::ConfigurationErrorKind;
 use crate::core::app::error::{Result, TingError};
 use sha2::{Digest, Sha256};
 use std::path::Path;
@@ -101,7 +102,15 @@ impl MasterKeyManager {
                 .arg("csv")
                 .arg("/nh")
                 .output()
-                .map_err(|e| TingError::ConfigError(format!("获取 MAC 地址失败: {}", e)))?;
+                .map_err(|e| {
+                    let message = format!("获取 MAC 地址失败: {}", e);
+                    TingError::configuration(
+                        ConfigurationErrorKind::Encoding,
+                        "get_mac_address::configuration",
+                        message,
+                    )
+                    .with_source(anyhow::anyhow!(e))
+                })?;
 
             if output.status.success() {
                 let stdout = String::from_utf8_lossy(&output.stdout);
@@ -137,7 +146,15 @@ impl MasterKeyManager {
             let output = Command::new("ip")
                 .args(["link", "show"])
                 .output()
-                .map_err(|e| TingError::ConfigError(format!("获取网络接口失败: {}", e)))?;
+                .map_err(|e| {
+                    let message = format!("获取网络接口失败: {}", e);
+                    TingError::configuration(
+                        ConfigurationErrorKind::Encoding,
+                        "get_mac_address::configuration",
+                        message,
+                    )
+                    .with_source(anyhow::anyhow!(e))
+                })?;
 
             if output.status.success() {
                 let stdout = String::from_utf8_lossy(&output.stdout);
@@ -157,7 +174,11 @@ impl MasterKeyManager {
             }
         }
 
-        Err(TingError::ConfigError("无法获取 MAC 地址".to_string()))
+        Err(TingError::configuration(
+            ConfigurationErrorKind::Encoding,
+            "get_mac_address::configuration",
+            "无法获取 MAC 地址".to_string(),
+        ))
     }
 
     /// 获取或创建机器 ID 文件

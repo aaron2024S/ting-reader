@@ -1,6 +1,7 @@
 //! Host event publication.
 
 use super::{PluginHostGateway, PluginHostUser, required_string_param};
+use crate::core::app::error::{AccessErrorKind, InputErrorKind, LimitErrorKind};
 use crate::core::app::error::{Result, TingError};
 use crate::plugin::types::PluginInvocationContext;
 use serde_json::Value;
@@ -16,13 +17,17 @@ impl PluginHostGateway {
         validate_event_name(&event)?;
         let plugin_name = plugin_id.split('@').next().unwrap_or(plugin_id);
         if !event.starts_with(&format!("{plugin_name}.")) {
-            return Err(TingError::PermissionDenied(
+            return Err(TingError::permission(
+                AccessErrorKind::ResourceDenied,
+                "events_publish::permission",
                 "Plugins may only publish events in their own namespace".into(),
             ));
         }
         let data = params.get("data").cloned().unwrap_or(Value::Null);
         if data.to_string().len() > 1024 * 1024 {
-            return Err(TingError::ResourceLimitExceeded(
+            return Err(TingError::resource_limit(
+                LimitErrorKind::Payload,
+                "events_publish::resource_limit",
                 "Event data exceeds 1 MiB".into(),
             ));
         }
@@ -76,7 +81,11 @@ fn validate_event_name(event: &str) -> Result<()> {
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
     {
-        return Err(TingError::InvalidRequest("Invalid event name".into()));
+        return Err(TingError::invalid_request(
+            InputErrorKind::InvalidValue,
+            "validate_event_name::invalid_request",
+            "Invalid event name".into(),
+        ));
     }
     Ok(())
 }

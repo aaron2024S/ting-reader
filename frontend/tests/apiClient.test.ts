@@ -5,6 +5,69 @@ import { BookOperations, readChapterGroupOrders } from '../src/core/api/books.ts
 import type { Book } from '../src/core/types/index.ts';
 import { createSingleFlightAdapter } from '../src/core/api/mutations.ts';
 import { getGatewayBasePath, getRuntimeAssetUrl, getRuntimePath, getRuntimeUrl } from '../src/core/utils/runtimeUrl.ts';
+import { apiErrorCode, apiErrorMessage, apiErrorPayload, ApiRequestError, readApiError } from '../src/core/api/errors.ts';
+
+test('API error parsing retains classification while displaying the server message', () => {
+  const error = { response: { data: {
+    error: 'PluginExecutionError',
+    message: '  Plugin is temporarily unavailable  ',
+    details: {
+      reason: 'plugin_unavailable',
+      operation: 'invoke',
+      resource: { kind: 'plugin', id: 'example@1.0.0' },
+      context: ['search'],
+      retryable: true,
+      capability_id: 'scraper',
+    },
+    trace_id: 'trace-1',
+  } } };
+  assert.equal(apiErrorMessage(error, 'fallback'), 'Plugin is temporarily unavailable');
+  assert.equal(apiErrorCode(error), 'PluginExecutionError');
+  assert.deepEqual(readApiError(error)?.details, error.response.data.details);
+  assert.equal(readApiError(error)?.trace_id, 'trace-1');
+});
+
+test('API errors tolerate malformed and non JSON responses without throwing', () => {
+  for (const data of [null, 'gateway login page', [], { message: 12, error: {} }]) {
+    const error = { response: { data } };
+    assert.equal(readApiError(error), null);
+    assert.equal(apiErrorMessage(error, 'fallback'), 'fallback');
+  }
+  const malformed = { response: { data: {
+    message: 'Readable message',
+    details: { reason: 42, retryable: 'false', context: [1, 'safe'] },
+  } } };
+  const details = readApiError(malformed)?.details;
+  assert.equal(details?.reason, undefined);
+  assert.equal(details?.retryable, undefined);
+  assert.deepEqual(details?.context, ['safe']);
+  assert.equal(apiErrorMessage(new Error('transport failed'), 'fallback'), 'transport failed');
+  assert.equal(apiErrorMessage({ response: { data: { error: 'NotFound' } } }, 'fallback'), 'NotFound');
+});
+
+test('bridge payloads preserve error metadata without serializing request credentials', () => {
+  const error = Object.assign(new Error('HTTP 503'), {
+    response: {
+      status: 503,
+      data: {
+        error: 'PluginExecutionError',
+        message: 'Provider unavailable',
+        details: { reason: 'plugin_unavailable', retryable: true, operation: 'search' },
+        trace_id: 'trace-bridge',
+      },
+    },
+    config: { headers: { Authorization: 'private-credential' } },
+  });
+  const payload = apiErrorPayload(error, 'fallback');
+  assert.equal(payload.status, 503);
+  assert.equal(payload.trace_id, 'trace-bridge');
+  assert.equal(payload.details?.retryable, true);
+  assert.equal(JSON.stringify(payload).includes('private-credential'), false);
+  const local = new ApiRequestError(payload);
+  assert.equal(apiErrorCode(local), 'PluginExecutionError');
+  assert.equal(apiErrorMessage(local, 'fallback'), 'Provider unavailable');
+  assert.deepEqual(apiErrorPayload(local, 'fallback'), payload);
+});
 
 const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
 

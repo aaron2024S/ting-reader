@@ -12,6 +12,7 @@
 //! - 低耦合：插件只需实现解密接口，不关心缓存
 //! - 可扩展：支持任意加密格式（XM, QMC, NCM 等）
 
+use crate::core::app::error::SystemErrorKind;
 use crate::core::app::error::{Result, TingError};
 use std::collections::HashMap;
 use std::fs;
@@ -139,7 +140,11 @@ impl DecryptionCacheService {
     fn get_from_cache(&self, encrypted_path: &Path) -> Result<Option<PathBuf>> {
         let key = self.cache_key(encrypted_path);
         let mut cache = self.cache.write().map_err(|e| {
-            TingError::InitializationError(format!("Failed to acquire cache lock: {}", e))
+            TingError::initialization(
+                SystemErrorKind::Initialization,
+                "get_from_cache::initialization",
+                format!("Failed to acquire cache lock: {}", e),
+            )
         })?;
 
         if let Some(entry) = cache.entries.get_mut(&key) {
@@ -175,7 +180,11 @@ impl DecryptionCacheService {
         let file_size = fs::metadata(decrypted_path)?.len();
 
         let mut cache = self.cache.write().map_err(|e| {
-            TingError::InitializationError(format!("Failed to acquire cache lock: {}", e))
+            TingError::initialization(
+                SystemErrorKind::Initialization,
+                "add_to_cache::initialization",
+                format!("Failed to acquire cache lock: {}", e),
+            )
         })?;
 
         // 检查是否需要清理空间
@@ -231,7 +240,11 @@ impl DecryptionCacheService {
     /// 清理过期的缓存条目
     pub fn cleanup_expired(&self) -> Result<()> {
         let mut cache = self.cache.write().map_err(|e| {
-            TingError::InitializationError(format!("Failed to acquire cache lock: {}", e))
+            TingError::initialization(
+                SystemErrorKind::Initialization,
+                "cleanup_expired::initialization",
+                format!("Failed to acquire cache lock: {}", e),
+            )
         })?;
 
         let mut to_remove = Vec::new();
@@ -261,7 +274,11 @@ impl DecryptionCacheService {
     /// 清理所有缓存
     pub fn cleanup_all(&self) -> Result<()> {
         let mut cache = self.cache.write().map_err(|e| {
-            TingError::InitializationError(format!("Failed to acquire cache lock: {}", e))
+            TingError::initialization(
+                SystemErrorKind::Initialization,
+                "cleanup_all::initialization",
+                format!("Failed to acquire cache lock: {}", e),
+            )
         })?;
 
         for (_, entry) in cache.entries.drain() {
@@ -278,7 +295,11 @@ impl DecryptionCacheService {
     /// 获取缓存统计信息
     pub fn stats(&self) -> Result<CacheStats> {
         let cache = self.cache.read().map_err(|e| {
-            TingError::InitializationError(format!("Failed to acquire cache lock: {}", e))
+            TingError::initialization(
+                SystemErrorKind::Initialization,
+                "stats::initialization",
+                format!("Failed to acquire cache lock: {}", e),
+            )
         })?;
 
         Ok(CacheStats {

@@ -1,3 +1,4 @@
+use crate::core::app::error::{AccessErrorKind, InputErrorKind, NetworkErrorKind};
 use crate::core::app::error::{Result, TingError};
 use crate::db::models::Library;
 use futures::stream::TryStreamExt;
@@ -24,11 +25,22 @@ impl StorageService {
         let url = if let Ok(url) = Url::parse(path) {
             url
         } else {
-            let mut url = Url::parse(&library.url)
-                .map_err(|error| TingError::ValidationError(error.to_string()))?;
-            let mut segments = url
-                .path_segments_mut()
-                .map_err(|_| TingError::ValidationError("Invalid WebDAV library URL".into()))?;
+            let mut url = Url::parse(&library.url).map_err(|error| {
+                let message = error.to_string();
+                TingError::validation(
+                    InputErrorKind::InvalidValue,
+                    "media_url::validation",
+                    message,
+                )
+                .with_source(anyhow::anyhow!(error))
+            })?;
+            let mut segments = url.path_segments_mut().map_err(|_| {
+                TingError::validation(
+                    InputErrorKind::InvalidValue,
+                    "media_url::validation",
+                    "Invalid WebDAV library URL".into(),
+                )
+            })?;
             segments.pop_if_empty();
             // Decode individual segments; an encoded slash is a filename
             // character and must not become another directory boundary.
@@ -39,10 +51,19 @@ impl StorageService {
                 .chain(path.trim_matches('/').split('/'))
                 .filter(|segment| !segment.is_empty())
             {
-                let segment = urlencoding::decode(segment)
-                    .map_err(|error| TingError::ValidationError(error.to_string()))?;
+                let segment = urlencoding::decode(segment).map_err(|error| {
+                    let message = error.to_string();
+                    TingError::validation(
+                        InputErrorKind::InvalidValue,
+                        "media_url::validation",
+                        message,
+                    )
+                    .with_source(anyhow::anyhow!(error))
+                })?;
                 if matches!(segment.as_ref(), "." | "..") {
-                    return Err(TingError::PermissionDenied(
+                    return Err(TingError::permission(
+                        AccessErrorKind::ResourceDenied,
+                        "media_url::permission",
                         "Media path contains a directory traversal".into(),
                     ));
                 }
@@ -52,7 +73,9 @@ impl StorageService {
             url
         };
         if !matches!(url.scheme(), "http" | "https") {
-            return Err(TingError::ValidationError(
+            return Err(TingError::validation(
+                InputErrorKind::UnsupportedValue,
+                "media_url::validation",
                 "Unsupported media URL scheme".into(),
             ));
         }
@@ -73,10 +96,20 @@ impl StorageService {
             let password = key
                 .and_then(|key| crate::core::security::crypto::decrypt(password, key).ok())
                 .unwrap_or_else(|| password.clone());
-            url.set_username(username)
-                .map_err(|_| TingError::ValidationError("Invalid media URL username".into()))?;
-            url.set_password(Some(&password))
-                .map_err(|_| TingError::ValidationError("Invalid media URL password".into()))?;
+            url.set_username(username).map_err(|_| {
+                TingError::validation(
+                    InputErrorKind::InvalidValue,
+                    "authenticated_media_url::validation",
+                    "Invalid media URL username".into(),
+                )
+            })?;
+            url.set_password(Some(&password)).map_err(|_| {
+                TingError::validation(
+                    InputErrorKind::InvalidValue,
+                    "authenticated_media_url::validation",
+                    "Invalid media URL password".into(),
+                )
+            })?;
         }
         Ok(url.to_string())
     }
@@ -171,10 +204,15 @@ impl StorageService {
             }
         }
 
-        let res = req
-            .send()
-            .await
-            .map_err(|e| TingError::NetworkError(e.to_string()))?;
+        let res = req.send().await.map_err(|e| {
+            let message = e.to_string();
+            TingError::network(
+                NetworkErrorKind::Transport,
+                "get_webdav_reader::network",
+                message,
+            )
+            .with_source(anyhow::anyhow!(e))
+        })?;
 
         remote_response_reader(res, range).await
     }
@@ -185,10 +223,20 @@ impl StorageService {
         media_url: &str,
         range: Option<(u64, u64)>,
     ) -> Result<(Box<dyn AsyncRead + Send + Unpin>, u64)> {
-        let url = Url::parse(media_url).map_err(|e| TingError::ValidationError(e.to_string()))?;
+        let url = Url::parse(media_url).map_err(|e| {
+            let message = e.to_string();
+            TingError::validation(
+                InputErrorKind::InvalidValue,
+                "get_http_reader::validation",
+                message,
+            )
+            .with_source(anyhow::anyhow!(e))
+        })?;
 
         if url.scheme() != "http" && url.scheme() != "https" {
-            return Err(TingError::ValidationError(
+            return Err(TingError::validation(
+                InputErrorKind::InvalidValue,
+                "get_http_reader::validation",
                 "Remote media URL must start with http:// or https://".to_string(),
             ));
         }
@@ -210,10 +258,15 @@ impl StorageService {
             }
         }
 
-        let res = req
-            .send()
-            .await
-            .map_err(|e| TingError::NetworkError(e.to_string()))?;
+        let res = req.send().await.map_err(|e| {
+            let message = e.to_string();
+            TingError::network(
+                NetworkErrorKind::Transport,
+                "get_http_reader::network",
+                message,
+            )
+            .with_source(anyhow::anyhow!(e))
+        })?;
 
         remote_response_reader(res, range).await
     }
@@ -245,13 +298,23 @@ impl StorageService {
             request = request.basic_auth(username, Some(password));
         }
         let response = request.send().await.map_err(|error| {
-            TingError::NetworkError(format!("WebDAV {filename} upload failed: {error}"))
+            let message = format!("WebDAV {filename} upload failed: {error}");
+            TingError::network(
+                NetworkErrorKind::Transport,
+                "put_webdav_sidecar::network",
+                message,
+            )
+            .with_source(anyhow::anyhow!(error))
         })?;
         if !response.status().is_success() {
-            return Err(TingError::NetworkError(format!(
-                "Local metadata was saved, but WebDAV {filename} upload failed (HTTP {})",
-                response.status()
-            )));
+            return Err(TingError::network(
+                NetworkErrorKind::HttpStatus,
+                "put_webdav_sidecar::network",
+                format!(
+                    "Local metadata was saved, but WebDAV {filename} upload failed (HTTP {})",
+                    response.status()
+                ),
+            ));
         }
         Ok(())
     }
@@ -262,26 +325,45 @@ fn webdav_sidecar_url(library: &Library, book_path: &str, filename: &str) -> Res
         filename,
         "metadata.json" | "book.nfo" | "cover.jpg" | "cover.jpeg" | "cover.png" | "cover.webp"
     ) {
-        return Err(TingError::InvalidRequest(
+        return Err(TingError::invalid_request(
+            InputErrorKind::InvalidValue,
+            "webdav_sidecar_url::invalid_request",
             "Invalid WebDAV sidecar filename".into(),
         ));
     }
     let mut target = webdav_book_url(library, book_path)?;
     target
         .path_segments_mut()
-        .map_err(|_| TingError::ValidationError("Invalid WebDAV book URL".into()))?
+        .map_err(|_| {
+            TingError::validation(
+                InputErrorKind::InvalidValue,
+                "webdav_sidecar_url::validation",
+                "Invalid WebDAV book URL".into(),
+            )
+        })?
         .pop_if_empty()
         .push(filename);
     Ok(target)
 }
 
 fn webdav_book_url(library: &Library, book_path: &str) -> Result<Url> {
-    let mut root =
-        Url::parse(&library.url).map_err(|error| TingError::ValidationError(error.to_string()))?;
+    let mut root = Url::parse(&library.url).map_err(|error| {
+        let message = error.to_string();
+        TingError::validation(
+            InputErrorKind::InvalidValue,
+            "webdav_book_url::validation",
+            message,
+        )
+        .with_source(anyhow::anyhow!(error))
+    })?;
     {
-        let mut segments = root
-            .path_segments_mut()
-            .map_err(|_| TingError::ValidationError("Invalid WebDAV library URL".into()))?;
+        let mut segments = root.path_segments_mut().map_err(|_| {
+            TingError::validation(
+                InputErrorKind::InvalidValue,
+                "webdav_book_url::validation",
+                "Invalid WebDAV library URL".into(),
+            )
+        })?;
         segments.pop_if_empty();
         for segment in library
             .root_path
@@ -289,15 +371,27 @@ fn webdav_book_url(library: &Library, book_path: &str) -> Result<Url> {
             .split('/')
             .filter(|part| !part.is_empty())
         {
-            segments.push(
-                &urlencoding::decode(segment)
-                    .map_err(|error| TingError::ValidationError(error.to_string()))?,
-            );
+            segments.push(&urlencoding::decode(segment).map_err(|error| {
+                let message = error.to_string();
+                TingError::validation(
+                    InputErrorKind::InvalidValue,
+                    "webdav_book_url::validation",
+                    message,
+                )
+                .with_source(anyhow::anyhow!(error))
+            })?);
         }
         segments.push("");
     }
-    let target =
-        Url::parse(book_path).map_err(|error| TingError::ValidationError(error.to_string()))?;
+    let target = Url::parse(book_path).map_err(|error| {
+        let message = error.to_string();
+        TingError::validation(
+            InputErrorKind::InvalidValue,
+            "webdav_book_url::validation",
+            message,
+        )
+        .with_source(anyhow::anyhow!(error))
+    })?;
     if !matches!(target.scheme(), "http" | "https")
         || target.origin() != root.origin()
         || !format!("{}/", target.path().trim_end_matches('/')).starts_with(root.path())
@@ -306,7 +400,9 @@ fn webdav_book_url(library: &Library, book_path: &str) -> Result<Url> {
         || target.query().is_some()
         || target.fragment().is_some()
     {
-        return Err(TingError::PermissionDenied(
+        return Err(TingError::permission(
+            AccessErrorKind::ResourceDenied,
+            "webdav_book_url::permission",
             "Book folder is outside its WebDAV library".into(),
         ));
     }
@@ -334,33 +430,55 @@ async fn remote_response_reader(
         return Ok((Box::new(tokio::io::empty()), total));
     }
     if !status.is_success() {
-        return Err(TingError::NetworkError(format!(
-            "Remote media request failed: {status}"
-        )));
+        return Err(TingError::network(
+            NetworkErrorKind::HttpStatus,
+            "remote_response_reader::network",
+            format!("Remote media request failed: {status}"),
+        ));
     }
     let partial = status == reqwest::StatusCode::PARTIAL_CONTENT;
     let total_size = if partial {
         let (bounds, total) = content_range
             .and_then(|value| value.strip_prefix("bytes "))
             .and_then(|value| value.split_once('/'))
-            .ok_or_else(|| TingError::NetworkError("Missing remote Content-Range".into()))?;
+            .ok_or_else(|| {
+                TingError::network(
+                    NetworkErrorKind::Transport,
+                    "remote_response_reader::network",
+                    "Missing remote Content-Range".into(),
+                )
+            })?;
         let (start, end) = bounds
             .split_once('-')
             .and_then(|(start, end)| Some((start.parse::<u64>().ok()?, end.parse::<u64>().ok()?)))
-            .ok_or_else(|| TingError::NetworkError("Invalid remote Content-Range".into()))?;
+            .ok_or_else(|| {
+                TingError::network(
+                    NetworkErrorKind::InvalidResponse,
+                    "remote_response_reader::network",
+                    "Invalid remote Content-Range".into(),
+                )
+            })?;
         if start != range.map_or(0, |range| range.0) || end < start {
-            return Err(TingError::NetworkError(
+            return Err(TingError::network(
+                NetworkErrorKind::Transport,
+                "remote_response_reader::network",
                 "Remote Content-Range does not match the requested offset".into(),
             ));
         }
         if total == "*" {
             0
         } else {
-            let total = total
-                .parse::<u64>()
-                .map_err(|_| TingError::NetworkError("Invalid remote total length".into()))?;
+            let total = total.parse::<u64>().map_err(|_| {
+                TingError::network(
+                    NetworkErrorKind::InvalidResponse,
+                    "remote_response_reader::network",
+                    "Invalid remote total length".into(),
+                )
+            })?;
             if end >= total {
-                return Err(TingError::NetworkError(
+                return Err(TingError::network(
+                    NetworkErrorKind::Transport,
+                    "remote_response_reader::network",
                     "Remote Content-Range exceeds the source length".into(),
                 ));
             }
@@ -411,7 +529,9 @@ fn chapter_url(library: &Library, book_path: &str, chapter_path: &str) -> Result
         .starts_with(&format!("{}/", book.path().trim_end_matches('/')))
         || chapter.path().ends_with('/')
     {
-        return Err(TingError::PermissionDenied(
+        return Err(TingError::permission(
+            AccessErrorKind::ResourceDenied,
+            "chapter_url::permission",
             "Chapter is outside the WebDAV book folder".into(),
         ));
     }
@@ -437,7 +557,15 @@ fn transfer_client() -> Result<Client> {
     Client::builder()
         .timeout(std::time::Duration::from_secs(300))
         .build()
-        .map_err(|error| TingError::NetworkError(error.to_string()))
+        .map_err(|error| {
+            let message = error.to_string();
+            TingError::network(
+                NetworkErrorKind::Transport,
+                "transfer_client::network",
+                message,
+            )
+            .with_source(anyhow::anyhow!(error))
+        })
 }
 
 impl StorageService {
@@ -459,7 +587,15 @@ impl StorageService {
         )
         .send()
         .await
-        .map_err(|error| TingError::NetworkError(error.to_string()))?;
+        .map_err(|error| {
+            let message = error.to_string();
+            TingError::network(
+                NetworkErrorKind::Transport,
+                "get_webdav_write_source::network",
+                message,
+            )
+            .with_source(anyhow::anyhow!(error))
+        })?;
         let revision = WebDavFileRevision {
             etag: response
                 .headers()
@@ -507,12 +643,24 @@ impl StorageService {
         let response = authenticated_request(library, key, request)
             .send()
             .await
-            .map_err(|error| TingError::NetworkError(error.to_string()))?;
+            .map_err(|error| {
+                let message = error.to_string();
+                TingError::network(
+                    NetworkErrorKind::Transport,
+                    "put_webdav_audio_file::network",
+                    message,
+                )
+                .with_source(anyhow::anyhow!(error))
+            })?;
         if !response.status().is_success() {
-            return Err(TingError::NetworkError(format!(
-                "WebDAV audio metadata upload failed (HTTP {})",
-                response.status()
-            )));
+            return Err(TingError::network(
+                NetworkErrorKind::HttpStatus,
+                "put_webdav_audio_file::network",
+                format!(
+                    "WebDAV audio metadata upload failed (HTTP {})",
+                    response.status()
+                ),
+            ));
         }
         Ok(())
     }

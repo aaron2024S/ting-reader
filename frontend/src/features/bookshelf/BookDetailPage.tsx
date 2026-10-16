@@ -1,3 +1,4 @@
+import { apiErrorMessage } from '../../core/api/errors';
 import React, { useEffect, useState, useRef } from 'react';
 import { useParams, useNavigate, useSearchParams } from 'react-router';
 import type { Book, Chapter } from '../../core/types';
@@ -78,8 +79,8 @@ const BookDetailPage: React.FC = () => {
     try {
       const result = await operationsRef.current?.generateRegex(genFilename, genNum, genTitle);
       setGenResult(result ?? null);
-    } catch {
-      alert(t('bookshelf.generateFailed'));
+    } catch (error) {
+      alert(apiErrorMessage(error, t('bookshelf.generateFailed')));
     }
   };
 
@@ -434,7 +435,7 @@ const BookDetailPage: React.FC = () => {
       alert(t('bookshelf.writeMetadataStarted'));
     } catch (err) {
       console.error('Failed to write metadata', err);
-      alert(t('bookshelf.writeMetadataFailed'));
+      alert(apiErrorMessage(err, t('bookshelf.writeMetadataFailed')));
     }
   };
 
@@ -470,8 +471,8 @@ const BookDetailPage: React.FC = () => {
       setIsEditModalOpen(false);
       setEditCoverFile(null);
       setEditLockTouched(false);
-    } catch {
-      setEditSaveError(t(editCoverFile ? 'bookshelf.coverUploadFailed' : 'common.saveFailed'));
+    } catch (error) {
+      setEditSaveError(apiErrorMessage(error, t(editCoverFile ? 'bookshelf.coverUploadFailed' : 'common.saveFailed')));
     } finally {
       setEditSaving(false);
     }
@@ -484,7 +485,7 @@ const BookDetailPage: React.FC = () => {
       navigate('/', { replace: true });
     } catch (err) {
       console.error('Failed to delete book', err);
-      alert(t('bookshelf.deleteBookFailed'));
+      alert(apiErrorMessage(err, t('bookshelf.deleteBookFailed')));
     } finally {
       setDeleting(false);
       setIsDeleteModalOpen(false);

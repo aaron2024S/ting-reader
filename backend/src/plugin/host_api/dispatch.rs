@@ -2,6 +2,9 @@
 //! Runtime adapters only transport JSON and binary buffers into this module.
 
 use super::resources::ResourceScope;
+use crate::core::app::error::{
+    AccessErrorKind, InputErrorKind, LimitErrorKind, NetworkErrorKind, PluginErrorKind,
+};
 use crate::core::app::error::{Result, TingError};
 use crate::plugin::{PluginHostGateway, PluginHostUser};
 use serde_json::Value;
@@ -21,19 +24,36 @@ pub(crate) async fn invoke(
     if method.len() > 128
         || serde_json::to_vec(&input).map_or(true, |json| json.len() > 1024 * 1024)
     {
-        return Err(TingError::ResourceLimitExceeded(
+        return Err(TingError::resource_limit(
+            LimitErrorKind::Payload,
+            "invoke::resource_limit",
             "Host control input exceeds 1 MiB".into(),
         ));
     }
     if method.starts_with("resources.") {
-        let scope = resources
-            .ok_or_else(|| TingError::PermissionDenied("No resource scope for this call".into()))?;
-        return scope
-            .invoke(method, input)
-            .map_err(|error| TingError::PluginExecutionError(error.to_string()));
+        let scope = resources.ok_or_else(|| {
+            TingError::permission(
+                AccessErrorKind::OwnershipMismatch,
+                "invoke::permission",
+                "No resource scope for this call".into(),
+            )
+        })?;
+        return scope.invoke(method, input).map_err(|error| {
+            let message = error.to_string();
+            TingError::plugin_execution(
+                PluginErrorKind::Runtime,
+                "invoke::plugin_execution",
+                message,
+            )
+            .with_source(anyhow::anyhow!(error))
+        });
     }
     let gateway = gateway.ok_or_else(|| {
-        TingError::PluginExecutionError("Host business services are unavailable".into())
+        TingError::plugin_execution(
+            PluginErrorKind::Unavailable,
+            "invoke::plugin_execution",
+            "Host business services are unavailable".into(),
+        )
     })?;
     let owned_permissions;
     let permissions = match permissions {
@@ -76,17 +96,28 @@ pub(crate) async fn http_request(
     resources: Option<&Arc<ResourceScope>>,
 ) -> Result<Value> {
     let scope = resources.ok_or_else(|| {
-        TingError::PermissionDenied("HTTP requests require a Host resource scope".into())
+        TingError::permission(
+            AccessErrorKind::OwnershipMismatch,
+            "http_request::permission",
+            "HTTP requests require a Host resource scope".into(),
+        )
     })?;
-    let request: HostHttpRequest = serde_json::from_value(params.clone())
-        .map_err(|_| TingError::InvalidRequest("Invalid HTTP request parameters".into()))?;
+    let request: HostHttpRequest = serde_json::from_value(params.clone()).map_err(|_| {
+        TingError::invalid_request(
+            InputErrorKind::InvalidValue,
+            "http_request::invalid_request",
+            "Invalid HTTP request parameters".into(),
+        )
+    })?;
     if request.url.len() > 4096
         || request
             .body
             .as_ref()
             .is_some_and(|body| body.len() > 1024 * 1024)
     {
-        return Err(TingError::InvalidRequest(
+        return Err(TingError::invalid_request(
+            InputErrorKind::OutOfRange,
+            "http_request::invalid_request",
             "HTTP request exceeds its size limit".into(),
         ));
     }
@@ -99,7 +130,9 @@ pub(crate) async fn http_request(
         method.as_str(),
         "GET" | "HEAD" | "POST" | "PUT" | "PATCH" | "DELETE" | "OPTIONS"
     ) {
-        return Err(TingError::InvalidRequest(
+        return Err(TingError::invalid_request(
+            InputErrorKind::UnsupportedValue,
+            "http_request::invalid_request",
             "Unsupported HTTP request method".into(),
         ));
     }
@@ -117,23 +150,33 @@ pub(crate) async fn http_request(
     let cancellation = scope.cancellation_token();
     let response = tokio::select! {
         biased;
-        _ = cancellation.cancelled() => return Err(TingError::PluginExecutionError("HTTP request cancelled".into())),
+        _ = cancellation.cancelled() => return Err(TingError::plugin_execution(PluginErrorKind::Cancelled, "http_request::plugin_execution", "HTTP request cancelled".into())),
         response = super::http::request(&request.url, Some(&options), &domains) => {
-            response.map_err(|error| TingError::NetworkError(error.to_string()))?
+            response.map_err(|error| TingError::network(NetworkErrorKind::Transport, "http_request::network", error.to_string()))?
         }
     };
     let status = response.status;
     let headers = response.headers;
     let body = response.body;
     if body.len() > 8 * 1024 * 1024 {
-        return Err(TingError::ResourceLimitExceeded(
+        return Err(TingError::resource_limit(
+            LimitErrorKind::Payload,
+            "http_request::resource_limit",
             "HTTP response exceeds 8 MiB".into(),
         ));
     }
     let length = body.len();
     let resource = scope
         .grant_bytes(Arc::from(body), headers.get("content-type").cloned())
-        .map_err(|error| TingError::PluginExecutionError(error.to_string()))?;
+        .map_err(|error| {
+            let message = error.to_string();
+            TingError::plugin_execution(
+                PluginErrorKind::Runtime,
+                "http_request::plugin_execution",
+                message,
+            )
+            .with_source(anyhow::anyhow!(error))
+        })?;
     Ok(
         serde_json::json!({"resource": resource, "length": length, "status": status, "headers": headers}),
     )

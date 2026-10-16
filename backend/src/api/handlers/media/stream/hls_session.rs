@@ -1,3 +1,4 @@
+use crate::core::app::error::{ExternalErrorKind, LimitErrorKind, LookupErrorKind};
 use crate::core::app::error::{Result, TingError};
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
@@ -24,7 +25,11 @@ pub(super) struct HlsProcess {
 impl HlsProcess {
     pub fn check_input(&self) -> Result<()> {
         if self.input_error.load(Ordering::Relaxed) {
-            return Err(TingError::ExternalError("HLS decoded input failed".into()));
+            return Err(TingError::external_tool(
+                ExternalErrorKind::Response,
+                "check_input::external_tool",
+                "HLS decoded input failed".into(),
+            ));
         }
         Ok(())
     }
@@ -144,7 +149,11 @@ impl HlsSessionManager {
         is_strm: bool,
     ) -> Result<PendingHlsSession> {
         let permit = self.permits.clone().try_acquire_owned().map_err(|_| {
-            TingError::ResourceLimitExceeded("Too many concurrent HLS sessions".into())
+            TingError::resource_limit(
+                LimitErrorKind::Concurrency,
+                "create_session::resource_limit",
+                "Too many concurrent HLS sessions".into(),
+            )
         })?;
         let id = Uuid::new_v4().to_string();
         let session = Arc::new(Mutex::new(HlsSession {
@@ -171,17 +180,21 @@ impl HlsSessionManager {
     }
 
     pub(super) async fn get_session(&self, id: &str) -> Result<Arc<Mutex<HlsSession>>> {
-        let session = self
-            .sessions
-            .read()
-            .await
-            .get(id)
-            .cloned()
-            .ok_or_else(|| TingError::NotFound("HLS session not found".into()))?;
+        let session = self.sessions.read().await.get(id).cloned().ok_or_else(|| {
+            TingError::not_found(
+                LookupErrorKind::Session,
+                "get_session::not_found",
+                "HLS session not found".into(),
+            )
+        })?;
         {
             let mut guard = session.lock().await;
             if guard.closed {
-                return Err(TingError::NotFound("HLS session closed".into()));
+                return Err(TingError::not_found(
+                    LookupErrorKind::Session,
+                    "get_session::not_found",
+                    "HLS session closed".into(),
+                ));
             }
             guard.last_accessed = Instant::now();
         }

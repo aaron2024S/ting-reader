@@ -1,5 +1,6 @@
 use crate::api::require_admin;
 use crate::api::state::AppState;
+use crate::core::app::error::{CodecErrorKind, InputErrorKind, LookupErrorKind};
 use crate::core::app::error::{Result, TingError};
 use crate::db::models::NotificationWebhook;
 use axum::{
@@ -171,7 +172,13 @@ pub async fn update_notification_webhook(
         .notification_repo
         .find_by_id(&id)
         .await?
-        .ok_or_else(|| TingError::NotFound(format!("Webhook {} not found", id)))?;
+        .ok_or_else(|| {
+            TingError::not_found(
+                LookupErrorKind::Resource,
+                "update_notification_webhook::not_found",
+                format!("Webhook {} not found", id),
+            )
+        })?;
 
     webhook.name = normalize_name(&req.name)?;
     webhook.url = normalize_url(&req.url)?;
@@ -221,7 +228,13 @@ pub async fn delete_notification_webhook(
         .notification_repo
         .find_by_id(&id)
         .await?
-        .ok_or_else(|| TingError::NotFound(format!("Webhook {} not found", id)))?;
+        .ok_or_else(|| {
+            TingError::not_found(
+                LookupErrorKind::Resource,
+                "delete_notification_webhook::not_found",
+                format!("Webhook {} not found", id),
+            )
+        })?;
 
     state.notification_repo.delete(&id).await?;
 
@@ -282,7 +295,7 @@ pub async fn test_notification_webhook(
                 &crate::core::notifications::NotificationEventPayload::test_payload(),
             )
             .unwrap_or_default(),
-            error: Some(error.to_string()),
+            error: Some(crate::core::app::error::ErrorResponse::from_error(&error)),
         },
     };
 
@@ -292,7 +305,9 @@ pub async fn test_notification_webhook(
 fn normalize_name(name: &str) -> Result<String> {
     let name = name.trim();
     if name.is_empty() {
-        return Err(TingError::ValidationError(
+        return Err(TingError::validation(
+            InputErrorKind::InvalidValue,
+            "normalize_name::validation",
             "Webhook name cannot be empty".to_string(),
         ));
     }
@@ -301,10 +316,17 @@ fn normalize_name(name: &str) -> Result<String> {
 
 fn normalize_url(raw_url: &str) -> Result<String> {
     let url = raw_url.trim();
-    let parsed = url::Url::parse(url)
-        .map_err(|_| TingError::ValidationError("Webhook URL is invalid".to_string()))?;
+    let parsed = url::Url::parse(url).map_err(|_| {
+        TingError::validation(
+            InputErrorKind::InvalidValue,
+            "normalize_url::validation",
+            "Webhook URL is invalid".to_string(),
+        )
+    })?;
     if parsed.scheme() != "http" && parsed.scheme() != "https" {
-        return Err(TingError::ValidationError(
+        return Err(TingError::validation(
+            InputErrorKind::InvalidValue,
+            "normalize_url::validation",
             "Webhook URL must start with http:// or https://".to_string(),
         ));
     }
@@ -326,7 +348,9 @@ fn normalize_events(events: Vec<String>) -> Result<String> {
     normalized.dedup();
 
     if normalized.is_empty() {
-        return Err(TingError::ValidationError(
+        return Err(TingError::validation(
+            InputErrorKind::InvalidValue,
+            "normalize_events::validation",
             "At least one event must be selected".to_string(),
         ));
     }
@@ -335,14 +359,22 @@ fn normalize_events(events: Vec<String>) -> Result<String> {
         .iter()
         .find(|event| !supported.contains(event.as_str()))
     {
-        return Err(TingError::ValidationError(format!(
-            "Unsupported webhook event: {}",
-            unknown
-        )));
+        return Err(TingError::validation(
+            InputErrorKind::UnsupportedValue,
+            "normalize_events::validation",
+            format!("Unsupported webhook event: {}", unknown),
+        ));
     }
 
-    serde_json::to_string(&normalized)
-        .map_err(|error| TingError::SerializationError(error.to_string()))
+    serde_json::to_string(&normalized).map_err(|error| {
+        let message = error.to_string();
+        TingError::serialization(
+            CodecErrorKind::InvalidData,
+            "normalize_events::serialization",
+            message,
+        )
+        .with_source(anyhow::anyhow!(error))
+    })
 }
 
 fn normalize_secret(secret: Option<String>) -> Option<String> {
@@ -359,8 +391,15 @@ fn normalize_headers(headers: HashMap<String, String>) -> Result<String> {
         .collect::<HashMap<_, _>>();
 
     crate::core::notifications::validate_headers(&normalized)?;
-    serde_json::to_string(&normalized)
-        .map_err(|error| TingError::SerializationError(error.to_string()))
+    serde_json::to_string(&normalized).map_err(|error| {
+        let message = error.to_string();
+        TingError::serialization(
+            CodecErrorKind::InvalidData,
+            "normalize_headers::serialization",
+            message,
+        )
+        .with_source(anyhow::anyhow!(error))
+    })
 }
 
 fn normalize_body_template(template: String) -> Result<String> {

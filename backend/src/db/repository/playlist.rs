@@ -1,3 +1,4 @@
+use crate::core::app::error::AccessErrorKind;
 use crate::core::app::error::{Result, TingError};
 use crate::db::manager::DatabaseManager;
 use crate::db::models::{Book, Playlist, PlaylistBook, PlaylistItem};
@@ -198,9 +199,7 @@ impl PlaylistRepository {
                             .unwrap_or(false);
 
                         if !has_access {
-                            return Err(TingError::PermissionDenied(
-                                "No access to one or more books".to_string(),
-                            ));
+                            return Err(TingError::permission(AccessErrorKind::ResourceDenied, "replace_books::permission", "No access to one or more books".to_string()));
                         }
                     }
                 }
@@ -287,9 +286,7 @@ impl PlaylistRepository {
                     };
 
                     if !has_access {
-                        return Err(TingError::PermissionDenied(
-                            "No access to playlist item".to_string(),
-                        ));
+                        return Err(TingError::permission(AccessErrorKind::ResourceDenied, "add_item::permission", "No access to playlist item".to_string()));
                     }
                 }
 
@@ -420,9 +417,7 @@ impl PlaylistRepository {
                         };
 
                         if !has_access {
-                            return Err(TingError::PermissionDenied(
-                                "No access to one or more playlist items".to_string(),
-                            ));
+                            return Err(TingError::permission(AccessErrorKind::ResourceDenied, "replace_items::permission", "No access to one or more playlist items".to_string()));
                         }
                     }
                 }

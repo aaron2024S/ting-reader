@@ -1,6 +1,7 @@
 //! Source file deletion and explicit metadata-write tasks.
 
 use crate::api::state::AppState;
+use crate::core::app::error::{InputErrorKind, LookupErrorKind};
 use crate::core::app::error::{Result, TingError};
 use crate::core::storage::local_paths::{
     ensure_path_inside_root, resolve_existing_local_library_root,
@@ -30,11 +31,13 @@ pub async fn delete_book(
     Query(query): Query<DeleteBookQuery>,
     user: crate::auth::middleware::AuthUser,
 ) -> Result<impl IntoResponse> {
-    let book = state
-        .book_repo
-        .find_by_id(&id)
-        .await?
-        .ok_or_else(|| TingError::NotFound(format!("Book with id {} not found", id)))?;
+    let book = state.book_repo.find_by_id(&id).await?.ok_or_else(|| {
+        TingError::not_found(
+            LookupErrorKind::Book,
+            "delete_book::not_found",
+            format!("Book with id {} not found", id),
+        )
+    })?;
 
     let library = state
         .library_repo
@@ -124,10 +127,11 @@ async fn delete_local_book_source_files(
     library: Option<&crate::db::models::Library>,
 ) -> Result<()> {
     let Some(library) = library else {
-        return Err(TingError::NotFound(format!(
-            "Library with id {} not found",
-            book.library_id
-        )));
+        return Err(TingError::not_found(
+            LookupErrorKind::Book,
+            "delete_local_book_source_files::not_found",
+            format!("Library with id {} not found", book.library_id),
+        ));
     };
     if library.library_type != "local" {
         return Ok(());
@@ -244,21 +248,29 @@ pub async fn write_book_metadata_to_files(
 ) -> Result<impl IntoResponse> {
     crate::api::require_admin(&user)?;
 
-    let book = state
-        .book_repo
-        .find_by_id(&id)
-        .await?
-        .ok_or_else(|| TingError::NotFound(format!("Book with id {} not found", id)))?;
+    let book = state.book_repo.find_by_id(&id).await?.ok_or_else(|| {
+        TingError::not_found(
+            LookupErrorKind::Book,
+            "write_book_metadata_to_files::not_found",
+            format!("Book with id {} not found", id),
+        )
+    })?;
 
     let library = state
         .library_repo
         .find_by_id(&book.library_id)
         .await?
         .ok_or_else(|| {
-            TingError::NotFound(format!("Library with id {} not found", book.library_id))
+            TingError::not_found(
+                LookupErrorKind::Book,
+                "write_book_metadata_to_files::not_found",
+                format!("Library with id {} not found", book.library_id),
+            )
         })?;
     if !library.can_write_metadata_files() {
-        return Err(TingError::ValidationError(
+        return Err(TingError::validation(
+            InputErrorKind::MissingField,
+            "write_book_metadata_to_files::validation",
             "Metadata file writing requires a local library or an enabled WebDAV library"
                 .to_string(),
         ));

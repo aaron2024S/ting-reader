@@ -1,4 +1,5 @@
 use super::super::{LibraryScanner, ScanMode};
+use crate::core::app::error::NetworkErrorKind;
 use crate::core::app::error::{Result, TingError};
 use crate::db::repository::LibraryScanState;
 use quick_xml::events::Event;
@@ -78,7 +79,7 @@ impl LibraryScanner {
             .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
             .timeout(std::time::Duration::from_secs(30))
             .build()
-            .map_err(|e| TingError::NetworkError(e.to_string()))?;
+            .map_err(|e| { let message = e.to_string(); TingError::network(NetworkErrorKind::Transport, "list_webdav_files::network", message).with_source(anyhow::anyhow!(e)) })?;
 
         let username = library.username.as_deref();
 
@@ -395,7 +396,9 @@ impl LibraryScanner {
         }
 
         if !listing_complete {
-            return Err(TingError::NetworkError(
+            return Err(TingError::network(
+                NetworkErrorKind::Transport,
+                "list_webdav_files::network",
                 "WebDAV directory listing was incomplete; existing scan state was preserved"
                     .to_string(),
             ));
@@ -483,10 +486,15 @@ impl LibraryScanner {
                 );
                 return Ok(None);
             }
-            let xml = response
-                .text()
-                .await
-                .map_err(|e| TingError::NetworkError(e.to_string()))?;
+            let xml = response.text().await.map_err(|e| {
+                let message = e.to_string();
+                TingError::network(
+                    NetworkErrorKind::Transport,
+                    "try_webdav_sync_collection::network",
+                    message,
+                )
+                .with_source(anyhow::anyhow!(e))
+            })?;
             let report = self.parse_webdav_sync_report(&xml, root_url);
             if report.requires_fallback {
                 warn!(
@@ -643,17 +651,27 @@ impl LibraryScanner {
         if let (Some(username), Some(password)) = (username, password) {
             request = request.basic_auth(username, Some(password));
         }
-        let response = request
-            .send()
-            .await
-            .map_err(|e| TingError::NetworkError(e.to_string()))?;
+        let response = request.send().await.map_err(|e| {
+            let message = e.to_string();
+            TingError::network(
+                NetworkErrorKind::Transport,
+                "fetch_webdav_sync_token::network",
+                message,
+            )
+            .with_source(anyhow::anyhow!(e))
+        })?;
         if response.status().as_u16() != 207 && !response.status().is_success() {
             return Ok(None);
         }
-        let xml = response
-            .text()
-            .await
-            .map_err(|e| TingError::NetworkError(e.to_string()))?;
+        let xml = response.text().await.map_err(|e| {
+            let message = e.to_string();
+            TingError::network(
+                NetworkErrorKind::Transport,
+                "fetch_webdav_sync_token::network",
+                message,
+            )
+            .with_source(anyhow::anyhow!(e))
+        })?;
         Ok(parse_webdav_sync_token(&xml))
     }
 

@@ -13,6 +13,7 @@
 //! The plugin manager should handle JS plugins specially, executing them on a
 //! dedicated single-threaded runtime.
 
+use crate::core::app::error::PluginErrorKind;
 use anyhow::Result;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -63,10 +64,11 @@ impl JavaScriptPluginLoader {
         // Get the entry point file path
         let entry_point = plugin_dir.join(&metadata.entry_point);
         if !entry_point.exists() {
-            return Err(TingError::PluginLoadError(format!(
-                "Entry point file not found: {}",
-                entry_point.display()
-            ))
+            return Err(TingError::plugin_load(
+                PluginErrorKind::Unavailable,
+                "new::plugin_load",
+                format!("Entry point file not found: {}", entry_point.display()),
+            )
             .into());
         }
 
@@ -122,17 +124,22 @@ impl JavaScriptPluginLoader {
     fn verify_runtime(metadata: &PluginMetadata, _plugin_dir: &Path) -> Result<()> {
         if let Some(runtime) = metadata.runtime.as_deref() {
             if runtime != "javascript" {
-                return Err(TingError::PluginLoadError(format!(
-                    "Plugin runtime is '{}', expected 'javascript'",
-                    runtime
-                ))
+                return Err(TingError::plugin_load(
+                    PluginErrorKind::Runtime,
+                    "verify_runtime::plugin_load",
+                    format!("Plugin runtime is '{}', expected 'javascript'", runtime),
+                )
                 .into());
             }
         } else if !metadata.entry_point.ends_with(".js") {
-            return Err(TingError::PluginLoadError(format!(
-                "Plugin entry_point '{}' is not a .js file and no 'runtime' field specified",
-                metadata.entry_point
-            ))
+            return Err(TingError::plugin_load(
+                PluginErrorKind::InvalidManifest,
+                "verify_runtime::plugin_load",
+                format!(
+                    "Plugin entry_point '{}' is not a .js file and no 'runtime' field specified",
+                    metadata.entry_point
+                ),
+            )
             .into());
         }
 

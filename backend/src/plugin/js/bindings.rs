@@ -60,6 +60,48 @@ struct JsPluginLogState {
     logger: DefaultPluginLogger,
 }
 
+fn host_error(
+    error: &anyhow::Error,
+    plugin_id: &str,
+    operation: &str,
+) -> ting_plugin_contract::protocol::PluginError {
+    use crate::core::app::error::TingError;
+    use ting_plugin_contract::protocol::{PluginError, PluginErrorCode};
+
+    fn bounded(value: &str, limit: usize, fallback: &str) -> String {
+        if value.is_empty() {
+            return fallback.into();
+        }
+        let mut end = value.len().min(limit);
+        while !value.is_char_boundary(end) {
+            end -= 1;
+        }
+        value[..end].into()
+    }
+
+    let typed = error.downcast_ref::<TingError>();
+    let code = typed
+        .map(TingError::plugin_error_code)
+        .or_else(|| {
+            error
+                .downcast_ref::<crate::plugin::host_api::resources::ResourceError>()
+                .map(|error| error.code)
+        })
+        .unwrap_or(PluginErrorCode::InternalError);
+    PluginError {
+        code,
+        message: bounded(&error.to_string(), 512, "Host operation failed"),
+        details: typed
+            .map(TingError::diagnostic_details)
+            .filter(|details| serde_json::to_vec(details).is_ok_and(|bytes| bytes.len() <= 4096)),
+        plugin_id: bounded(plugin_id, 128, "host"),
+        capability_id: "host".into(),
+        operation: bounded(operation, 128, "host.invoke"),
+        request_id: uuid::Uuid::new_v4().to_string(),
+        retryable: typed.is_some_and(TingError::is_retryable),
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct JsHostInvocationContext {
     pub user: Option<PluginHostUser>,
@@ -67,10 +109,30 @@ pub struct JsHostInvocationContext {
     pub cancellation: Option<tokio_util::sync::CancellationToken>,
 }
 
+fn resource_scope(
+    state: &deno_core::OpState,
+) -> Result<&std::sync::Arc<crate::plugin::host_api::resources::ResourceScope>> {
+    use crate::core::app::error::{AccessErrorKind, TingError};
+    state
+        .borrow::<JsHostInvocationContext>()
+        .resources
+        .as_ref()
+        .ok_or_else(|| {
+            TingError::permission(
+                AccessErrorKind::ResourceDenied,
+                "javascript.resources",
+                "No resource scope for this call".into(),
+            )
+            .into()
+        })
+}
+
 // Throw with V8's native API. deno_core 0.256's Rust Result converter calls a
 // JavaScript error constructor, which cannot execute during isolate termination.
 fn native_op_error<'a>(
     scope: &mut v8::HandleScope<'a>,
+    state: &deno_core::OpState,
+    operation: &str,
     error: anyhow::Error,
 ) -> v8::Local<'a, v8::Value> {
     if scope.is_execution_terminating() {
@@ -80,6 +142,27 @@ fn native_op_error<'a>(
         return v8::undefined(scope).into();
     };
     let exception = v8::Exception::error(scope, message);
+    let plugin_id = state
+        .try_borrow::<JsHostGatewayState>()
+        .map(|state| state.plugin_id.as_str())
+        .unwrap_or("host");
+    let failure = host_error(&error, plugin_id, operation);
+    if let Ok(value) = deno_core::serde_v8::to_v8(scope, &failure)
+        && let Some(object) = exception.to_object(scope)
+        && let Some(payload) = value.to_object(scope)
+    {
+        // Define own properties without invoking plugin-defined prototype setters.
+        for key in ["code", "details", "retryable"] {
+            if let Some(key) = v8::String::new(scope, key)
+                && let Some(value) = payload.get(scope, key.into())
+            {
+                object.create_data_property(scope, key.into(), value);
+            }
+        }
+        if let Some(key) = v8::String::new(scope, "pluginError") {
+            object.create_data_property(scope, key.into(), value);
+        }
+    }
     scope.throw_exception(exception)
 }
 
@@ -126,13 +209,21 @@ pub fn create_js_runtime_with_bindings(
         #[serde] fields: Option<Value>,
     ) -> v8::Local<'a, v8::Value> {
         let result = (|| -> Result<String> {
+            use crate::core::app::error::{InputErrorKind, PluginErrorKind, TingError};
+            let invalid = |message: &str| {
+                TingError::invalid_request(
+                    InputErrorKind::InvalidValue,
+                    "javascript.log",
+                    message.into(),
+                )
+            };
             let level = PluginLogLevel::parse(&level)
-                .ok_or_else(|| anyhow::anyhow!("Unsupported plugin log level"))?;
+                .ok_or_else(|| invalid("Unsupported plugin log level"))?;
             let fields = match fields {
                 None | Some(Value::Null) => None,
                 Some(Value::Object(fields)) => Some(Value::Object(fields)),
                 Some(_) => {
-                    return Err(anyhow::anyhow!("Plugin log fields must be a JSON object"));
+                    return Err(invalid("Plugin log fields must be a JSON object").into());
                 }
             };
             let logger = {
@@ -140,7 +231,13 @@ pub fn create_js_runtime_with_bindings(
                 state
                     .try_borrow::<JsPluginLogState>()
                     .map(|log_state| log_state.logger.clone())
-                    .ok_or_else(|| anyhow::anyhow!("Plugin logger is not configured"))?
+                    .ok_or_else(|| {
+                        TingError::plugin_execution(
+                            PluginErrorKind::Unavailable,
+                            "javascript.log",
+                            "Plugin logger is not configured".into(),
+                        )
+                    })?
             };
 
             Ok(logger.log(level, &message, fields.as_ref()))
@@ -149,7 +246,7 @@ pub fn create_js_runtime_with_bindings(
             Ok(id) => v8::String::new(v8_scope, &id)
                 .map(Into::into)
                 .unwrap_or_else(|| v8::undefined(v8_scope).into()),
-            Err(error) => native_op_error(v8_scope, error),
+            Err(error) => native_op_error(v8_scope, &state.borrow(), "log", error),
         }
     }
 
@@ -160,6 +257,9 @@ pub fn create_js_runtime_with_bindings(
         #[string] method: String,
         #[serde] params: serde_json::Value,
     ) -> Result<serde_json::Value, anyhow::Error> {
+        use crate::core::app::error::{AccessErrorKind, PluginErrorKind, TingError};
+        use ting_plugin_contract::protocol::CallResult;
+
         let (plugin_id, host_gateway, user, resources, cancellation) = {
             let state = state.borrow();
             let host_state = state.try_borrow::<JsHostGatewayState>().cloned();
@@ -186,17 +286,28 @@ pub fn create_js_runtime_with_bindings(
             }
         };
 
+        let operation = method.clone();
+        let principal = plugin_id.clone();
         let invoke = async {
             if method.starts_with("resources.") {
-                let scope =
-                    resources.ok_or_else(|| anyhow::anyhow!("No resource scope for this call"))?;
+                let scope = resources.ok_or_else(|| {
+                    TingError::permission(
+                        AccessErrorKind::ResourceDenied,
+                        "javascript.host",
+                        "No resource scope for this call".into(),
+                    )
+                })?;
                 return tokio::task::spawn_blocking(move || scope.invoke(&method, params))
                     .await?
                     .map_err(anyhow::Error::from);
             }
 
             let gateway = host_gateway.ok_or_else(|| {
-                anyhow::anyhow!("Ting.host.invoke is not configured for this plugin runtime")
+                TingError::plugin_execution(
+                    PluginErrorKind::Unavailable,
+                    "javascript.host",
+                    "Ting.host.invoke is not configured for this plugin runtime".into(),
+                )
             })?;
             crate::plugin::host_api::invoke(
                 &plugin_id,
@@ -208,17 +319,26 @@ pub fn create_js_runtime_with_bindings(
                 params,
             )
             .await
-            .map_err(|error| anyhow::anyhow!(error.to_string()))
+            .map_err(anyhow::Error::from)
         };
-        if let Some(cancellation) = cancellation {
+        let result = if let Some(cancellation) = cancellation {
             tokio::select! {
                 biased;
-                _ = cancellation.cancelled() => anyhow::bail!("JS invocation cancelled"),
+                _ = cancellation.cancelled() => Err(TingError::plugin_execution(
+                    PluginErrorKind::Cancelled,
+                    "javascript.host",
+                    "JS invocation cancelled".into(),
+                ).into()),
                 result = invoke => result,
             }
         } else {
             invoke.await
-        }
+        };
+        let result = match result {
+            Ok(data) => CallResult::success(data),
+            Err(error) => CallResult::failure(host_error(&error, &principal, &operation)),
+        };
+        Ok(serde_json::to_value(result)?)
     }
 
     #[op2]
@@ -234,18 +354,14 @@ pub fn create_js_runtime_with_bindings(
         #[buffer] bytes: &[u8],
     ) -> v8::Local<'a, v8::Value> {
         let result = (|| -> Result<String> {
-            let scope = state
-                .borrow::<JsHostInvocationContext>()
-                .resources
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("No resource scope for this call"))?;
+            let scope = resource_scope(state)?;
             Ok(scope.create_chunk(bytes)?.0)
         })();
         match result {
             Ok(id) => v8::String::new(v8_scope, &id)
                 .map(Into::into)
                 .unwrap_or_else(|| v8::undefined(v8_scope).into()),
-            Err(error) => native_op_error(v8_scope, error),
+            Err(error) => native_op_error(v8_scope, state, "resources.chunk_create", error),
         }
     }
 
@@ -256,11 +372,7 @@ pub fn create_js_runtime_with_bindings(
         #[string] id: String,
     ) -> v8::Local<'a, v8::Value> {
         let result = (|| -> Result<v8::Local<'a, v8::Uint8Array>> {
-            let scope = state
-                .borrow::<JsHostInvocationContext>()
-                .resources
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("No resource scope for this call"))?;
+            let scope = resource_scope(state)?;
             let chunk = scope.chunk(&ting_plugin_contract::format_calls::ChunkRef(id))?;
             state
                 .borrow::<super::limits::JsBudget>()
@@ -268,7 +380,7 @@ pub fn create_js_runtime_with_bindings(
         })();
         match result {
             Ok(view) => view.into(),
-            Err(error) => native_op_error(v8_scope, error),
+            Err(error) => native_op_error(v8_scope, state, "resources.chunk_copy", error),
         }
     }
 
@@ -286,13 +398,14 @@ pub fn create_js_runtime_with_bindings(
                 || offset.fract() != 0.0
                 || offset > ting_plugin_contract::format_calls::MAX_SAFE_INTEGER as f64
             {
-                anyhow::bail!("Invalid resource offset");
+                return Err(crate::core::app::error::TingError::invalid_request(
+                    crate::core::app::error::InputErrorKind::InvalidValue,
+                    "resources.write_at",
+                    "Invalid resource offset".into(),
+                )
+                .into());
             }
-            let scope = state
-                .borrow::<JsHostInvocationContext>()
-                .resources
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("No resource scope for this call"))?;
+            let scope = resource_scope(state)?;
             Ok(scope.write_at(
                 &ting_plugin_contract::format_calls::ResourceId(id),
                 offset as u64,
@@ -301,7 +414,7 @@ pub fn create_js_runtime_with_bindings(
         })();
         match result {
             Ok(bytes) => v8::Integer::new_from_unsigned(v8_scope, bytes).into(),
-            Err(error) => native_op_error(v8_scope, error),
+            Err(error) => native_op_error(v8_scope, state, "resources.write_at", error),
         }
     }
 
@@ -369,17 +482,16 @@ pub fn create_js_runtime_with_bindings(
     // serialization). They are runtime internals, not plugin Host APIs. Expose
     // only the bounded transport ops; core's event loop retains its own closure
     // references to the original internal object.
-    #[allow(unused_mut)]
-    let mut allowed_ops = vec![
+    let allowed_ops = [
         "op_plugin_log",
         "op_decode_utf8",
         "op_host_invoke",
         "op_chunk_create",
         "op_chunk_copy",
         "op_resource_write",
+        #[cfg(test)]
+        "op_test_principal",
     ];
-    #[cfg(test)]
-    allowed_ops.push("op_test_principal");
     runtime.execute_script(
         "<restrict_plugin_globals>",
         format!(

@@ -1,4 +1,4 @@
-use crate::core::app::error::{Result, TingError};
+use crate::core::app::error::{ErrorResponse, Result, TingError};
 use crate::db::manager::DatabaseManager;
 use crate::db::models::TaskRecord;
 use crate::db::repository::base::Repository;
@@ -269,12 +269,12 @@ impl TaskRepository {
         &self,
         id: &str,
         status: &str,
-        error: Option<&str>,
+        error: Option<&ErrorResponse>,
         retries: i32,
     ) -> Result<()> {
         let id = id.to_string();
         let status = status.to_string();
-        let error = error.map(|s| s.to_string());
+        let error = TaskRecord::encode_failure(error)?;
         self.db.execute(move |conn| {
             conn.execute(
                 "UPDATE tasks SET status = ?, error = ?, retries = ?, updated_at = STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?",

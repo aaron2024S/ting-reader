@@ -2,6 +2,8 @@
 
 所有任务接口仅管理员可访问。
 
+失败或取消任务的 `error` 使用统一的 `error/message/details/trace_id` 对象，正常任务为 `null`。任务历史会保存错误分类和追踪信息；旧记录仅有文本时，`details.reason` 为 `unclassified`，追踪值以 `legacy-task-` 开头，不代表历史请求的追踪 ID。任务仅对可重试错误应用重试策略，参数错误、权限不足和取消不自动重试。
+
 ## GET /api/v1/tasks
 
 获取任务列表。
@@ -26,7 +28,7 @@
     "status": "queued | running | completed | failed | cancelled",
     "payload": "string (JSON)",
     "message": "string | null",
-    "error": "string | null",
+    "error": null,
     "retries": 0,
     "max_retries": 0,
     "created_at": "RFC3339",
@@ -58,7 +60,7 @@
   "payload": {},
   "message": "string | null",
   "result": {},
-  "error": "string | null",
+  "error": null,
   "retries": 0,
   "max_retries": 0,
   "created_at": "RFC3339",

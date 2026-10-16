@@ -5,6 +5,7 @@ use crate::api::models::{
 };
 use crate::api::require_admin;
 use crate::api::state::AppState;
+use crate::core::app::error::{AccessErrorKind, InputErrorKind, LookupErrorKind, PluginErrorKind};
 use crate::core::app::error::{Result, TingError};
 use crate::db::repository::Repository;
 use axum::{
@@ -61,7 +62,9 @@ pub async fn create_user(
     Json(req): Json<CreateUserRequest>,
 ) -> Result<impl IntoResponse> {
     if admin.role != "admin" {
-        return Err(TingError::PermissionDenied(
+        return Err(TingError::permission(
+            AccessErrorKind::AdministratorRequired,
+            "create_user::permission",
             "Admin access required".to_string(),
         ));
     }
@@ -72,14 +75,22 @@ pub async fn create_user(
         .await?
         .is_some()
     {
-        return Err(TingError::ValidationError(format!(
-            "Username '{}' already exists",
-            req.username
-        )));
+        return Err(TingError::validation(
+            InputErrorKind::Conflict,
+            "create_user::validation",
+            format!("Username '{}' already exists", req.username),
+        ));
     }
 
-    let password_hash = bcrypt::hash(&req.password, bcrypt::DEFAULT_COST)
-        .map_err(|e| TingError::PluginExecutionError(format!("Failed to hash password: {}", e)))?;
+    let password_hash = bcrypt::hash(&req.password, bcrypt::DEFAULT_COST).map_err(|e| {
+        let message = format!("Failed to hash password: {}", e);
+        TingError::plugin_execution(
+            PluginErrorKind::Runtime,
+            "create_user::plugin_execution",
+            message,
+        )
+        .with_source(anyhow::anyhow!(e))
+    })?;
 
     let new_user = crate::db::models::User {
         id: Uuid::new_v4().to_string(),
@@ -121,32 +132,43 @@ pub async fn update_user(
     Json(req): Json<UpdateUserRequest>,
 ) -> Result<impl IntoResponse> {
     if admin.role != "admin" {
-        return Err(TingError::PermissionDenied(
+        return Err(TingError::permission(
+            AccessErrorKind::AdministratorRequired,
+            "update_user::permission",
             "Admin access required".to_string(),
         ));
     }
 
-    let mut user = state
-        .user_repo
-        .find_by_id(&user_id)
-        .await?
-        .ok_or_else(|| TingError::NotFound(format!("User {} not found", user_id)))?;
+    let mut user = state.user_repo.find_by_id(&user_id).await?.ok_or_else(|| {
+        TingError::not_found(
+            LookupErrorKind::User,
+            "update_user::not_found",
+            format!("User {} not found", user_id),
+        )
+    })?;
 
     if let Some(username) = req.username {
         if let Some(existing) = state.user_repo.find_by_username(&username).await?
             && existing.id != user_id
         {
-            return Err(TingError::ValidationError(format!(
-                "Username '{}' already exists",
-                username
-            )));
+            return Err(TingError::validation(
+                InputErrorKind::Conflict,
+                "update_user::validation",
+                format!("Username '{}' already exists", username),
+            ));
         }
         user.username = username;
     }
 
     if let Some(password) = req.password {
         user.password_hash = bcrypt::hash(&password, bcrypt::DEFAULT_COST).map_err(|e| {
-            TingError::PluginExecutionError(format!("Failed to hash password: {}", e))
+            let message = format!("Failed to hash password: {}", e);
+            TingError::plugin_execution(
+                PluginErrorKind::Runtime,
+                "update_user::plugin_execution",
+                message,
+            )
+            .with_source(anyhow::anyhow!(e))
         })?;
     }
 
@@ -184,22 +206,28 @@ pub async fn delete_user(
     admin: crate::auth::middleware::AuthUser,
 ) -> Result<impl IntoResponse> {
     if admin.role != "admin" {
-        return Err(TingError::PermissionDenied(
+        return Err(TingError::permission(
+            AccessErrorKind::AdministratorRequired,
+            "delete_user::permission",
             "Admin access required".to_string(),
         ));
     }
 
     if admin.id == user_id {
-        return Err(TingError::ValidationError(
+        return Err(TingError::validation(
+            InputErrorKind::InvalidValue,
+            "delete_user::validation",
             "Cannot delete your own account".to_string(),
         ));
     }
 
-    state
-        .user_repo
-        .find_by_id(&user_id)
-        .await?
-        .ok_or_else(|| TingError::NotFound(format!("User {} not found", user_id)))?;
+    state.user_repo.find_by_id(&user_id).await?.ok_or_else(|| {
+        TingError::not_found(
+            LookupErrorKind::User,
+            "delete_user::not_found",
+            format!("User {} not found", user_id),
+        )
+    })?;
 
     state.user_repo.delete(&user_id).await?;
 
@@ -272,7 +300,9 @@ pub async fn update_user_settings(
     if let Some(speed) = req.playback_speed
         && (!speed.is_finite() || !(0.5..=3.0).contains(&speed))
     {
-        return Err(TingError::InvalidRequest(
+        return Err(TingError::invalid_request(
+            InputErrorKind::InvalidValue,
+            "update_user_settings::invalid_request",
             "Playback speed must be between 0.5 and 3.0".into(),
         ));
     }
@@ -431,11 +461,13 @@ pub async fn add_favorite(
     Path(book_id): Path<String>,
     user: crate::auth::middleware::AuthUser,
 ) -> Result<impl IntoResponse> {
-    state
-        .book_repo
-        .find_by_id(&book_id)
-        .await?
-        .ok_or_else(|| TingError::NotFound(format!("Book {} not found", book_id)))?;
+    state.book_repo.find_by_id(&book_id).await?.ok_or_else(|| {
+        TingError::not_found(
+            LookupErrorKind::Book,
+            "add_favorite::not_found",
+            format!("Book {} not found", book_id),
+        )
+    })?;
 
     if state.favorite_repo.is_favorited(&user.id, &book_id).await? {
         return Ok((
@@ -517,7 +549,9 @@ pub async fn delete_progress_history(
     Json(req): Json<DeleteProgressHistoryRequest>,
 ) -> Result<impl IntoResponse> {
     if req.book_ids.len() + req.progress_ids.len() + req.chapter_ids.len() > 500 {
-        return Err(TingError::InvalidRequest(
+        return Err(TingError::invalid_request(
+            InputErrorKind::InvalidValue,
+            "delete_progress_history::invalid_request",
             "Too many history selections".into(),
         ));
     }
@@ -552,10 +586,11 @@ pub async fn get_book_progress(
             response.chapter_duration = chapter_duration;
             Ok(Json(response))
         }
-        None => Err(TingError::NotFound(format!(
-            "Progress not found for book {}",
-            book_id
-        ))),
+        None => Err(TingError::not_found(
+            LookupErrorKind::Book,
+            "get_book_progress::not_found",
+            format!("Progress not found for book {}", book_id),
+        )),
     }
 }
 
@@ -569,14 +604,24 @@ pub async fn update_progress(
         .book_repo
         .find_by_id(&req.book_id)
         .await?
-        .ok_or_else(|| TingError::NotFound(format!("Book {} not found", req.book_id)))?;
+        .ok_or_else(|| {
+            TingError::not_found(
+                LookupErrorKind::Book,
+                "update_progress::not_found",
+                format!("Book {} not found", req.book_id),
+            )
+        })?;
 
     if !state
         .book_repo
         .check_access(&book.id, &user.id, user.role == "admin")
         .await?
     {
-        return Err(TingError::PermissionDenied("Book access denied".into()));
+        return Err(TingError::permission(
+            AccessErrorKind::ResourceDenied,
+            "update_progress::permission",
+            "Book access denied".into(),
+        ));
     }
     if !req.position.is_finite()
         || req.position < 0.0
@@ -584,7 +629,9 @@ pub async fn update_progress(
             .duration
             .is_some_and(|value| !value.is_finite() || value < 0.0)
     {
-        return Err(TingError::InvalidRequest(
+        return Err(TingError::invalid_request(
+            InputErrorKind::InvalidValue,
+            "update_progress::invalid_request",
             "Invalid playback progress".into(),
         ));
     }
@@ -593,10 +640,18 @@ pub async fn update_progress(
             .chapter_repo
             .find_by_id(chapter_id)
             .await?
-            .ok_or_else(|| TingError::NotFound(format!("Chapter {} not found", chapter_id)))?;
+            .ok_or_else(|| {
+                TingError::not_found(
+                    LookupErrorKind::Chapter,
+                    "update_progress::not_found",
+                    format!("Chapter {} not found", chapter_id),
+                )
+            })?;
 
         if chapter.book_id != book.id {
-            return Err(TingError::ValidationError(
+            return Err(TingError::validation(
+                InputErrorKind::OutOfRange,
+                "update_progress::validation",
                 "Chapter does not belong to the specified book".to_string(),
             ));
         }

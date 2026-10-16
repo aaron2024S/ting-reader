@@ -1,3 +1,5 @@
+import type { ApiErrorBody } from '../../core/api/errors';
+
 export type PluginBridgeRequest = {
   type: "ting-plugin:request";
   bridge_token: string;
@@ -12,7 +14,7 @@ export type PluginBridgeResponse = {
   id: string;
   ok: boolean;
   result?: unknown;
-  error?: string;
+  error?: ApiErrorBody;
 };
 
 export type PluginExternalUrlRequest = {

@@ -1,3 +1,4 @@
+import { apiErrorMessage } from '../../core/api/errors';
 import React, { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router';
 import apiClient from '../../core/api/client';
@@ -84,7 +85,7 @@ const HistoryPage: React.FC = () => {
       setChapterTotals((current) => ({ ...current, [bookId]: response.data.total }));
     } catch (error) {
       console.error('获取历史章节失败', error);
-      alert(t('historyPage.loadFailed', '加载章节失败'));
+      alert(apiErrorMessage(error, t('historyPage.loadFailed', '加载章节失败')));
     } finally {
       setLoadingChapters((current) => { const next = new Set(current); next.delete(bookId); return next; });
     }
@@ -131,7 +132,7 @@ const HistoryPage: React.FC = () => {
       await fetchBooks(1);
     } catch (error) {
       console.error('清除播放历史失败', error);
-      alert(t('historyPage.deleteFailed'));
+      alert(apiErrorMessage(error, t('historyPage.deleteFailed')));
     } finally {
       setDeleting(false);
     }

@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import apiClient from '../../core/api/client';
+import { apiErrorMessage } from '../../core/api/errors';
 import type { Library, ScraperSource } from '../../core/types';
 import {
   Plus,
@@ -282,12 +283,11 @@ const AdminLibraries: React.FC = () => {
       if (response.data.success) {
         alert(t('adminLibraries.connectionSuccess'));
       } else {
-        alert(`${response.data.message}`);
+        alert(apiErrorMessage({ response }, response.data.message || t('adminLibraries.unknownError')));
       }
     } catch (err) {
       console.error(err);
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const msg = (err as any).response?.data?.message || (err as any).message || t('adminLibraries.unknownError');
+      const msg = apiErrorMessage(err, t('adminLibraries.unknownError'));
       alert(t('adminLibraries.requestFailed', { message: msg }));
     } finally {
       setTestingConnection(false);
@@ -361,7 +361,7 @@ const AdminLibraries: React.FC = () => {
       // but for creation, the backend handles it to avoid duplicate tasks.
     } catch (err) {
       console.error(err);
-      alert(editingId ? t('adminLibraries.updateFailed') : t('adminLibraries.addFailed'));
+      alert(apiErrorMessage(err, editingId ? t('adminLibraries.updateFailed') : t('adminLibraries.addFailed')));
     } finally {
       setSavingLibrary(false);
     }
@@ -375,9 +375,9 @@ const AdminLibraries: React.FC = () => {
       if (!silent) {
         alert(t('adminLibraries.scanStarted'));
       }
-    } catch {
+    } catch (error) {
       if (!silent) {
-        alert(t('adminLibraries.scanStartFailed'));
+        alert(apiErrorMessage(error, t('adminLibraries.scanStartFailed')));
       }
     } finally {
       setScanning(null);
@@ -417,8 +417,8 @@ const AdminLibraries: React.FC = () => {
       await apiClient.delete(`/api/libraries/${id}`);
       setDeleteConfirmId(null);
       fetchLibraries();
-    } catch {
-      alert(t('adminLibraries.deleteFailed'));
+    } catch (error) {
+      alert(apiErrorMessage(error, t('adminLibraries.deleteFailed')));
     } finally {
       setDeletingLibraryId(null);
     }

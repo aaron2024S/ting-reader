@@ -1,3 +1,4 @@
+import { apiErrorMessage } from '../api/errors';
 import { create } from "zustand";
 import { listPluginCapabilities } from "../api/pluginCapabilities";
 import { useAuthStore } from "./authStore";
@@ -98,7 +99,7 @@ export const usePluginExtensionsStore = create<PluginExtensionsStore>(
             loading: false,
             loaded: true,
             loadedForToken: token,
-            error: error instanceof Error ? error.message : String(error),
+            error: apiErrorMessage(error, 'Plugin extensions could not be loaded'),
           });
           scheduleRefresh(CLIENT_GRANT_RETRY_INTERVAL_MS);
         }

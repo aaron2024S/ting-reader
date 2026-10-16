@@ -46,13 +46,26 @@ fn rejects_unknown_template_variables() {
 
 #[test]
 fn detects_wecom_business_errors() {
-    assert_eq!(
-        detect_business_error(r#"{"errcode":0,"errmsg":"ok"}"#),
-        None
-    );
-    assert!(
-        detect_business_error(r#"{"errcode":40058,"errmsg":"invalid parameter"}"#)
-            .unwrap()
-            .contains("40058")
-    );
+    assert!(detect_business_error(r#"{"errcode":0,"errmsg":"ok"}"#).is_none());
+    let error = detect_business_error(r#"{"errcode":40058,"errmsg":"invalid parameter"}"#).unwrap();
+    assert_eq!(error.code, 40058);
+    assert_eq!(error.message, "invalid parameter");
+}
+
+#[test]
+fn webhook_test_failures_keep_upstream_codes_without_parsing_messages() {
+    let error = webhook_failure(
+        reqwest::StatusCode::OK,
+        r#"{"errcode":40058,"errmsg":"invalid parameter"}"#,
+    )
+    .unwrap();
+    assert_eq!(error.error, "ExternalServiceError");
+    let details = error.details.unwrap();
+    assert_eq!(details["reason"], "response");
+    assert_eq!(details["upstream_code"], 40058);
+    assert_eq!(details["upstream_status"], 200);
+    let error = webhook_failure(reqwest::StatusCode::BAD_GATEWAY, "upstream offline").unwrap();
+    assert_eq!(error.error, "NetworkError");
+    assert_eq!(error.details.unwrap()["upstream_status"], 502);
+    assert!(webhook_failure(reqwest::StatusCode::OK, "{}").is_none());
 }

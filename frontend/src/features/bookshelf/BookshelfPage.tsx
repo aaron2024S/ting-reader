@@ -1,3 +1,4 @@
+import { apiErrorMessage } from '../../core/api/errors';
 import { useBookOperations } from '../../core/hooks/useBooks';
 import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router';
@@ -282,7 +283,7 @@ const BookshelfPage: React.FC = () => {
       setSelectedBookIds([]);
     } catch (err) {
       console.error('Failed to update book read status', err);
-      alert(t('common.saveFailed'));
+      alert(apiErrorMessage(err, t('common.saveFailed')));
     } finally {
       setSavingReadStatus(false);
     }
@@ -305,7 +306,7 @@ const BookshelfPage: React.FC = () => {
       fetchData();
     } catch (err) {
       console.error('Failed to delete books', err);
-      alert(t('bookshelf.deleteBookFailed'));
+      alert(apiErrorMessage(err, t('bookshelf.deleteBookFailed')));
     } finally {
       setDeletingBooks(false);
       setIsDeleteBookOpen(false);
@@ -326,7 +327,7 @@ const BookshelfPage: React.FC = () => {
       }
     } catch (err) {
       console.error('Failed to delete series', err);
-      alert(t('bookshelf.deleteSeriesFailed'));
+      alert(apiErrorMessage(err, t('bookshelf.deleteSeriesFailed')));
       setIsDeleteSeriesOpen(false);
     } finally {
       setDeletingSeries(false);

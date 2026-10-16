@@ -3,7 +3,7 @@
 use crate::api::state::AppState;
 use crate::api::ws::manager::WsSessionManager;
 use crate::auth::jwt;
-use crate::core::app::error::TingError;
+use crate::core::app::error::{AuthenticationErrorKind, CodecErrorKind, ErrorResponse, TingError};
 use crate::db::models::Progress;
 use crate::db::repository::Repository;
 use axum::{
@@ -54,7 +54,10 @@ enum ServerMessage {
     #[serde(rename = "pong")]
     Pong,
     #[serde(rename = "error")]
-    Error { message: String },
+    Error {
+        #[serde(flatten)]
+        error: ErrorResponse,
+    },
 }
 
 /// Handle WebSocket upgrade request
@@ -80,8 +83,13 @@ async fn authenticate_ws_token(
     state: &AppState,
     token: Option<String>,
 ) -> Result<String, TingError> {
-    let token = token
-        .ok_or_else(|| TingError::AuthenticationError("Missing token parameter".to_string()))?;
+    let token = token.ok_or_else(|| {
+        TingError::authentication(
+            AuthenticationErrorKind::MissingCredentials,
+            "authenticate_ws_token::authentication",
+            "Missing token parameter".to_string(),
+        )
+    })?;
 
     let claims = if let Some(key_manager) = &state.jwt_key_manager {
         let secrets = key_manager.get_validation_secrets().await;
@@ -95,7 +103,11 @@ async fn authenticate_ws_token(
 
     match user {
         Some(_) => Ok(claims.user_id),
-        None => Err(TingError::AuthenticationError("User not found".to_string())),
+        None => Err(TingError::authentication(
+            AuthenticationErrorKind::UserNotFound,
+            "authenticate_ws_token::authentication",
+            "User not found".to_string(),
+        )),
     }
 }
 
@@ -172,8 +184,14 @@ async fn handle_client_message(
         Ok(m) => m,
         Err(e) => {
             warn!("Invalid WS message from user {}: {}", user_id, e);
+            let failure = TingError::deserialization(
+                CodecErrorKind::InvalidData,
+                "websocket.receive",
+                format!("Invalid message: {e}"),
+            )
+            .with_source(e.into());
             let error = serde_json::to_string(&ServerMessage::Error {
-                message: format!("Invalid message: {}", e),
+                error: ErrorResponse::from_error(&failure),
             })
             .unwrap_or_default();
             ws_manager.broadcast(user_id, &error).await;
@@ -218,6 +236,11 @@ async fn handle_client_message(
                     }),
                     "WebSocket progress save failed"
                 );
+                if let Ok(error) = serde_json::to_string(&ServerMessage::Error {
+                    error: ErrorResponse::from_error(&e),
+                }) {
+                    ws_manager.broadcast(user_id, &error).await;
+                }
                 return;
             }
 
@@ -249,3 +272,7 @@ async fn handle_client_message(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "../../../tests/unit/api/ws.rs"]
+mod tests;

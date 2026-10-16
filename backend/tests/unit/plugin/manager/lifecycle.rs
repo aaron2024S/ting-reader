@@ -294,3 +294,32 @@ fn assert_send_sync<T: Send + Sync>() {}
 fn test_plugin_manager_send_sync() {
     assert_send_sync::<PluginManager>();
 }
+
+#[tokio::test]
+async fn failed_plugin_reuses_the_original_typed_cause_and_context() {
+    use crate::core::app::error::SecurityErrorKind;
+    let error = Arc::new(
+        TingError::security(
+            SecurityErrorKind::Integrity,
+            "plugin.verify",
+            "Digest mismatch".into(),
+        )
+        .with_context("Plugin installation"),
+    );
+    let failed = FailedPlugin::new(test_metadata("failed", "Failed", "1.0.0"), error.clone());
+    let dir = tempfile::tempdir().unwrap();
+    let manager = PluginManager::new(PluginConfig {
+        plugin_dir: dir.path().into(),
+        enable_hot_reload: false,
+        max_memory_per_plugin: 32 * 1024 * 1024,
+        max_execution_time: Duration::from_secs(1),
+    })
+    .unwrap();
+    let context = manager.create_plugin_context(failed.metadata()).unwrap();
+    let returned = failed.initialize(&context).await.unwrap_err();
+    assert_eq!(returned.error_type(), error.error_type());
+    assert_eq!(returned.plugin_error_code(), error.plugin_error_code());
+    assert_eq!(returned.status_code(), error.status_code());
+    assert_eq!(returned.context_chain(), error.context_chain());
+    assert_eq!(returned.to_string(), error.to_string());
+}

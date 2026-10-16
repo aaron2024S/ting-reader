@@ -1,4 +1,5 @@
 use super::{LibraryScanner, ScanMode, ScanResult, ScanStatus};
+use crate::core::app::error::{CodecErrorKind, InputErrorKind, NetworkErrorKind};
 use crate::core::app::error::{Result, TingError};
 use crate::db::models::{Book, Chapter, Library};
 use crate::db::repository::{LibraryScanState, Repository};
@@ -89,10 +90,15 @@ impl LibraryScanner {
                 request = request.header(IF_MODIFIED_SINCE, last_modified);
             }
         }
-        let response = request
-            .send()
-            .await
-            .map_err(|e| TingError::NetworkError(format!("Failed to fetch RSS feed: {}", e)))?;
+        let response = request.send().await.map_err(|e| {
+            let message = format!("Failed to fetch RSS feed: {}", e);
+            TingError::network(
+                NetworkErrorKind::Transport,
+                "scan_rss_library::network",
+                message,
+            )
+            .with_source(anyhow::anyhow!(e))
+        })?;
 
         if response.status() == reqwest::StatusCode::NOT_MODIFIED {
             result.total_books = cached_book_count;
@@ -107,10 +113,11 @@ impl LibraryScanner {
         }
 
         if !response.status().is_success() {
-            return Err(TingError::NetworkError(format!(
-                "RSS feed returned status {}",
-                response.status()
-            )));
+            return Err(TingError::network(
+                NetworkErrorKind::HttpStatus,
+                "scan_rss_library::network",
+                format!("RSS feed returned status {}", response.status()),
+            ));
         }
 
         let response_etag = response
@@ -123,10 +130,15 @@ impl LibraryScanner {
             .get(LAST_MODIFIED)
             .and_then(|value| value.to_str().ok())
             .map(str::to_string);
-        let feed_bytes = response
-            .bytes()
-            .await
-            .map_err(|e| TingError::NetworkError(format!("Failed to read RSS feed: {}", e)))?;
+        let feed_bytes = response.bytes().await.map_err(|e| {
+            let message = format!("Failed to read RSS feed: {}", e);
+            TingError::network(
+                NetworkErrorKind::Transport,
+                "scan_rss_library::network",
+                message,
+            )
+            .with_source(anyhow::anyhow!(e))
+        })?;
         let feed_xml = String::from_utf8_lossy(&feed_bytes);
         let feed_fingerprint = hash_string(&feed_xml);
         if cached_book_count > 0
@@ -151,8 +163,15 @@ impl LibraryScanner {
             );
             return Ok(result);
         }
-        let base_url =
-            Url::parse(&library.url).map_err(|e| TingError::ValidationError(e.to_string()))?;
+        let base_url = Url::parse(&library.url).map_err(|e| {
+            let message = e.to_string();
+            TingError::validation(
+                InputErrorKind::InvalidValue,
+                "scan_rss_library::validation",
+                message,
+            )
+            .with_source(anyhow::anyhow!(e))
+        })?;
         let mut feed = parse_rss_feed(&feed_xml, &base_url)?;
 
         feed.episodes.retain(|episode| {
@@ -163,7 +182,9 @@ impl LibraryScanner {
         });
 
         if feed.episodes.is_empty() {
-            return Err(TingError::ValidationError(
+            return Err(TingError::validation(
+                InputErrorKind::InvalidValue,
+                "scan_rss_library::validation",
                 "RSS feed contains no playable audio enclosures".to_string(),
             ));
         }
@@ -584,10 +605,11 @@ fn parse_rss_feed(xml: &str, base_url: &Url) -> Result<RssFeed> {
             }
             Ok(Event::Eof) => break,
             Err(e) => {
-                return Err(TingError::DeserializationError(format!(
-                    "Failed to parse RSS XML: {}",
-                    e
-                )));
+                return Err(TingError::deserialization(
+                    CodecErrorKind::InvalidData,
+                    "parse_rss_feed::deserialization",
+                    format!("Failed to parse RSS XML: {}", e),
+                ));
             }
             _ => {}
         }

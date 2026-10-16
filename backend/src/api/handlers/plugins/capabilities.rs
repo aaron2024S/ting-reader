@@ -13,6 +13,7 @@ use crate::api::models::{
 };
 use crate::api::state::AppState;
 use crate::auth::middleware::AuthUser;
+use crate::core::app::error::{AccessErrorKind, InputErrorKind, LookupErrorKind};
 use crate::core::app::error::{Result, TingError};
 use crate::plugin::PluginHostUser;
 use crate::plugin::manager::capabilities::RegisteredCapability;
@@ -169,10 +170,14 @@ fn plugin_capability_registration_response(
 }
 
 pub(super) fn plugin_capability_not_found(plugin_id: &str, capability_id: &str) -> TingError {
-    TingError::NotFound(format!(
-        "Capability {} not found for plugin {}",
-        capability_id, plugin_id
-    ))
+    TingError::not_found(
+        LookupErrorKind::Plugin,
+        "plugin_capability_not_found::not_found",
+        format!(
+            "Capability {} not found for plugin {}",
+            capability_id, plugin_id
+        ),
+    )
 }
 
 pub(super) fn find_ui_bridge_capability(
@@ -185,7 +190,9 @@ pub(super) fn find_ui_bridge_capability(
         .find(|capability| capability.id() == ui_capability_id)
         .ok_or_else(|| plugin_capability_not_found(&metadata.id, ui_capability_id))?;
     if !matches!(capability, PluginCapability::UiExtension(_)) {
-        return Err(TingError::PermissionDenied(
+        return Err(TingError::permission(
+            AccessErrorKind::CapabilityDenied,
+            "find_ui_bridge_capability::permission",
             "Bridge source must be a UI capability".to_string(),
         ));
     }
@@ -205,7 +212,9 @@ pub(super) fn require_ui_bridge_capability(
             .any(|id| id == target_capability_id)
     });
     if target_capability_id != source.id() && !declared {
-        return Err(TingError::PermissionDenied(
+        return Err(TingError::permission(
+            AccessErrorKind::CapabilityDenied,
+            "require_ui_bridge_capability::permission",
             "Capability is not allowed for this view".to_string(),
         ));
     }
@@ -225,7 +234,9 @@ pub(super) fn require_ui_bridge_host_method(
             .any(|candidate| candidate == method)
     });
     if !declared {
-        return Err(TingError::PermissionDenied(
+        return Err(TingError::permission(
+            AccessErrorKind::CapabilityDenied,
+            "require_ui_bridge_host_method::permission",
             "Host method is not allowed for this view".to_string(),
         ));
     }
@@ -236,7 +247,9 @@ pub(super) fn require_unbridged_client_capability(capability: &PluginCapability)
     if capability.kind() == "content_processor" {
         return Ok(());
     }
-    Err(TingError::PermissionDenied(
+    Err(TingError::permission(
+        AccessErrorKind::CapabilityDenied,
+        "require_unbridged_client_capability::permission",
         "Client capability invocation requires a declared UI bridge".to_string(),
     ))
 }
@@ -248,10 +261,13 @@ pub async fn invoke_plugin_capability(
     Path((id, capability_id)): Path<(String, String)>,
     Json(req): Json<InvokePluginCapabilityRequest>,
 ) -> Result<impl IntoResponse> {
-    let metadata = state
-        .plugin_manager
-        .get_plugin(&id)
-        .map_err(|_| TingError::PluginNotFound(id.clone()))?;
+    let metadata = state.plugin_manager.get_plugin(&id).map_err(|_| {
+        TingError::plugin_not_found(
+            LookupErrorKind::Plugin,
+            "invoke_plugin_capability::plugin_not_found",
+            id.clone(),
+        )
+    })?;
     require_plugin_visible(&metadata, &user)?;
 
     let capability = metadata
@@ -262,13 +278,19 @@ pub async fn invoke_plugin_capability(
 
     if let Some(ui_capability_id) = req.ui_capability_id.as_deref() {
         let ui_grant = req.ui_grant.as_deref().ok_or_else(|| {
-            TingError::PermissionDenied("UI capability invocation requires a client grant".into())
+            TingError::permission(
+                AccessErrorKind::CapabilityDenied,
+                "invoke_plugin_capability::permission",
+                "UI capability invocation requires a client grant".into(),
+            )
         })?;
         require_plugin_client_grant(&state, &user, ui_grant, &id, Some(ui_capability_id)).await?;
         require_ui_bridge_capability(&metadata, ui_capability_id, &capability_id)?;
     } else {
         if req.ui_grant.is_some() {
-            return Err(TingError::PermissionDenied(
+            return Err(TingError::permission(
+                AccessErrorKind::CapabilityDenied,
+                "invoke_plugin_capability::permission",
                 "A client grant requires ui_capability_id".to_string(),
             ));
         }
@@ -307,13 +329,23 @@ fn client_capability_operation(capability: &PluginCapability, params: &Value) ->
     };
     let operation = fixed
         .or_else(|| params.get("operation").and_then(Value::as_str))
-        .ok_or_else(|| TingError::ValidationError("A declared operation is required".into()))?;
+        .ok_or_else(|| {
+            TingError::validation(
+                InputErrorKind::MissingField,
+                "client_capability_operation::validation",
+                "A declared operation is required".into(),
+            )
+        })?;
     if !capability.supports(operation) {
-        return Err(TingError::ValidationError(format!(
-            "Capability {} does not declare operation {}",
-            capability.id(),
-            operation
-        )));
+        return Err(TingError::validation(
+            InputErrorKind::InvalidValue,
+            "client_capability_operation::validation",
+            format!(
+                "Capability {} does not declare operation {}",
+                capability.id(),
+                operation
+            ),
+        ));
     }
     Ok(operation.to_string())
 }
@@ -327,7 +359,13 @@ pub async fn invoke_plugin_host(
     let metadata = state
         .plugin_manager
         .get_plugin(&req.plugin_id)
-        .map_err(|_| TingError::PluginNotFound(req.plugin_id.clone()))?;
+        .map_err(|_| {
+            TingError::plugin_not_found(
+                LookupErrorKind::Plugin,
+                "invoke_plugin_host::plugin_not_found",
+                req.plugin_id.clone(),
+            )
+        })?;
     require_plugin_visible(&metadata, &user)?;
     require_plugin_client_grant(
         &state,

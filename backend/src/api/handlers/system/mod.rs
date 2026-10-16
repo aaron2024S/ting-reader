@@ -1,3 +1,4 @@
+use crate::core::app::error::{ExternalErrorKind, InputErrorKind};
 mod diagnostics;
 mod statistics;
 mod tasks;
@@ -67,10 +68,24 @@ pub async fn check_update(State(_state): State<AppState>) -> Result<impl IntoRes
         .send()
         .await
         .and_then(reqwest::Response::error_for_status)
-        .map_err(|e| TingError::ExternalServiceError(format!("Failed to check update: {}", e)))?;
+        .map_err(|e| {
+            let message = format!("Failed to check update: {}", e);
+            TingError::external_service(
+                ExternalErrorKind::Response,
+                "check_update::external_service",
+                message,
+            )
+            .with_source(anyhow::anyhow!(e))
+        })?;
 
     let update_info: Value = response.json().await.map_err(|e| {
-        TingError::ExternalServiceError(format!("Failed to parse update info: {}", e))
+        let message = format!("Failed to parse update info: {}", e);
+        TingError::external_service(
+            ExternalErrorKind::Response,
+            "check_update::external_service",
+            message,
+        )
+        .with_source(anyhow::anyhow!(e))
     })?;
 
     Ok((
@@ -354,7 +369,15 @@ pub async fn update_config(
             message_params = %serde_json::json!({ "error": e.to_string() }),
             "Configuration validation failed"
         );
-        TingError::InvalidRequest(format!("Invalid configuration: {}", e))
+        {
+            let message = format!("Invalid configuration: {}", e);
+            TingError::invalid_request(
+                InputErrorKind::InvalidValue,
+                "update_config::invalid_request",
+                message,
+            )
+            .with_source(anyhow::anyhow!(e))
+        }
     })?;
 
     let mut config = state.config.write().await;

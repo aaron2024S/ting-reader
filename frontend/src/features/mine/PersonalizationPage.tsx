@@ -1,3 +1,4 @@
+import { apiErrorMessage } from '../../core/api/errors';
 import React, { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import apiClient from "../../core/api/client";
@@ -167,8 +168,8 @@ const PersonalizationPage: React.FC = () => {
       setApplicationTimeZone(savedTimeZone);
       setSaved(true);
       window.setTimeout(() => setSaved(false), 1800);
-    } catch {
-      alert(t("common.saveFailed"));
+    } catch (error) {
+      alert(apiErrorMessage(error, t("common.saveFailed")));
     } finally {
       setTimeZoneSaving(false);
     }
@@ -220,8 +221,8 @@ const PersonalizationPage: React.FC = () => {
 
       setSaved(true);
       setTimeout(() => setSaved(false), 1800);
-    } catch {
-      alert(t("common.saveFailed"));
+    } catch (error) {
+      alert(apiErrorMessage(error, t("common.saveFailed")));
     }
   };
 

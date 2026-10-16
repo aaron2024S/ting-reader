@@ -3,6 +3,7 @@
 //! This module provides encryption and decryption functions for sensitive data
 //! such as WebDAV credentials. It uses AES-256-GCM for authenticated encryption.
 
+use crate::core::app::error::ConfigurationErrorKind;
 use crate::core::app::error::{Result, TingError};
 use aes_gcm::{
     Aes256Gcm, Nonce,
@@ -34,9 +35,15 @@ pub fn encrypt(value: &str, key: &[u8; 32]) -> Result<String> {
     let nonce = Nonce::from_slice(&nonce_bytes);
 
     // Encrypt
-    let ciphertext = cipher
-        .encrypt(nonce, value.as_bytes())
-        .map_err(|e| TingError::ConfigError(format!("Encryption failed: {}", e)))?;
+    let ciphertext = cipher.encrypt(nonce, value.as_bytes()).map_err(|e| {
+        let message = format!("Encryption failed: {}", e);
+        TingError::configuration(
+            ConfigurationErrorKind::Encoding,
+            "encrypt::configuration",
+            message,
+        )
+        .with_source(anyhow::anyhow!(e))
+    })?;
 
     // Combine nonce + ciphertext and encode as base64
     let mut combined = nonce_bytes.to_vec();
@@ -63,12 +70,20 @@ pub fn decrypt(encrypted: &str, key: &[u8; 32]) -> Result<String> {
     let cipher = Aes256Gcm::new(key.into());
 
     // Decode from base64
-    let combined = general_purpose::STANDARD
-        .decode(encrypted)
-        .map_err(|e| TingError::ConfigError(format!("Invalid encrypted data: {}", e)))?;
+    let combined = general_purpose::STANDARD.decode(encrypted).map_err(|e| {
+        let message = format!("Invalid encrypted data: {}", e);
+        TingError::configuration(
+            ConfigurationErrorKind::InvalidValue,
+            "decrypt::configuration",
+            message,
+        )
+        .with_source(anyhow::anyhow!(e))
+    })?;
 
     if combined.len() < 12 {
-        return Err(TingError::ConfigError(
+        return Err(TingError::configuration(
+            ConfigurationErrorKind::InvalidValue,
+            "decrypt::configuration",
             "Invalid encrypted data length".to_string(),
         ));
     }
@@ -78,10 +93,23 @@ pub fn decrypt(encrypted: &str, key: &[u8; 32]) -> Result<String> {
     let nonce = Nonce::from_slice(nonce_bytes);
 
     // Decrypt
-    let plaintext = cipher
-        .decrypt(nonce, ciphertext)
-        .map_err(|e| TingError::ConfigError(format!("Decryption failed: {}", e)))?;
+    let plaintext = cipher.decrypt(nonce, ciphertext).map_err(|e| {
+        let message = format!("Decryption failed: {}", e);
+        TingError::configuration(
+            ConfigurationErrorKind::Encoding,
+            "decrypt::configuration",
+            message,
+        )
+        .with_source(anyhow::anyhow!(e))
+    })?;
 
-    String::from_utf8(plaintext)
-        .map_err(|e| TingError::ConfigError(format!("Invalid UTF-8 in decrypted data: {}", e)))
+    String::from_utf8(plaintext).map_err(|e| {
+        let message = format!("Invalid UTF-8 in decrypted data: {}", e);
+        TingError::configuration(
+            ConfigurationErrorKind::InvalidValue,
+            "decrypt::configuration",
+            message,
+        )
+        .with_source(anyhow::anyhow!(e))
+    })
 }

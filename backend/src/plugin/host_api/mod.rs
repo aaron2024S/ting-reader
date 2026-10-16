@@ -2,6 +2,7 @@
 
 use self::logger::{PluginLogLevel, emit_plugin_event};
 use crate::core::Config;
+use crate::core::app::error::{AccessErrorKind, InputErrorKind, LookupErrorKind};
 use crate::core::app::error::{Result, TingError};
 pub mod cache;
 mod capabilities;
@@ -212,7 +213,13 @@ impl PluginHostGateway {
         let metadata = self
             .plugin_manager
             .get_plugin(&plugin_id_owned)
-            .map_err(|_| TingError::PluginNotFound(plugin_id_owned))?;
+            .map_err(|_| {
+                TingError::plugin_not_found(
+                    LookupErrorKind::Plugin,
+                    "invoke_plugin::plugin_not_found",
+                    plugin_id_owned,
+                )
+            })?;
 
         let result = self
             .invoke_with_permissions(
@@ -226,8 +233,10 @@ impl PluginHostGateway {
             .await;
         let denied = result.as_ref().err().is_some_and(|error| {
             matches!(
-                error,
-                TingError::PermissionDenied(_) | TingError::InvalidRequest(_)
+                error.root_error(),
+                TingError::PermissionDenied(_)
+                    | TingError::SecurityViolation(_)
+                    | TingError::InvalidRequest(_)
             )
         });
         let fields = serde_json::json!({
@@ -283,14 +292,22 @@ impl PluginHostGateway {
 
     pub fn authorize(plugin_id: &str, permissions: &[Permission], method: &str) -> Result<()> {
         let required_permission = Self::required_permission(method).ok_or_else(|| {
-            TingError::InvalidRequest(format!("Unknown plugin host method: {}", method))
+            TingError::invalid_request(
+                InputErrorKind::UnsupportedValue,
+                "authorize::invalid_request",
+                format!("Unknown plugin host method: {}", method),
+            )
         })?;
 
         if !Self::has_permission(permissions, required_permission) {
-            return Err(TingError::PermissionDenied(format!(
-                "Plugin {} lacks permission required for host method {}",
-                plugin_id, method
-            )));
+            return Err(TingError::permission(
+                AccessErrorKind::CapabilityDenied,
+                "authorize::permission",
+                format!(
+                    "Plugin {} lacks permission required for host method {}",
+                    plugin_id, method
+                ),
+            ));
         }
 
         Ok(())
@@ -495,7 +512,11 @@ impl PluginHostGateway {
             }
             _ => {
                 let user = user.ok_or_else(|| {
-                    TingError::PermissionDenied("This Host method requires a user principal".into())
+                    TingError::permission(
+                        AccessErrorKind::UserRequired,
+                        "invoke_authorized::permission",
+                        "This Host method requires a user principal".into(),
+                    )
                 })?;
                 self.invoke_authorized_user(plugin_id, user, permissions, method, params, resources)
                     .await
@@ -576,10 +597,11 @@ impl PluginHostGateway {
             }
             "user_settings.get" => self.user_settings_get(user, &params).await,
             "user_settings.set" => self.user_settings_set(user, &params).await,
-            _ => Err(TingError::InvalidRequest(format!(
-                "Unknown plugin host method: {}",
-                method
-            ))),
+            _ => Err(TingError::invalid_request(
+                InputErrorKind::UnsupportedValue,
+                "invoke_authorized_user::invalid_request",
+                format!("Unknown plugin host method: {}", method),
+            )),
         }
     }
 
@@ -596,10 +618,11 @@ impl PluginHostGateway {
         if can_access {
             Ok(())
         } else {
-            Err(TingError::PermissionDenied(format!(
-                "User cannot access book {}",
-                book_id
-            )))
+            Err(TingError::permission(
+                AccessErrorKind::ResourceDenied,
+                "ensure_user_can_access_book::permission",
+                format!("User cannot access book {}", book_id),
+            ))
         }
     }
 
@@ -622,17 +645,39 @@ impl PluginHostGateway {
         if accessible {
             Ok(())
         } else {
-            Err(TingError::PermissionDenied(format!(
-                "User cannot access library {}",
-                library_id
-            )))
+            Err(TingError::permission(
+                AccessErrorKind::ResourceDenied,
+                "ensure_user_can_access_library::permission",
+                format!("User cannot access library {}", library_id),
+            ))
         }
+    }
+}
+
+/// Native and WASM share the contract's numeric Host transport status codes.
+pub(crate) fn status_for_plugin_error(
+    code: ting_plugin_contract::protocol::PluginErrorCode,
+) -> ting_plugin_contract::native_abi::NativeStatus {
+    use ting_plugin_contract::native_abi::NativeStatus;
+    use ting_plugin_contract::protocol::PluginErrorCode;
+    match code {
+        PluginErrorCode::InvalidInput => NativeStatus::InvalidInput,
+        PluginErrorCode::NotFound => NativeStatus::NotFound,
+        PluginErrorCode::PermissionDenied => NativeStatus::PermissionDenied,
+        PluginErrorCode::ResourceLimit => NativeStatus::ResourceLimit,
+        PluginErrorCode::Cancelled => NativeStatus::Cancelled,
+        PluginErrorCode::UnsupportedOperation => NativeStatus::UnsupportedOperation,
+        _ => NativeStatus::InternalError,
     }
 }
 
 fn required_string_param(params: &Value, name: &str) -> Result<String> {
     string_param(params, name).ok_or_else(|| {
-        TingError::InvalidRequest(format!("Missing required plugin host parameter: {}", name))
+        TingError::invalid_request(
+            InputErrorKind::MissingField,
+            "required_string_param::invalid_request",
+            format!("Missing required plugin host parameter: {}", name),
+        )
     })
 }
 

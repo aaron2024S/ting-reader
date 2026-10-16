@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { useParams, useSearchParams } from 'react-router';
 import { useTranslation } from 'react-i18next';
 import apiClient from '../../core/api/client';
+import { apiErrorMessage } from '../../core/api/errors';
 import Player from '../player/Player';
 import { usePlayerStore } from '../../core/stores/playerStore';
 import { useAuthStore } from '../../core/stores/authStore';
@@ -134,8 +135,7 @@ const WidgetPage: React.FC = () => {
       // Login successful, state updates will trigger re-renders
     } catch (err: unknown) {
       console.error('登录失败', err);
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const msg = (err as any)?.response?.data?.error || (err as any)?.response?.data?.message || t('widgetPage.loginFailed');
+      const msg = apiErrorMessage(err, t('widgetPage.loginFailed'));
       setLoginError(msg);
     } finally {
       setIsLoggingIn(false);

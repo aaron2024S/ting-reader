@@ -4,6 +4,7 @@ use crate::api::models::{
 };
 use crate::api::require_admin;
 use crate::api::state::AppState;
+use crate::core::app::error::{InputErrorKind, LookupErrorKind, TaskErrorKind};
 use crate::core::app::error::{Result, TingError};
 use crate::core::storage::local_paths::{
     discover_authorized_roots, ensure_path_inside_root, path_to_display_string,
@@ -81,10 +82,14 @@ fn ensure_metadata_write_allowed(
 
     let metadata = std::fs::metadata(library_path)?;
     if metadata.permissions().readonly() {
-        return Err(TingError::ValidationError(format!(
-            "Local library path '{}' is read-only, but metadata/NFO writing is enabled",
-            library_path.display()
-        )));
+        return Err(TingError::validation(
+            InputErrorKind::InvalidPath,
+            "ensure_metadata_write_allowed::validation",
+            format!(
+                "Local library path '{}' is read-only, but metadata/NFO writing is enabled",
+                library_path.display()
+            ),
+        ));
     }
 
     Ok(())
@@ -126,16 +131,22 @@ pub async fn create_library(
 
     let name_trimmed = req.name.trim();
     if name_trimmed.is_empty() {
-        return Err(TingError::ValidationError(
+        return Err(TingError::validation(
+            InputErrorKind::InvalidValue,
+            "create_library::validation",
             "Library name cannot be empty".to_string(),
         ));
     }
 
     if library_type != "local" && library_type != "webdav" && library_type != "rss" {
-        return Err(TingError::ValidationError(format!(
-            "Invalid library type '{}'. Must be 'local', 'webdav' or 'rss'",
-            req.library_type
-        )));
+        return Err(TingError::validation(
+            InputErrorKind::InvalidValue,
+            "create_library::validation",
+            format!(
+                "Invalid library type '{}'. Must be 'local', 'webdav' or 'rss'",
+                req.library_type
+            ),
+        ));
     }
 
     if library_type == "local" {
@@ -149,13 +160,17 @@ pub async fn create_library(
     }
 
     if library_type == "webdav" && !is_http_url(&url) {
-        return Err(TingError::ValidationError(
+        return Err(TingError::validation(
+            InputErrorKind::InvalidValue,
+            "create_library::validation",
             "WebDAV URL must start with http:// or https://".to_string(),
         ));
     }
 
     if library_type == "rss" && !is_http_url(&url) {
-        return Err(TingError::ValidationError(
+        return Err(TingError::validation(
+            InputErrorKind::InvalidValue,
+            "create_library::validation",
             "RSS feed URL must start with http:// or https://".to_string(),
         ));
     }
@@ -328,7 +343,13 @@ pub async fn update_library(
         .library_repo
         .find_by_id(&library_id)
         .await?
-        .ok_or_else(|| TingError::NotFound(format!("Library {} not found", library_id)))?;
+        .ok_or_else(|| {
+            TingError::not_found(
+                LookupErrorKind::Library,
+                "update_library::not_found",
+                format!("Library {} not found", library_id),
+            )
+        })?;
 
     if let Some(name) = req.name {
         library.name = name;
@@ -337,10 +358,14 @@ pub async fn update_library(
     if let Some(library_type) = req.library_type {
         let library_type = library_type.trim().to_ascii_lowercase();
         if library_type != "local" && library_type != "webdav" && library_type != "rss" {
-            return Err(TingError::ValidationError(format!(
-                "Invalid library type '{}'. Must be 'local', 'webdav' or 'rss'",
-                library_type
-            )));
+            return Err(TingError::validation(
+                InputErrorKind::InvalidValue,
+                "update_library::validation",
+                format!(
+                    "Invalid library type '{}'. Must be 'local', 'webdav' or 'rss'",
+                    library_type
+                ),
+            ));
         }
         library.library_type = library_type;
     }
@@ -355,7 +380,9 @@ pub async fn update_library(
         if let Some(webdav_url) = req.webdav_url {
             let webdav_url = webdav_url.trim().to_string();
             if !is_http_url(&webdav_url) {
-                return Err(TingError::ValidationError(
+                return Err(TingError::validation(
+                    InputErrorKind::InvalidValue,
+                    "update_library::validation",
                     "WebDAV URL must start with http:// or https://".to_string(),
                 ));
             }
@@ -365,14 +392,18 @@ pub async fn update_library(
         if let Some(rss_feed_url) = req.rss_feed_url {
             let rss_feed_url = rss_feed_url.trim().to_string();
             if !is_http_url(&rss_feed_url) {
-                return Err(TingError::ValidationError(
+                return Err(TingError::validation(
+                    InputErrorKind::InvalidValue,
+                    "update_library::validation",
                     "RSS feed URL must start with http:// or https://".to_string(),
                 ));
             }
             library.url = rss_feed_url;
         }
         if !is_http_url(&library.url) {
-            return Err(TingError::ValidationError(
+            return Err(TingError::validation(
+                InputErrorKind::InvalidValue,
+                "update_library::validation",
                 "RSS feed URL must start with http:// or https://".to_string(),
             ));
         }
@@ -475,7 +506,13 @@ pub async fn delete_library(
         .library_repo
         .find_by_id(&library_id)
         .await?
-        .ok_or_else(|| TingError::NotFound(format!("Library {} not found", library_id)))?;
+        .ok_or_else(|| {
+            TingError::not_found(
+                LookupErrorKind::Library,
+                "delete_library::not_found",
+                format!("Library {} not found", library_id),
+            )
+        })?;
 
     // Cancel any running tasks for this library first
     if let Err(e) = state.task_queue.cancel_library_tasks(&library_id).await {
@@ -609,7 +646,13 @@ pub async fn scan_library(
         .library_repo
         .find_by_id(&library_id)
         .await?
-        .ok_or_else(|| TingError::NotFound(format!("Library {} not found", library_id)))?;
+        .ok_or_else(|| {
+            TingError::not_found(
+                LookupErrorKind::Library,
+                "scan_library::not_found",
+                format!("Library {} not found", library_id),
+            )
+        })?;
 
     let library_path = if library.library_type == "local" {
         let config = state.config.read().await;
@@ -639,11 +682,11 @@ pub async fn scan_library(
         task_payload,
     );
 
-    let submitted_task_id = state
-        .task_queue
-        .submit(task)
-        .await
-        .map_err(|e| TingError::TaskError(format!("Failed to queue scan task: {}", e)))?;
+    let submitted_task_id = state.task_queue.submit(task).await.map_err(|e| {
+        let message = format!("Failed to queue scan task: {}", e);
+        TingError::task(TaskErrorKind::Execution, "scan_library::task", message)
+            .with_source(anyhow::anyhow!(e))
+    })?;
 
     Ok((
         StatusCode::ACCEPTED,
@@ -702,10 +745,15 @@ pub async fn get_storage_folders(
 
     let entries = std::fs::read_dir(&target_path).map_err(|e| {
         if e.kind() == std::io::ErrorKind::PermissionDenied {
-            TingError::ValidationError(format!(
-                "Permission denied: Cannot access directory '{}'",
-                sub_path
-            ))
+            {
+                let message = format!("Permission denied: Cannot access directory '{}'", sub_path);
+                TingError::validation(
+                    InputErrorKind::InvalidPath,
+                    "get_storage_folders::validation",
+                    message,
+                )
+                .with_source(anyhow::anyhow!(e))
+            }
         } else {
             TingError::IoError(e)
         }

@@ -1,5 +1,6 @@
 use crate::api::models::{BookResponse, CreateSeriesRequest, SeriesResponse, UpdateSeriesRequest};
 use crate::api::state::AppState;
+use crate::core::app::error::{AccessErrorKind, LookupErrorKind};
 use crate::core::app::error::{Result, TingError};
 use crate::db::models::{Series, SeriesBook};
 use crate::db::repository::Repository;
@@ -59,11 +60,13 @@ pub async fn get_series(
     user: AuthUser,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse> {
-    let series = state
-        .series_repo
-        .find_by_id(&id)
-        .await?
-        .ok_or_else(|| TingError::NotFound(format!("Series with id {} not found", id)))?;
+    let series = state.series_repo.find_by_id(&id).await?.ok_or_else(|| {
+        TingError::not_found(
+            LookupErrorKind::Series,
+            "get_series::not_found",
+            format!("Series with id {} not found", id),
+        )
+    })?;
 
     let is_admin = user.role == "admin";
 
@@ -73,7 +76,9 @@ pub async fn get_series(
         .check_access(&series.id, &user.id, is_admin)
         .await?
     {
-        return Err(TingError::PermissionDenied(
+        return Err(TingError::permission(
+            AccessErrorKind::ResourceDenied,
+            "get_series::permission",
             "No access to this series".to_string(),
         ));
     }
@@ -114,7 +119,9 @@ pub async fn create_series(
     Json(req): Json<CreateSeriesRequest>,
 ) -> Result<impl IntoResponse> {
     if user.role != "admin" {
-        return Err(TingError::PermissionDenied(
+        return Err(TingError::permission(
+            AccessErrorKind::AdministratorRequired,
+            "create_series::permission",
             "Only admin can create series".to_string(),
         ));
     }
@@ -226,16 +233,20 @@ pub async fn update_series(
     Json(req): Json<UpdateSeriesRequest>,
 ) -> Result<impl IntoResponse> {
     if user.role != "admin" {
-        return Err(TingError::PermissionDenied(
+        return Err(TingError::permission(
+            AccessErrorKind::AdministratorRequired,
+            "update_series::permission",
             "Only admin can update series".to_string(),
         ));
     }
 
-    let existing_series = state
-        .series_repo
-        .find_by_id(&id)
-        .await?
-        .ok_or_else(|| TingError::NotFound(format!("Series with id {} not found", id)))?;
+    let existing_series = state.series_repo.find_by_id(&id).await?.ok_or_else(|| {
+        TingError::not_found(
+            LookupErrorKind::Series,
+            "update_series::not_found",
+            format!("Series with id {} not found", id),
+        )
+    })?;
 
     let updated_series = Series {
         id: existing_series.id,
@@ -364,16 +375,19 @@ pub async fn delete_series(
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse> {
     if user.role != "admin" {
-        return Err(TingError::PermissionDenied(
+        return Err(TingError::permission(
+            AccessErrorKind::AdministratorRequired,
+            "delete_series::permission",
             "Only admin can delete series".to_string(),
         ));
     }
 
     if state.series_repo.find_by_id(&id).await?.is_none() {
-        return Err(TingError::NotFound(format!(
-            "Series with id {} not found",
-            id
-        )));
+        return Err(TingError::not_found(
+            LookupErrorKind::Series,
+            "delete_series::not_found",
+            format!("Series with id {} not found", id),
+        ));
     }
 
     // Get books before deletion to update metadata

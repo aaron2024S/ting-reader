@@ -2,6 +2,7 @@
 //! Dropping an incomplete frame quarantines it and clears all Host context.
 
 use super::plugin::{WasmPlugin, WasmPluginInner};
+use crate::core::app::error::{DeadlineErrorKind, PluginErrorKind};
 use crate::core::app::error::{Result, TingError};
 use crate::plugin::types::PluginInvocationContext;
 use std::ops::{Deref, DerefMut};
@@ -43,7 +44,11 @@ impl Drop for InvocationFrame<'_> {
 }
 
 fn execution_error(message: &str, error: impl std::fmt::Display) -> TingError {
-    TingError::PluginExecutionError(format!("{message}: {error:#}"))
+    TingError::plugin_execution(
+        PluginErrorKind::Runtime,
+        "execution_error::plugin_execution",
+        format!("{message}: {error:#}"),
+    )
 }
 
 async fn allocate(inner: &mut WasmPluginInner, memory: Memory, value: &[u8]) -> Result<i32> {
@@ -64,7 +69,9 @@ async fn allocate(inner: &mut WasmPluginInner, memory: Memory, value: &[u8]) -> 
             .is_err()
     {
         let _ = release(inner, pointer, length as usize).await;
-        return Err(TingError::PluginExecutionError(
+        return Err(TingError::plugin_execution(
+            PluginErrorKind::Runtime,
+            "allocate::plugin_execution",
             "WASM allocation is outside memory".into(),
         ));
     }
@@ -86,7 +93,9 @@ impl WasmPlugin {
     pub(super) async fn call_lifecycle(&self, initializing: bool) -> Result<i32> {
         let mut inner = self.inner.lock().await;
         if inner.store.data().unavailable {
-            return Err(TingError::PluginExecutionError(
+            return Err(TingError::plugin_execution(
+                PluginErrorKind::Unavailable,
+                "call_lifecycle::plugin_execution",
                 "WASM instance is unavailable".into(),
             ));
         }
@@ -107,7 +116,9 @@ impl WasmPlugin {
                 Ok(result)
             }
             Ok(Err(error)) => Err(execution_error("WASM lifecycle failed", error)),
-            Err(_) => Err(TingError::Timeout(
+            Err(_) => Err(TingError::timeout(
+                DeadlineErrorKind::Elapsed,
+                "call_lifecycle::timeout",
                 "WASM lifecycle exceeded its deadline".into(),
             )),
         }
@@ -122,20 +133,30 @@ impl WasmPlugin {
         let input = serde_json::to_vec(&params)
             .map_err(|error| execution_error("WASM input encoding failed", error))?;
         if input.len() > MAX_CONTROL_BYTES || method.is_empty() || method.len() > 128 {
-            return Err(TingError::PluginExecutionError(
+            return Err(TingError::plugin_execution(
+                PluginErrorKind::Runtime,
+                "invoke_raw_json_with_context::plugin_execution",
                 "WASM control message exceeds limit".into(),
             ));
         }
         let mut inner = self.inner.lock().await;
         if inner.store.data().unavailable {
-            return Err(TingError::PluginExecutionError(
+            return Err(TingError::plugin_execution(
+                PluginErrorKind::Unavailable,
+                "invoke_raw_json_with_context::plugin_execution",
                 "WASM instance is unavailable".into(),
             ));
         }
         let instance = inner.instance;
         let memory = instance
             .get_memory(&mut inner.store, "memory")
-            .ok_or_else(|| TingError::PluginExecutionError("WASM memory missing".into()))?;
+            .ok_or_else(|| {
+                TingError::plugin_execution(
+                    PluginErrorKind::Runtime,
+                    "invoke_raw_json_with_context::plugin_execution",
+                    "WASM memory missing".into(),
+                )
+            })?;
         inner.store.set_epoch_deadline(1);
         let timeout = inner.execution_timeout;
         inner.store.data_mut().current_user = context.user.clone();
@@ -158,10 +179,16 @@ impl WasmPlugin {
                 let data = memory.data(&frame.store);
                 let end = data.len().min(offset.saturating_add(MAX_CONTROL_BYTES + 1));
                 let bytes = data.get(offset..end).ok_or_else(|| {
-                    TingError::PluginExecutionError("WASM output pointer outside memory".into())
+                    TingError::plugin_execution(
+                        PluginErrorKind::InvalidOutput,
+                        "invoke_raw_json_with_context::plugin_execution",
+                        "WASM output pointer outside memory".into(),
+                    )
                 })?;
                 let length = bytes.iter().position(|byte| *byte == 0).ok_or_else(|| {
-                    TingError::PluginExecutionError(
+                    TingError::plugin_execution(
+                        PluginErrorKind::InvalidOutput,
+                        "invoke_raw_json_with_context::plugin_execution",
                         "WASM output is unterminated or oversized".into(),
                     )
                 })?;
@@ -171,7 +198,9 @@ impl WasmPlugin {
                     offset < begin + size && begin < allocation_end
                 };
                 if overlaps(method_ptr, method.len() + 1) || overlaps(input_ptr, input.len() + 1) {
-                    return Err(TingError::PluginExecutionError(
+                    return Err(TingError::plugin_execution(
+                        PluginErrorKind::InvalidOutput,
+                        "invoke_raw_json_with_context::plugin_execution",
                         "WASM output aliases borrowed input".into(),
                     ));
                 }
@@ -191,7 +220,11 @@ impl WasmPlugin {
                 Ok(result)
             }
             Ok(Err(error)) => Err(error),
-            Err(_) => Err(TingError::Timeout("WASM call exceeded its deadline".into())),
+            Err(_) => Err(TingError::timeout(
+                DeadlineErrorKind::Elapsed,
+                "invoke_raw_json_with_context::timeout",
+                "WASM call exceeded its deadline".into(),
+            )),
         }
     }
 }

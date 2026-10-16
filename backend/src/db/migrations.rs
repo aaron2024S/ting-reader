@@ -2,6 +2,7 @@
 //!
 //! This module provides database schema migration functionality with automatic backup and rollback.
 
+use crate::core::app::error::ConfigurationErrorKind;
 use crate::core::app::error::{Result, TingError};
 use chrono::Local;
 use rusqlite::Connection;
@@ -852,7 +853,13 @@ fn create_migration_backup(db_path: &Path) -> Result<PathBuf> {
     let timestamp = Local::now().format("%Y%m%d_%H%M%S");
     let backup_dir = db_path
         .parent()
-        .ok_or_else(|| TingError::ConfigError("Invalid database path".to_string()))?
+        .ok_or_else(|| {
+            TingError::configuration(
+                ConfigurationErrorKind::InvalidValue,
+                "create_migration_backup::configuration",
+                "Invalid database path".to_string(),
+            )
+        })?
         .join("backups");
 
     // Create backup directory if it doesn't exist
@@ -882,10 +889,11 @@ pub fn rollback_to_version(db_path: &Path, target_version: i64, backup_path: &Pa
 
     // Verify backup exists
     if !backup_path.exists() {
-        return Err(TingError::ConfigError(format!(
-            "Backup file not found: {}",
-            backup_path.display()
-        )));
+        return Err(TingError::configuration(
+            ConfigurationErrorKind::Missing,
+            "rollback_to_version::configuration",
+            format!("Backup file not found: {}", backup_path.display()),
+        ));
     }
 
     // Restore from backup

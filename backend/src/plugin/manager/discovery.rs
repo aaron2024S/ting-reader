@@ -1,3 +1,4 @@
+use crate::core::app::error::PluginErrorKind;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -66,7 +67,7 @@ impl PluginManager {
                 }
                 Err(e) => {
                     error!("Failed to read metadata from {}: {}", path.display(), e);
-                    self.register_failed_plugin_directory(&path, e.to_string())
+                    self.register_failed_plugin_directory(&path, Arc::new(e))
                         .await;
                 }
             }
@@ -76,8 +77,9 @@ impl PluginManager {
         for (id, versions) in potential_plugins {
             if let Err(e) = ensure_discovered_versions_share_signature_identity(&id, &versions) {
                 error!("{}", e);
+                let error = Arc::new(e);
                 for (_, path) in versions {
-                    self.register_failed_plugin_directory(&path, e.to_string())
+                    self.register_failed_plugin_directory(&path, error.clone())
                         .await;
                 }
                 continue;
@@ -141,7 +143,7 @@ impl PluginManager {
         crate::plugin::types::metadata::read_plugin_metadata(path)
     }
 
-    async fn register_failed_plugin_directory(&self, plugin_path: &Path, error: String) {
+    async fn register_failed_plugin_directory(&self, plugin_path: &Path, error: Arc<TingError>) {
         let metadata = failed_plugin_metadata(plugin_path);
         let plugin_id = metadata.instance_id();
         let instance =
@@ -188,10 +190,14 @@ fn ensure_discovered_versions_share_signature_identity(
         let identity = tr_package::read_installed_signature_identity(path)?;
         if let Some(expected) = &expected {
             if !expected.is_compatible_with(&identity) {
-                return Err(TingError::PluginLoadError(format!(
-                    "Plugin {} has multiple installed versions from different signature identities; uninstall the conflicting version before loading",
-                    id
-                )));
+                return Err(TingError::plugin_load(
+                    PluginErrorKind::InvalidManifest,
+                    "ensure_discovered_versions_share_signature_identity::plugin_load",
+                    format!(
+                        "Plugin {} has multiple installed versions from different signature identities; uninstall the conflicting version before loading",
+                        id
+                    ),
+                ));
             }
         } else {
             expected = Some(identity);

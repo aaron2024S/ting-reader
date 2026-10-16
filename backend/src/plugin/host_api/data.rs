@@ -3,6 +3,7 @@
 use super::{
     PluginHostGateway, PluginHostUser, bool_param, required_string_param, string_param, usize_param,
 };
+use crate::core::app::error::{AccessErrorKind, CodecErrorKind, InputErrorKind, LookupErrorKind};
 use crate::core::app::error::{Result, TingError};
 use crate::core::security::signing::{
     DEFAULT_MEDIA_SIGNATURE_TTL_SECONDS, DEFAULT_PLUGIN_ROUTE_SIGNATURE_TTL_SECONDS,
@@ -50,13 +51,23 @@ impl PluginHostGateway {
             .or_else(|_| required_string_param(params, "id"))?;
         self.ensure_user_can_access_book(user, &book_id).await?;
 
-        let book =
-            self.book_repo.find_by_id(&book_id).await?.ok_or_else(|| {
-                TingError::NotFound(format!("Book with id {} not found", book_id))
-            })?;
+        let book = self.book_repo.find_by_id(&book_id).await?.ok_or_else(|| {
+            TingError::not_found(
+                LookupErrorKind::Book,
+                "books_get::not_found",
+                format!("Book with id {} not found", book_id),
+            )
+        })?;
 
-        serde_json::to_value(book)
-            .map_err(|e| TingError::SerializationError(format!("Book serialization failed: {}", e)))
+        serde_json::to_value(book).map_err(|e| {
+            let message = format!("Book serialization failed: {}", e);
+            TingError::serialization(
+                CodecErrorKind::InvalidData,
+                "books_get::serialization",
+                message,
+            )
+            .with_source(anyhow::anyhow!(e))
+        })
     }
 
     pub(super) async fn libraries_list(
@@ -102,7 +113,11 @@ impl PluginHostGateway {
             .find_by_id(&library_id)
             .await?
             .ok_or_else(|| {
-                TingError::NotFound(format!("Library with id {} not found", library_id))
+                TingError::not_found(
+                    LookupErrorKind::Library,
+                    "libraries_get::not_found",
+                    format!("Library with id {} not found", library_id),
+                )
             })?;
 
         Ok(plugin_host_library_value(library))
@@ -146,14 +161,24 @@ impl PluginHostGateway {
             .find_by_id(&chapter_id)
             .await?
             .ok_or_else(|| {
-                TingError::NotFound(format!("Chapter with id {} not found", chapter_id))
+                TingError::not_found(
+                    LookupErrorKind::Chapter,
+                    "chapters_get::not_found",
+                    format!("Chapter with id {} not found", chapter_id),
+                )
             })?;
 
         self.ensure_user_can_access_book(user, &chapter.book_id)
             .await?;
 
         serde_json::to_value(chapter).map_err(|e| {
-            TingError::SerializationError(format!("Chapter serialization failed: {}", e))
+            let message = format!("Chapter serialization failed: {}", e);
+            TingError::serialization(
+                CodecErrorKind::InvalidData,
+                "chapters_get::serialization",
+                message,
+            )
+            .with_source(anyhow::anyhow!(e))
         })
     }
 
@@ -205,7 +230,11 @@ impl PluginHostGateway {
             .find_by_id(&chapter_id)
             .await?
             .ok_or_else(|| {
-                TingError::NotFound(format!("Chapter with id {} not found", chapter_id))
+                TingError::not_found(
+                    LookupErrorKind::Chapter,
+                    "media_get_url::not_found",
+                    format!("Chapter with id {} not found", chapter_id),
+                )
             })?;
 
         self.ensure_user_can_access_book(user, &chapter.book_id)
@@ -214,10 +243,11 @@ impl PluginHostGateway {
         let mut query = Vec::new();
         if let Some(transcode) = string_param(params, "transcode") {
             if !matches!(transcode.as_str(), "hls" | "mp3" | "wav") {
-                return Err(TingError::InvalidRequest(format!(
-                    "Unsupported media transcode target: {}",
-                    transcode
-                )));
+                return Err(TingError::invalid_request(
+                    InputErrorKind::UnsupportedValue,
+                    "media_get_url::invalid_request",
+                    format!("Unsupported media transcode target: {}", transcode),
+                ));
             }
             query.push(format!("transcode={}", urlencoding::encode(&transcode)));
         }
@@ -255,7 +285,11 @@ impl PluginHostGateway {
             .find_by_id(&chapter_id)
             .await?
             .ok_or_else(|| {
-                TingError::NotFound(format!("Chapter with id {} not found", chapter_id))
+                TingError::not_found(
+                    LookupErrorKind::Chapter,
+                    "media_get_signed_url::not_found",
+                    format!("Chapter with id {} not found", chapter_id),
+                )
             })?;
 
         self.ensure_user_can_access_book(user, &chapter.book_id)
@@ -270,10 +304,11 @@ impl PluginHostGateway {
         if let Some(transcode) = transcode.as_deref()
             && !matches!(transcode, "hls" | "mp3" | "wav")
         {
-            return Err(TingError::InvalidRequest(format!(
-                "Unsupported media transcode target: {}",
-                transcode
-            )));
+            return Err(TingError::invalid_request(
+                InputErrorKind::UnsupportedValue,
+                "media_get_signed_url::invalid_request",
+                format!("Unsupported media transcode target: {}", transcode),
+            ));
         }
         let seek = string_param(params, "seek");
         let download = bool_param(params, "download").unwrap_or(false);
@@ -337,21 +372,33 @@ impl PluginHostGateway {
             .find_http_route(&method, &path)
             .await
             .ok_or_else(|| {
-                TingError::NotFound(format!("Plugin route not found: {} {}", method, path))
+                TingError::not_found(
+                    LookupErrorKind::Plugin,
+                    "plugin_routes_sign::not_found",
+                    format!("Plugin route not found: {} {}", method, path),
+                )
             })?;
 
         if matched.registration.plugin_id != plugin_id {
-            return Err(TingError::PermissionDenied(format!(
-                "Plugin {} cannot sign route owned by {}",
-                plugin_id, matched.registration.plugin_id
-            )));
+            return Err(TingError::permission(
+                AccessErrorKind::ResourceDenied,
+                "plugin_routes_sign::permission",
+                format!(
+                    "Plugin {} cannot sign route owned by {}",
+                    plugin_id, matched.registration.plugin_id
+                ),
+            ));
         }
 
         if !plugin_route_can_use_public_prefix(&matched.registration.capability) {
-            return Err(TingError::PermissionDenied(format!(
-                "Plugin route cannot be exposed through public plugin-routes: {} {}",
-                method, path
-            )));
+            return Err(TingError::permission(
+                AccessErrorKind::ResourceDenied,
+                "plugin_routes_sign::permission",
+                format!(
+                    "Plugin route cannot be exposed through public plugin-routes: {} {}",
+                    method, path
+                ),
+            ));
         }
 
         let expires = signature_expires_from_ttl(
@@ -411,22 +458,34 @@ impl PluginHostGateway {
             .find_http_route(&method, &path)
             .await
             .ok_or_else(|| {
-                TingError::NotFound(format!("Plugin route not found: {} {}", method, path))
+                TingError::not_found(
+                    LookupErrorKind::Plugin,
+                    "plugin_routes_revoke::not_found",
+                    format!("Plugin route not found: {} {}", method, path),
+                )
             })?;
         if matched.registration.plugin_id != plugin_id {
-            return Err(TingError::PermissionDenied(format!(
-                "Plugin {} cannot revoke route owned by {}",
-                plugin_id, matched.registration.plugin_id
-            )));
+            return Err(TingError::permission(
+                AccessErrorKind::ResourceDenied,
+                "plugin_routes_revoke::permission",
+                format!(
+                    "Plugin {} cannot revoke route owned by {}",
+                    plugin_id, matched.registration.plugin_id
+                ),
+            ));
         }
         if !plugin_route_can_use_public_prefix(&matched.registration.capability) {
-            return Err(TingError::PermissionDenied(
+            return Err(TingError::permission(
+                AccessErrorKind::ResourceDenied,
+                "plugin_routes_revoke::permission",
                 "Plugin route cannot be exposed through public plugin-routes".into(),
             ));
         }
         let signature = required_string_param(params, "signature")?;
         if signature.len() > 256 {
-            return Err(TingError::InvalidRequest(
+            return Err(TingError::invalid_request(
+                InputErrorKind::OutOfRange,
+                "plugin_routes_revoke::invalid_request",
                 "Plugin route signature is too long".into(),
             ));
         }
@@ -434,7 +493,11 @@ impl PluginHostGateway {
             .get("expires")
             .and_then(Value::as_i64)
             .ok_or_else(|| {
-                TingError::InvalidRequest("Route signature expiry is required".into())
+                TingError::invalid_request(
+                    InputErrorKind::MissingField,
+                    "plugin_routes_revoke::invalid_request",
+                    "Route signature expiry is required".into(),
+                )
             })?;
         let user_id = string_param(params, "user");
         let expected = sign_plugin_route_request(
@@ -448,7 +511,9 @@ impl PluginHostGateway {
             signature.as_bytes(),
             expected.as_bytes(),
         ) {
-            return Err(TingError::PermissionDenied(
+            return Err(TingError::permission(
+                AccessErrorKind::ResourceDenied,
+                "plugin_routes_revoke::permission",
                 "Plugin route signature does not match the route".into(),
             ));
         }
@@ -469,17 +534,22 @@ impl PluginHostGateway {
         params: &Value,
     ) -> Result<Value> {
         if !user.is_admin() {
-            return Err(TingError::PermissionDenied(
+            return Err(TingError::permission(
+                AccessErrorKind::AdministratorRequired,
+                "metadata_write::permission",
                 "Admin access required for metadata.write".to_string(),
             ));
         }
 
         let book_id = required_string_param(params, "book_id")
             .or_else(|_| required_string_param(params, "id"))?;
-        let book =
-            self.book_repo.find_by_id(&book_id).await?.ok_or_else(|| {
-                TingError::NotFound(format!("Book with id {} not found", book_id))
-            })?;
+        let book = self.book_repo.find_by_id(&book_id).await?.ok_or_else(|| {
+            TingError::not_found(
+                LookupErrorKind::Book,
+                "metadata_write::not_found",
+                format!("Book with id {} not found", book_id),
+            )
+        })?;
 
         let task = Task::new(
             format!("写入元数据: {}", book.title.clone().unwrap_or_default()),
@@ -507,7 +577,9 @@ impl PluginHostGateway {
         params: &Value,
     ) -> Result<Value> {
         if !user.is_admin() {
-            return Err(TingError::PermissionDenied(
+            return Err(TingError::permission(
+                AccessErrorKind::AdministratorRequired,
+                "books_update::permission",
                 "Admin access required for books.update".to_string(),
             ));
         }
@@ -532,11 +604,13 @@ impl PluginHostGateway {
                 "chapter_regex",
             ],
         )?;
-        let mut book = self
-            .book_repo
-            .find_by_id(&id)
-            .await?
-            .ok_or_else(|| TingError::NotFound(format!("Book with id {} not found", id)))?;
+        let mut book = self.book_repo.find_by_id(&id).await?.ok_or_else(|| {
+            TingError::not_found(
+                LookupErrorKind::Book,
+                "books_update::not_found",
+                format!("Book with id {} not found", id),
+            )
+        })?;
         let cover_url_patched = patch.contains_key("cover_url");
         let theme_color_patched = patch.contains_key("theme_color");
         patch_optional_string(patch, "title", &mut book.title)?;
@@ -557,8 +631,15 @@ impl PluginHostGateway {
         patch_optional_string(patch, "match_pattern", &mut book.match_pattern)?;
         patch_optional_string(patch, "chapter_regex", &mut book.chapter_regex)?;
         self.book_repo.update(&book).await?;
-        serde_json::to_value(book)
-            .map_err(|e| TingError::SerializationError(format!("Book serialization failed: {}", e)))
+        serde_json::to_value(book).map_err(|e| {
+            let message = format!("Book serialization failed: {}", e);
+            TingError::serialization(
+                CodecErrorKind::InvalidData,
+                "books_update::serialization",
+                message,
+            )
+            .with_source(anyhow::anyhow!(e))
+        })
     }
 
     pub(super) async fn chapters_update(
@@ -567,7 +648,9 @@ impl PluginHostGateway {
         params: &Value,
     ) -> Result<Value> {
         if !user.is_admin() {
-            return Err(TingError::PermissionDenied(
+            return Err(TingError::permission(
+                AccessErrorKind::AdministratorRequired,
+                "chapters_update::permission",
                 "Admin access required for chapters.update".into(),
             ));
         }
@@ -585,11 +668,13 @@ impl PluginHostGateway {
                 "manual_corrected",
             ],
         )?;
-        let mut chapter = self
-            .chapter_repo
-            .find_by_id(&id)
-            .await?
-            .ok_or_else(|| TingError::NotFound(format!("Chapter with id {} not found", id)))?;
+        let mut chapter = self.chapter_repo.find_by_id(&id).await?.ok_or_else(|| {
+            TingError::not_found(
+                LookupErrorKind::Chapter,
+                "chapters_update::not_found",
+                format!("Chapter with id {} not found", id),
+            )
+        })?;
         patch_optional_string(patch, "title", &mut chapter.title)?;
         patch_required_string(patch, "path", &mut chapter.path)?;
         patch_optional_i32(patch, "duration", &mut chapter.duration)?;
@@ -599,7 +684,13 @@ impl PluginHostGateway {
         patch_i32(patch, "manual_corrected", &mut chapter.manual_corrected)?;
         self.chapter_repo.update(&chapter).await?;
         serde_json::to_value(chapter).map_err(|e| {
-            TingError::SerializationError(format!("Chapter serialization failed: {}", e))
+            let message = format!("Chapter serialization failed: {}", e);
+            TingError::serialization(
+                CodecErrorKind::InvalidData,
+                "chapters_update::serialization",
+                message,
+            )
+            .with_source(anyhow::anyhow!(e))
         })
     }
 
@@ -609,18 +700,22 @@ impl PluginHostGateway {
         params: &Value,
     ) -> Result<Value> {
         if !user.is_admin() {
-            return Err(TingError::PermissionDenied(
+            return Err(TingError::permission(
+                AccessErrorKind::AdministratorRequired,
+                "libraries_update::permission",
                 "Admin access required for libraries.update".into(),
             ));
         }
         let id = required_string_param(params, "library_id")?;
         let patch = required_object_param(params, "patch")?;
         validate_patch_keys(patch, &["name", "scraper_config"])?;
-        let mut library = self
-            .library_repo
-            .find_by_id(&id)
-            .await?
-            .ok_or_else(|| TingError::NotFound(format!("Library with id {} not found", id)))?;
+        let mut library = self.library_repo.find_by_id(&id).await?.ok_or_else(|| {
+            TingError::not_found(
+                LookupErrorKind::Library,
+                "libraries_update::not_found",
+                format!("Library with id {} not found", id),
+            )
+        })?;
         patch_required_string(patch, "name", &mut library.name)?;
         patch_optional_string(patch, "scraper_config", &mut library.scraper_config)?;
         self.library_repo.update(&library).await?;
@@ -773,22 +868,29 @@ fn plugin_host_library_value(library: Library) -> Value {
 
 fn validate_patch_keys(patch: &Map<String, Value>, allowed: &[&str]) -> Result<()> {
     if patch.is_empty() {
-        return Err(TingError::InvalidRequest("Patch must not be empty".into()));
+        return Err(TingError::invalid_request(
+            InputErrorKind::InvalidValue,
+            "validate_patch_keys::invalid_request",
+            "Patch must not be empty".into(),
+        ));
     }
     if let Some(key) = patch.keys().find(|key| !allowed.contains(&key.as_str())) {
-        return Err(TingError::InvalidRequest(format!(
-            "Unknown patch field: {key}"
-        )));
+        return Err(TingError::invalid_request(
+            InputErrorKind::UnsupportedValue,
+            "validate_patch_keys::invalid_request",
+            format!("Unknown patch field: {key}"),
+        ));
     }
     Ok(())
 }
 
 fn required_object_param<'a>(params: &'a Value, name: &str) -> Result<&'a Map<String, Value>> {
     params.get(name).and_then(Value::as_object).ok_or_else(|| {
-        TingError::InvalidRequest(format!(
-            "Missing required object plugin host parameter: {}",
-            name
-        ))
+        TingError::invalid_request(
+            InputErrorKind::MissingField,
+            "required_object_param::invalid_request",
+            format!("Missing required object plugin host parameter: {}", name),
+        )
     })
 }
 
@@ -797,10 +899,11 @@ fn patch_required_string(patch: &Map<String, Value>, key: &str, target: &mut Str
         return Ok(());
     };
     let Some(text) = value.as_str() else {
-        return Err(TingError::InvalidRequest(format!(
-            "Patch field {} must be a string",
-            key
-        )));
+        return Err(TingError::invalid_request(
+            InputErrorKind::InvalidValue,
+            "patch_required_string::invalid_request",
+            format!("Patch field {} must be a string", key),
+        ));
     };
     *target = text.to_string();
     Ok(())
@@ -819,10 +922,11 @@ fn patch_optional_string(
         return Ok(());
     }
     let Some(text) = value.as_str() else {
-        return Err(TingError::InvalidRequest(format!(
-            "Patch field {} must be a string or null",
-            key
-        )));
+        return Err(TingError::invalid_request(
+            InputErrorKind::InvalidValue,
+            "patch_optional_string::invalid_request",
+            format!("Patch field {} must be a string or null", key),
+        ));
     };
     *target = Some(text.to_string());
     Ok(())
@@ -854,13 +958,19 @@ fn patch_optional_i32(
 
 fn value_to_i32(value: &Value, key: &str) -> Result<i32> {
     let Some(number) = value.as_i64() else {
-        return Err(TingError::InvalidRequest(format!(
-            "Patch field {} must be an integer",
-            key
-        )));
+        return Err(TingError::invalid_request(
+            InputErrorKind::InvalidValue,
+            "value_to_i32::invalid_request",
+            format!("Patch field {} must be an integer", key),
+        ));
     };
-    i32::try_from(number)
-        .map_err(|_| TingError::InvalidRequest(format!("Patch field {} is out of i32 range", key)))
+    i32::try_from(number).map_err(|_| {
+        TingError::invalid_request(
+            InputErrorKind::OutOfRange,
+            "value_to_i32::invalid_request",
+            format!("Patch field {} is out of i32 range", key),
+        )
+    })
 }
 
 #[cfg(test)]

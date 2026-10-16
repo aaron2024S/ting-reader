@@ -1,3 +1,4 @@
+use crate::core::app::error::ErrorResponse;
 use serde::{Deserialize, Serialize};
 
 // Task Management API models
@@ -68,7 +69,7 @@ pub struct TaskInfoResponse {
     /// Localizable task progress parameters
     pub message_params: Option<String>,
     /// Task error message (if failed)
-    pub error: Option<String>,
+    pub error: Option<ErrorResponse>,
     /// Number of retries attempted
     pub retries: i32,
     /// Maximum number of retries allowed
@@ -101,7 +102,7 @@ pub struct TaskDetailResponse {
     /// Task result (JSON value, if completed)
     pub result: Option<serde_json::Value>,
     /// Task error message (if failed)
-    pub error: Option<String>,
+    pub error: Option<ErrorResponse>,
     /// Number of retries attempted
     pub retries: i32,
     /// Maximum number of retries allowed

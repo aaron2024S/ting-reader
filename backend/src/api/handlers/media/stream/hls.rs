@@ -1,5 +1,8 @@
 use super::hls_session::{HlsGeneration, HlsProcess, HlsSession};
 use crate::api::state::AppState;
+use crate::core::app::error::{
+    DeadlineErrorKind, ExternalErrorKind, InputErrorKind, LookupErrorKind,
+};
 use crate::core::app::error::{Result, TingError};
 use crate::db::models::{Book, Chapter, Library};
 use axum::response::{IntoResponse, Response};
@@ -45,17 +48,22 @@ pub async fn handle_hls_request(
 }
 
 pub(super) fn parse_seek(seek: Option<&str>) -> Result<f64> {
-    let value = seek
-        .unwrap_or("0")
-        .parse::<f64>()
-        .map_err(|_| TingError::InvalidRequest("Invalid HLS seek time".into()))?;
+    let value = seek.unwrap_or("0").parse::<f64>().map_err(|_| {
+        TingError::invalid_request(
+            InputErrorKind::InvalidValue,
+            "parse_seek::invalid_request",
+            "Invalid HLS seek time".into(),
+        )
+    })?;
     validate_seek(value)?;
     Ok(value)
 }
 
 pub(super) fn validate_seek(value: f64) -> Result<()> {
     if !value.is_finite() || value < 0.0 {
-        return Err(TingError::InvalidRequest(
+        return Err(TingError::invalid_request(
+            InputErrorKind::OutOfRange,
+            "validate_seek::invalid_request",
             "HLS seek time must be finite and nonnegative".into(),
         ));
     }
@@ -128,7 +136,13 @@ pub(super) async fn start_generation(
         start_generation_inner(state, session, chapter, library, start_offset),
     )
     .await
-    .unwrap_or_else(|_| Err(TingError::Timeout("HLS startup timed out".into())));
+    .unwrap_or_else(|_| {
+        Err(TingError::timeout(
+            DeadlineErrorKind::Elapsed,
+            "start_generation::timeout",
+            "HLS startup timed out".into(),
+        ))
+    });
     if result.is_err()
         && let Some(process) = session.process.take()
     {
@@ -145,7 +159,11 @@ async fn start_generation_inner(
     start_offset: f64,
 ) -> Result<HlsGeneration> {
     if session.closed {
-        return Err(TingError::NotFound("HLS session closed".into()));
+        return Err(TingError::not_found(
+            LookupErrorKind::Session,
+            "start_generation_inner::not_found",
+            "HLS session closed".into(),
+        ));
     }
     // Decode before FFmpeg for plugin formats; the stream is owned by this session.
     let input = get_input(state, chapter, library, session.is_strm).await?;
@@ -211,11 +229,13 @@ async fn start_generation_inner(
     });
     process.input_task = if let HlsInput::Decrypted(mut stream) = input {
         let input_error = process.input_error.clone();
-        let mut stdin = process
-            .child
-            .stdin
-            .take()
-            .ok_or_else(|| TingError::ExternalError("FFmpeg stdin unavailable".into()))?;
+        let mut stdin = process.child.stdin.take().ok_or_else(|| {
+            TingError::external_tool(
+                ExternalErrorKind::Process,
+                "start_generation_inner::external_tool",
+                "FFmpeg stdin unavailable".into(),
+            )
+        })?;
         Some(tokio::spawn(async move {
             while let Some(chunk) = stream.next().await {
                 match chunk {
@@ -313,18 +333,23 @@ async fn wait_for_first_segment(
     deadline: Instant,
 ) -> Result<()> {
     loop {
-        let process = session
-            .process
-            .as_mut()
-            .ok_or_else(|| TingError::ExternalError("HLS process unavailable".into()))?;
+        let process = session.process.as_mut().ok_or_else(|| {
+            TingError::external_tool(
+                ExternalErrorKind::Process,
+                "wait_for_first_segment::external_tool",
+                "HLS process unavailable".into(),
+            )
+        })?;
         process.check_input()?;
         let status = process.child.try_wait()?;
         if let Some(status) = status
             && !status.success()
         {
-            return Err(TingError::ExternalError(format!(
-                "HLS FFmpeg exited with {status}"
-            )));
+            return Err(TingError::external_tool(
+                ExternalErrorKind::Process,
+                "wait_for_first_segment::external_tool",
+                format!("HLS FFmpeg exited with {status}"),
+            ));
         }
         if let Ok(content) = tokio::fs::read_to_string(temp_dir.join("playlist.m3u8")).await
             && playlist_duration(&content) > 0.0
@@ -336,12 +361,16 @@ async fn wait_for_first_segment(
             return Ok(());
         }
         if status.is_some() {
-            return Err(TingError::ExternalError(
+            return Err(TingError::external_tool(
+                ExternalErrorKind::Process,
+                "wait_for_first_segment::external_tool",
                 "HLS FFmpeg exited before producing playable audio".into(),
             ));
         }
         if Instant::now() >= deadline {
-            return Err(TingError::Timeout(
+            return Err(TingError::timeout(
+                DeadlineErrorKind::Elapsed,
+                "wait_for_first_segment::timeout",
                 "Timed out waiting for playable HLS audio".into(),
             ));
         }

@@ -1,3 +1,4 @@
+import { apiErrorMessage } from '../../core/api/errors';
 import React, { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import apiClient from "../../core/api/client";
@@ -153,7 +154,7 @@ const NotificationSettingsPage: React.FC = () => {
       }
     } catch (error) {
       console.error("Failed to update notification status", error);
-      alert(t("notifications.updateStatusRetry"));
+      alert(apiErrorMessage(error, t("notifications.updateStatusRetry")));
     }
   };
 
@@ -195,7 +196,7 @@ const NotificationSettingsPage: React.FC = () => {
       await fetchData();
     } catch (error) {
       console.error("Failed to save notification config", error);
-      alert(t("notifications.saveRetry"));
+      alert(apiErrorMessage(error, t("notifications.saveRetry")));
     } finally {
       setSaving(false);
     }
@@ -210,7 +211,7 @@ const NotificationSettingsPage: React.FC = () => {
       await fetchData();
     } catch (error) {
       console.error("Failed to delete notification config", error);
-      alert(t("notifications.deleteRetry"));
+      alert(apiErrorMessage(error, t("notifications.deleteRetry")));
     }
   };
 

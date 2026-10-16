@@ -1,6 +1,7 @@
 //! Core-version and plugin-dependency preflight validation.
 
 use super::PluginManager;
+use crate::core::app::error::{DependencyErrorKind, LookupErrorKind, PluginErrorKind};
 use crate::core::app::error::{Result, TingError};
 use crate::plugin::types::{PluginId, PluginMetadata, PluginState};
 use semver::{Version, VersionReq};
@@ -20,11 +21,15 @@ impl PluginManager {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .ok_or_else(|| {
-                TingError::PluginLoadError(format!(
-                    "Plugin {} must declare min_core_version >= {} for the new plugin contract",
-                    metadata.instance_id(),
-                    ting_plugin_contract::MIN_PLUGIN_CORE_VERSION
-                ))
+                TingError::plugin_load(
+                    PluginErrorKind::InvalidManifest,
+                    "validate_core_compatibility_for_version::plugin_load",
+                    format!(
+                        "Plugin {} must declare min_core_version >= {} for the new plugin contract",
+                        metadata.instance_id(),
+                        ting_plugin_contract::MIN_PLUGIN_CORE_VERSION
+                    ),
+                )
             })?;
 
         let current = parse_core_version(current_core_version, "current core version")?;
@@ -35,21 +40,29 @@ impl PluginManager {
         )?;
 
         if required < contract_floor {
-            return Err(TingError::PluginLoadError(format!(
-                "Plugin {} declares min_core_version {}, but the new plugin contract requires >= {}",
-                metadata.instance_id(),
-                min_core_version,
-                contract_floor
-            )));
+            return Err(TingError::plugin_load(
+                PluginErrorKind::InvalidManifest,
+                "validate_core_compatibility_for_version::plugin_load",
+                format!(
+                    "Plugin {} declares min_core_version {}, but the new plugin contract requires >= {}",
+                    metadata.instance_id(),
+                    min_core_version,
+                    contract_floor
+                ),
+            ));
         }
 
         if current < required {
-            return Err(TingError::PluginLoadError(format!(
-                "Plugin {} requires Ting Reader core >= {}, current core version is {}",
-                metadata.instance_id(),
-                min_core_version,
-                current_core_version
-            )));
+            return Err(TingError::plugin_load(
+                PluginErrorKind::InvalidManifest,
+                "validate_core_compatibility_for_version::plugin_load",
+                format!(
+                    "Plugin {} requires Ting Reader core >= {}, current core version is {}",
+                    metadata.instance_id(),
+                    min_core_version,
+                    current_core_version
+                ),
+            ));
         }
 
         Ok(())
@@ -81,11 +94,15 @@ impl PluginManager {
         }
 
         if !missing_deps.is_empty() {
-            return Err(TingError::DependencyError(format!(
-                "Missing or incompatible dependencies for plugin {}: {}",
-                metadata.instance_id(),
-                missing_deps.join(", ")
-            )));
+            return Err(TingError::dependency(
+                DependencyErrorKind::Missing,
+                "validate_plugin_dependencies::dependency",
+                format!(
+                    "Missing or incompatible dependencies for plugin {}: {}",
+                    metadata.instance_id(),
+                    missing_deps.join(", ")
+                ),
+            ));
         }
 
         Ok(())
@@ -96,9 +113,13 @@ impl PluginManager {
         plugin_id: &PluginId,
     ) -> Result<Vec<PluginId>> {
         let registry = self.registry.read().await;
-        let target = registry
-            .get(plugin_id)
-            .ok_or_else(|| TingError::PluginNotFound(plugin_id.clone()))?;
+        let target = registry.get(plugin_id).ok_or_else(|| {
+            TingError::plugin_not_found(
+                LookupErrorKind::Plugin,
+                "find_plugin_dependents::plugin_not_found",
+                plugin_id.clone(),
+            )
+        })?;
 
         let dependents = registry
             .iter()
@@ -136,8 +157,15 @@ impl PluginManager {
 }
 
 pub(super) fn parse_core_version(version: &str, label: &str) -> Result<Version> {
-    Version::parse(version)
-        .map_err(|e| TingError::PluginLoadError(format!("Invalid {} '{}': {}", label, version, e)))
+    Version::parse(version).map_err(|e| {
+        let message = format!("Invalid {} '{}': {}", label, version, e);
+        TingError::plugin_load(
+            PluginErrorKind::InvalidOutput,
+            "parse_core_version::plugin_load",
+            message,
+        )
+        .with_source(anyhow::anyhow!(e))
+    })
 }
 
 pub(super) fn version_requirement_matches(version: &str, requirement: &str) -> bool {

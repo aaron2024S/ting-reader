@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import apiClient from '../../core/api/client';
+import { apiErrorMessage } from '../../core/api/errors';
 import type { User as UserType, Library, Book, Series } from '../../core/types';
 import { 
   Plus, 
@@ -201,8 +202,7 @@ const AdminUsers: React.FC = () => {
       setEditingId(null);
       fetchUsers();
     } catch (err: unknown) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const msg = (err as any)?.response?.data?.error || t('adminUsers.operationFailed');
+        const msg = apiErrorMessage(err, t('adminUsers.operationFailed'));
         alert(msg);
     }
   };
@@ -212,8 +212,8 @@ const AdminUsers: React.FC = () => {
     try {
       await apiClient.delete(`/api/users/${id}`);
       fetchUsers();
-    } catch {
-      alert(t('adminUsers.deleteFailed'));
+    } catch (error) {
+      alert(apiErrorMessage(error, t('adminUsers.deleteFailed')));
     }
   };
 

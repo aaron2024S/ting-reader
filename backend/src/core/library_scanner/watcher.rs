@@ -1,4 +1,5 @@
 use crate::core::app::config::Config;
+use crate::core::app::error::LookupErrorKind;
 use crate::core::app::error::Result;
 use crate::core::storage::local_paths::{
     path_to_display_string, resolve_existing_local_library_root,
@@ -80,10 +81,11 @@ impl LibraryWatcher {
     pub async fn watch_library(&self, library_id: &str, path: &str) -> Result<()> {
         let path_buf = PathBuf::from(path);
         if !path_buf.exists() || !path_buf.is_dir() {
-            return Err(crate::core::app::error::TingError::NotFound(format!(
-                "Directory not found: {}",
-                path
-            )));
+            return Err(crate::core::app::error::TingError::not_found(
+                LookupErrorKind::File,
+                "watch_library::not_found",
+                format!("Directory not found: {}", path),
+            ));
         }
 
         let lib_id = library_id.to_string();

@@ -5,21 +5,33 @@
 //! host OS IANA time-zone name directly. It does not change the process clock,
 //! SQLite functions, or log timestamp generation.
 
+use super::error::{InputErrorKind, Result, TingError};
 use chrono_tz::Tz;
 
 pub const DEFAULT_TIME_ZONE: &str = "UTC";
 pub const FPK_INITIAL_TIME_ZONE_ENV: &str = "FNNAS_FPK_INITIAL_TIME_ZONE";
 
-pub fn parse_time_zone(value: &str) -> Result<String, String> {
+pub fn parse_time_zone(value: &str) -> Result<String> {
     let value = value.trim();
     if value.is_empty() {
-        return Err("Time zone cannot be empty".to_string());
+        return Err(TingError::validation(
+            InputErrorKind::MissingField,
+            "parse_time_zone",
+            "Time zone cannot be empty".into(),
+        ));
     }
 
     value
         .parse::<Tz>()
         .map(|time_zone| time_zone.name().to_string())
-        .map_err(|_| format!("Unsupported IANA time zone: {value}"))
+        .map_err(|error| {
+            TingError::validation(
+                InputErrorKind::UnsupportedValue,
+                "parse_time_zone",
+                format!("Unsupported IANA time zone: {value}"),
+            )
+            .with_source(anyhow::Error::new(error))
+        })
 }
 
 /// Read the host OS time zone only when the FPK launcher explicitly enables it.

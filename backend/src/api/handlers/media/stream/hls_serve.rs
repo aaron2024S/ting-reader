@@ -2,6 +2,7 @@ use super::hls::{
     cached_generation, playlist_url, start_generation, valid_segment_filename, validate_seek,
 };
 use crate::api::state::AppState;
+use crate::core::app::error::{ExternalErrorKind, InputErrorKind, LookupErrorKind};
 use crate::core::app::error::{Result, TingError};
 use crate::db::repository::Repository;
 use axum::{
@@ -41,12 +42,20 @@ async fn serve_file(
 ) -> Result<Response> {
     let is_playlist = filename == "playlist.m3u8";
     if !is_playlist && !valid_segment_filename(filename) {
-        return Err(TingError::InvalidRequest("Invalid HLS filename".into()));
+        return Err(TingError::invalid_request(
+            InputErrorKind::InvalidValue,
+            "serve_file::invalid_request",
+            "Invalid HLS filename".into(),
+        ));
     }
     let session = state.hls_session_manager.get_session(session_id).await?;
     let mut session = session.lock().await;
     if session.closed {
-        return Err(TingError::NotFound("HLS session closed".into()));
+        return Err(TingError::not_found(
+            LookupErrorKind::Session,
+            "serve_file::not_found",
+            "HLS session closed".into(),
+        ));
     }
     let generation = if let Some(seq) = seq {
         session.generations.iter().find(|g| g.seq == seq)
@@ -54,7 +63,13 @@ async fn serve_file(
         session.generations.back()
     }
     .cloned()
-    .ok_or_else(|| TingError::NotFound("HLS generation not found".into()))?;
+    .ok_or_else(|| {
+        TingError::not_found(
+            LookupErrorKind::Session,
+            "serve_file::not_found",
+            "HLS generation not found".into(),
+        )
+    })?;
     if is_playlist
         && session
             .generations
@@ -73,15 +88,21 @@ async fn serve_file(
         && let Some(status) = process.child.try_wait()?
         && !status.success()
     {
-        return Err(TingError::ExternalError(format!(
-            "HLS FFmpeg exited with {status}"
-        )));
+        return Err(TingError::external_tool(
+            ExternalErrorKind::Process,
+            "serve_file::external_tool",
+            format!("HLS FFmpeg exited with {status}"),
+        ));
     }
     let path = generation.temp_dir.join(filename);
     if is_playlist {
         let content = tokio::fs::read_to_string(&path).await.map_err(|error| {
             if error.kind() == std::io::ErrorKind::NotFound {
-                TingError::NotFound("HLS playlist not ready".into())
+                TingError::not_found(
+                    LookupErrorKind::Playlist,
+                    "serve_file::not_found",
+                    "HLS playlist not ready".into(),
+                )
             } else {
                 TingError::IoError(error)
             }
@@ -103,7 +124,11 @@ async fn serve_file(
     }
     let file = tokio::fs::File::open(path).await.map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
-            TingError::NotFound("HLS segment not found".into())
+            TingError::not_found(
+                LookupErrorKind::Session,
+                "serve_file::not_found",
+                "HLS segment not found".into(),
+            )
         } else {
             TingError::IoError(error)
         }
@@ -136,7 +161,11 @@ pub async fn seek_hls_stream(
     let handle = state.hls_session_manager.get_session(&session_id).await?;
     let mut session = handle.lock().await;
     if session.closed {
-        return Err(TingError::NotFound("HLS session closed".into()));
+        return Err(TingError::not_found(
+            LookupErrorKind::Session,
+            "seek_hls_stream::not_found",
+            "HLS session closed".into(),
+        ));
     }
     let cached = cached_generation(&session, target).await;
     let reused = cached.is_some();
@@ -148,12 +177,24 @@ pub async fn seek_hls_stream(
                 .chapter_repo
                 .find_by_id(&session.chapter_id)
                 .await?
-                .ok_or_else(|| TingError::NotFound("Chapter not found".into()))?;
+                .ok_or_else(|| {
+                    TingError::not_found(
+                        LookupErrorKind::Chapter,
+                        "seek_hls_stream::not_found",
+                        "Chapter not found".into(),
+                    )
+                })?;
             let library = state
                 .library_repo
                 .find_by_id(&session.library_id)
                 .await?
-                .ok_or_else(|| TingError::NotFound("Library not found".into()))?;
+                .ok_or_else(|| {
+                    TingError::not_found(
+                        LookupErrorKind::Library,
+                        "seek_hls_stream::not_found",
+                        "Library not found".into(),
+                    )
+                })?;
             start_generation(&state, &mut session, &chapter, &library, target).await
         }
     }

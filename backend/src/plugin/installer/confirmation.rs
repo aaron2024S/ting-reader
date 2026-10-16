@@ -1,6 +1,7 @@
 //! Signature and digest policy for confirming unknown plugin publishers.
 
 use super::tr_package::{self, TrPackageSignatureStatus};
+use crate::core::app::error::PluginErrorKind;
 use crate::core::app::error::{Result, TingError};
 use crate::core::security::signing::constant_time_eq;
 use crate::plugin::types::PluginMetadata;
@@ -33,13 +34,16 @@ pub(crate) fn inspect_install_confirmation(
 
     let signature_status = tr_package::verify_tr_package_signature(package_path)?;
     if let TrPackageSignatureStatus::Invalid { reason, .. } = &signature_status {
-        return Err(TingError::PluginLoadError(format!(
-            "Invalid plugin package signature: {}",
-            reason
-        )));
+        return Err(TingError::plugin_load(
+            PluginErrorKind::InvalidManifest,
+            "inspect_install_confirmation::plugin_load",
+            format!("Invalid plugin package signature: {}", reason),
+        ));
     }
     if matches!(signature_status, TrPackageSignatureStatus::Unsigned) {
-        return Err(TingError::PluginLoadError(
+        return Err(TingError::plugin_load(
+            PluginErrorKind::Loading,
+            "inspect_install_confirmation::plugin_load",
             "Plugin package is not signed; please build it with trpack".to_string(),
         ));
     }

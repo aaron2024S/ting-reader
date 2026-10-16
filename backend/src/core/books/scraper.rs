@@ -1,5 +1,6 @@
 //! Book search, scraping and search-result caching.
 
+use crate::core::app::error::{CodecErrorKind, InputErrorKind, LookupErrorKind};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
@@ -102,15 +103,18 @@ impl ScraperService {
             if let Some(index) = index {
                 return Ok(sources.remove(index));
             }
-            return Err(TingError::PluginNotFound(format!(
-                "Scraper source '{}' not found or not enabled",
-                source_id
-            )));
+            return Err(TingError::plugin_not_found(
+                LookupErrorKind::Plugin,
+                "select_scraper::plugin_not_found",
+                format!("Scraper source '{}' not found or not enabled", source_id),
+            ));
         }
 
         let mut active_sources: Vec<_> = sources.into_iter().filter(|s| s.enabled).collect();
         if active_sources.is_empty() {
-            return Err(TingError::PluginNotFound(
+            return Err(TingError::plugin_not_found(
+                LookupErrorKind::Plugin,
+                "select_scraper::plugin_not_found",
                 "No active scraper plugins available".to_string(),
             ));
         }
@@ -161,19 +165,41 @@ impl ScraperService {
             chapter_candidates,
             context,
         };
-        request
-            .validate()
-            .map_err(|error| TingError::ValidationError(error.into()))?;
-        serde_json::to_value(request)
-            .map_err(|error| TingError::SerializationError(error.to_string()))
+        request.validate().map_err(|error| {
+            TingError::validation(
+                InputErrorKind::InvalidValue,
+                "search_request_with_context::validation",
+                error.into(),
+            )
+        })?;
+        serde_json::to_value(request).map_err(|error| {
+            let message = error.to_string();
+            TingError::serialization(
+                CodecErrorKind::InvalidData,
+                "search_request_with_context::serialization",
+                message,
+            )
+            .with_source(anyhow::anyhow!(error))
+        })
     }
 
     fn parse_search_page(value: serde_json::Value) -> Result<SearchResult> {
         let page: SearchPage = serde_json::from_value(value).map_err(|error| {
-            TingError::DeserializationError(format!("Invalid scraper search page: {error}"))
+            let message = format!("Invalid scraper search page: {error}");
+            TingError::deserialization(
+                CodecErrorKind::InvalidData,
+                "parse_search_page::deserialization",
+                message,
+            )
+            .with_source(anyhow::anyhow!(error))
         })?;
-        page.validate()
-            .map_err(|error| TingError::DeserializationError(error.into()))?;
+        page.validate().map_err(|error| {
+            TingError::deserialization(
+                CodecErrorKind::InvalidData,
+                "parse_search_page::deserialization",
+                error.into(),
+            )
+        })?;
         Ok(SearchResult {
             items: page
                 .items
@@ -257,7 +283,9 @@ impl ScraperService {
         page_size: u32,
     ) -> Result<SearchResult> {
         if query.trim().is_empty() {
-            return Err(TingError::ValidationError(
+            return Err(TingError::validation(
+                InputErrorKind::InvalidValue,
+                "search::validation",
                 "Search query cannot be empty".into(),
             ));
         }
@@ -287,7 +315,9 @@ impl ScraperService {
             })
             .collect();
         if normalized_params.is_empty() {
-            return Err(TingError::ValidationError(
+            return Err(TingError::validation(
+                InputErrorKind::MissingField,
+                "search_with_params::validation",
                 "At least one search parameter is required".into(),
             ));
         }
@@ -393,7 +423,9 @@ impl ScraperService {
                 tracing::debug!("Using fallback scraper: {}", source.id);
                 Ok(source)
             }
-            None => Err(TingError::PluginNotFound(
+            None => Err(TingError::plugin_not_found(
+                LookupErrorKind::Plugin,
+                "try_fallback_scraper::plugin_not_found",
                 "No fallback scraper available".to_string(),
             )),
         }
@@ -574,7 +606,11 @@ impl ScraperService {
             .map(|value| value.trim())
             .filter(|value| !value.is_empty())
             .ok_or_else(|| {
-                TingError::ValidationError("Aggregate scraper search requires a title".to_string())
+                TingError::validation(
+                    InputErrorKind::MissingField,
+                    "search_aggregate_source::validation",
+                    "Aggregate scraper search requires a title".to_string(),
+                )
             })?;
         let author = search_params
             .get("author")
@@ -717,7 +753,9 @@ impl ScraperService {
         context: Option<serde_json::Value>,
     ) -> Result<BookDetail> {
         if !config.has_scraper_sources() {
-            return Err(TingError::NotFound(
+            return Err(TingError::not_found(
+                LookupErrorKind::Plugin,
+                "scrape_book_metadata_with_context::not_found",
                 "No scraper plugins selected for this library".into(),
             ));
         }
@@ -740,7 +778,9 @@ impl ScraperService {
             .collect();
 
         if all_sources.is_empty() {
-            return Err(TingError::NotFound(
+            return Err(TingError::not_found(
+                LookupErrorKind::Plugin,
+                "scrape_book_metadata_with_context::not_found",
                 "No selected automatic scraper plugins are active".into(),
             ));
         }
@@ -827,7 +867,9 @@ impl ScraperService {
         rank_candidates(&mut candidate_items);
 
         if source_results.is_empty() && aggregate_sources_to_run.is_empty() {
-            return Err(TingError::NotFound(
+            return Err(TingError::not_found(
+                LookupErrorKind::Resource,
+                "scrape_book_metadata_with_context::not_found",
                 "No metadata found from any scraper".to_string(),
             ));
         }
@@ -905,7 +947,9 @@ impl ScraperService {
         }
 
         if source_results.is_empty() {
-            return Err(TingError::NotFound(
+            return Err(TingError::not_found(
+                LookupErrorKind::Resource,
+                "scrape_book_metadata_with_context::not_found",
                 "No metadata found from any scraper".to_string(),
             ));
         }

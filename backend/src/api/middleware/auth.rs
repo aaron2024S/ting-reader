@@ -1,3 +1,4 @@
+use crate::core::app::error::ErrorResponse;
 use axum::{
     Json,
     extract::Request,
@@ -79,22 +80,33 @@ pub enum AuthError {
 
 impl IntoResponse for AuthError {
     fn into_response(self) -> Response {
-        let (status, error_message) = match self {
+        let (status, reason, error_message) = match self {
             AuthError::MissingToken => (
                 StatusCode::UNAUTHORIZED,
+                "missing_credentials",
                 "Missing or invalid Authorization header. Expected format: 'Authorization: Bearer <token>'",
             ),
-            AuthError::InvalidToken => (StatusCode::UNAUTHORIZED, "Invalid authentication token"),
+            AuthError::InvalidToken => (
+                StatusCode::UNAUTHORIZED,
+                "invalid_credentials",
+                "Invalid authentication token",
+            ),
             AuthError::ConfigurationError => (
                 StatusCode::INTERNAL_SERVER_ERROR,
+                "missing_configuration",
                 "Authentication configuration error",
             ),
         };
 
-        let body = Json(json!({
-            "error": "AuthenticationError",
-            "message": error_message,
-        }));
+        let body = Json(ErrorResponse::with_details(
+            "AuthenticationError".into(),
+            error_message.into(),
+            json!({
+                "reason": reason,
+                "operation": "auth_middleware",
+                "retryable": false,
+            }),
+        ));
 
         (status, body).into_response()
     }

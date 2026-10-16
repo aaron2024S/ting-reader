@@ -1,6 +1,7 @@
 //! Native ABI v2 transport. Context is an explicit per-call borrowed pointer.
 
 use crate::plugin::host_api::resources::{ResourceError, ResourceScope};
+use crate::plugin::host_api::status_for_plugin_error;
 use crate::plugin::sandbox::Permission;
 use crate::plugin::{PluginHostGateway, PluginHostUser};
 use std::ffi::c_void;
@@ -10,7 +11,6 @@ use ting_plugin_contract::native_abi::{
     MAX_NATIVE_CONTROL_BYTES, NATIVE_ABI_REVISION, NativeAbiHeader, NativeHostApiV2, NativeStatus,
     NativeTargetInfo,
 };
-use ting_plugin_contract::protocol::PluginErrorCode;
 
 #[derive(Clone)]
 pub(crate) struct NativeHostInvocationContext {
@@ -49,15 +49,7 @@ fn guarded(call: impl FnOnce() -> std::result::Result<(), NativeStatus>) -> i32 
 }
 
 fn resource_status(error: ResourceError) -> NativeStatus {
-    match error.code {
-        PluginErrorCode::InvalidInput => NativeStatus::InvalidInput,
-        PluginErrorCode::NotFound => NativeStatus::NotFound,
-        PluginErrorCode::PermissionDenied => NativeStatus::PermissionDenied,
-        PluginErrorCode::ResourceLimit => NativeStatus::ResourceLimit,
-        PluginErrorCode::Cancelled => NativeStatus::Cancelled,
-        PluginErrorCode::UnsupportedOperation => NativeStatus::UnsupportedOperation,
-        _ => NativeStatus::InternalError,
-    }
+    status_for_plugin_error(error.code)
 }
 
 unsafe fn context<'a>(
@@ -145,7 +137,7 @@ unsafe extern "C" fn invoke(
                     method,
                     input,
                 ))
-                .map_err(|_| NativeStatus::InternalError)?
+                .map_err(|error| status_for_plugin_error(error.plugin_error_code()))?
         };
         let encoded = serde_json::to_vec(&value).map_err(|_| NativeStatus::InternalError)?;
         unsafe { copy_result(&encoded, output, capacity, length, MAX_NATIVE_CONTROL_BYTES) }

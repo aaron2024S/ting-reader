@@ -2,6 +2,7 @@
 //!
 //! Reads and validates plugin.yml/plugin.yaml, producing a PluginMetadata struct.
 
+use crate::core::app::error::PluginErrorKind;
 use semver::Version;
 use serde_json::Value;
 use std::path::{Component, Path, PathBuf};
@@ -32,11 +33,21 @@ pub fn has_plugin_manifest(path: &Path) -> bool {
 /// Read plugin metadata from a plugin.yml/plugin.yaml file in the given directory.
 pub fn read_plugin_metadata(path: &Path) -> Result<PluginMetadata, TingError> {
     let metadata_path = find_plugin_manifest(path).ok_or_else(|| {
-        TingError::PluginLoadError(format!("plugin.yml not found in: {}", path.display()))
+        TingError::plugin_load(
+            PluginErrorKind::Unavailable,
+            "read_plugin_metadata::plugin_load",
+            format!("plugin.yml not found in: {}", path.display()),
+        )
     })?;
 
     let content = std::fs::read_to_string(&metadata_path).map_err(|e| {
-        TingError::PluginLoadError(format!("Failed to read {}: {}", metadata_path.display(), e))
+        let message = format!("Failed to read {}: {}", metadata_path.display(), e);
+        TingError::plugin_load(
+            PluginErrorKind::InvalidManifest,
+            "read_plugin_metadata::plugin_load",
+            message,
+        )
+        .with_source(anyhow::anyhow!(e))
     })?;
 
     parse_plugin_metadata_content(&content, &metadata_path.display().to_string())
@@ -47,10 +58,16 @@ pub fn parse_plugin_metadata_content(
     manifest_label: &str,
 ) -> Result<PluginMetadata, TingError> {
     let manifest: PluginManifest = serde_yaml::from_str(content).map_err(|error| {
-        TingError::PluginLoadError(format!(
+        let message = format!(
             "Invalid YAML plugin manifest in {}: {}",
             manifest_label, error
-        ))
+        );
+        TingError::plugin_load(
+            PluginErrorKind::InvalidManifest,
+            "parse_plugin_metadata_content::plugin_load",
+            message,
+        )
+        .with_source(anyhow::anyhow!(error))
     })?;
     metadata_from_manifest(manifest, manifest_label)
 }
@@ -60,10 +77,13 @@ pub fn parse_plugin_metadata_value(
     manifest_label: &str,
 ) -> Result<PluginMetadata, TingError> {
     let manifest: PluginManifest = serde_json::from_value(json).map_err(|error| {
-        TingError::PluginLoadError(format!(
-            "Invalid plugin manifest in {}: {}",
-            manifest_label, error
-        ))
+        let message = format!("Invalid plugin manifest in {}: {}", manifest_label, error);
+        TingError::plugin_load(
+            PluginErrorKind::InvalidManifest,
+            "parse_plugin_metadata_value::plugin_load",
+            message,
+        )
+        .with_source(anyhow::anyhow!(error))
     })?;
     metadata_from_manifest(manifest, manifest_label)
 }
@@ -73,10 +93,13 @@ fn metadata_from_manifest(
     manifest_label: &str,
 ) -> Result<PluginMetadata, TingError> {
     manifest.validate().map_err(|error| {
-        TingError::PluginLoadError(format!(
-            "Invalid plugin manifest in {}: {}",
-            manifest_label, error
-        ))
+        let message = format!("Invalid plugin manifest in {}: {}", manifest_label, error);
+        TingError::plugin_load(
+            PluginErrorKind::InvalidManifest,
+            "metadata_from_manifest::plugin_load",
+            message,
+        )
+        .with_source(anyhow::anyhow!(error))
     })?;
     validate_plugin_manifest_identity(
         &manifest.id,
@@ -334,18 +357,26 @@ fn is_windows_reserved_name(value: &str) -> bool {
 }
 
 fn invalid_manifest_field(field: &str, manifest_label: &str, reason: &str) -> TingError {
-    TingError::PluginLoadError(format!(
-        "Invalid '{}' field in {}: {}",
-        field, manifest_label, reason
-    ))
+    TingError::plugin_load(
+        PluginErrorKind::InvalidManifest,
+        "invalid_manifest_field::plugin_load",
+        format!(
+            "Invalid '{}' field in {}: {}",
+            field, manifest_label, reason
+        ),
+    )
 }
 
 pub(crate) fn validate_plugin_instance_id(instance_id: &str) -> Result<(), TingError> {
     let (id, version) = instance_id.rsplit_once('@').ok_or_else(|| {
-        TingError::PluginLoadError(format!(
-            "Invalid plugin instance ID '{}': expected <id>@<version>",
-            instance_id
-        ))
+        TingError::plugin_load(
+            PluginErrorKind::InvalidOutput,
+            "validate_plugin_instance_id::plugin_load",
+            format!(
+                "Invalid plugin instance ID '{}': expected <id>@<version>",
+                instance_id
+            ),
+        )
     })?;
     validate_plugin_id(id, "plugin instance ID")?;
     validate_plugin_version(version, "plugin instance ID")

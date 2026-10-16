@@ -1,6 +1,7 @@
 //! Book business operations.
 
 use crate::api::models::{CreateBookRequest, UpdateBookRequest};
+use crate::core::app::error::{InputErrorKind, LookupErrorKind};
 use crate::core::app::error::{Result, TingError};
 use crate::db::models::Book;
 use crate::db::repository::{BookRepository, Repository};
@@ -24,7 +25,9 @@ impl BookService {
 
     pub async fn get_books_by_library(&self, library_id: &str) -> Result<Vec<Book>> {
         if library_id.trim().is_empty() {
-            return Err(TingError::ValidationError(
+            return Err(TingError::validation(
+                InputErrorKind::InvalidValue,
+                "get_books_by_library::validation",
                 "Library ID cannot be empty".to_string(),
             ));
         }
@@ -33,7 +36,9 @@ impl BookService {
 
     pub async fn get_book_by_id(&self, id: &str) -> Result<Option<Book>> {
         if id.trim().is_empty() {
-            return Err(TingError::ValidationError(
+            return Err(TingError::validation(
+                InputErrorKind::InvalidValue,
+                "get_book_by_id::validation",
                 "Book ID cannot be empty".to_string(),
             ));
         }
@@ -42,7 +47,9 @@ impl BookService {
 
     pub async fn get_book_by_hash(&self, hash: &str) -> Result<Option<Book>> {
         if hash.trim().is_empty() {
-            return Err(TingError::ValidationError(
+            return Err(TingError::validation(
+                InputErrorKind::InvalidValue,
+                "get_book_by_hash::validation",
                 "Book hash cannot be empty".to_string(),
             ));
         }
@@ -53,10 +60,14 @@ impl BookService {
         self.validate_create_request(&request)?;
 
         if let Some(existing) = self.book_repo.find_by_hash(&request.hash).await? {
-            return Err(TingError::ValidationError(format!(
-                "Book with hash {} already exists with ID {}",
-                request.hash, existing.id
-            )));
+            return Err(TingError::validation(
+                InputErrorKind::Conflict,
+                "create_book::validation",
+                format!(
+                    "Book with hash {} already exists with ID {}",
+                    request.hash, existing.id
+                ),
+            ));
         }
 
         let book_id = Uuid::new_v4().to_string();
@@ -90,20 +101,26 @@ impl BookService {
 
     pub async fn update_book(&self, id: &str, request: UpdateBookRequest) -> Result<Book> {
         if id.trim().is_empty() {
-            return Err(TingError::ValidationError(
+            return Err(TingError::validation(
+                InputErrorKind::InvalidValue,
+                "update_book::validation",
                 "Book ID cannot be empty".to_string(),
             ));
         }
 
-        let mut book = self
-            .book_repo
-            .find_by_id(id)
-            .await?
-            .ok_or_else(|| TingError::NotFound(format!("Book with ID {} not found", id)))?;
+        let mut book = self.book_repo.find_by_id(id).await?.ok_or_else(|| {
+            TingError::not_found(
+                LookupErrorKind::Book,
+                "update_book::not_found",
+                format!("Book with ID {} not found", id),
+            )
+        })?;
 
         if let Some(library_id) = request.library_id {
             if library_id.trim().is_empty() {
-                return Err(TingError::ValidationError(
+                return Err(TingError::validation(
+                    InputErrorKind::InvalidValue,
+                    "update_book::validation",
                     "Library ID cannot be empty".to_string(),
                 ));
             }
@@ -167,7 +184,9 @@ impl BookService {
         }
         if let Some(skip_intro) = request.skip_intro {
             if skip_intro < 0 {
-                return Err(TingError::ValidationError(
+                return Err(TingError::validation(
+                    InputErrorKind::OutOfRange,
+                    "update_book::validation",
                     "skip_intro cannot be negative".to_string(),
                 ));
             }
@@ -175,7 +194,9 @@ impl BookService {
         }
         if let Some(skip_outro) = request.skip_outro {
             if skip_outro < 0 {
-                return Err(TingError::ValidationError(
+                return Err(TingError::validation(
+                    InputErrorKind::OutOfRange,
+                    "update_book::validation",
                     "skip_outro cannot be negative".to_string(),
                 ));
             }
@@ -183,7 +204,9 @@ impl BookService {
         }
         if let Some(path) = request.path {
             if path.trim().is_empty() {
-                return Err(TingError::ValidationError(
+                return Err(TingError::validation(
+                    InputErrorKind::InvalidPath,
+                    "update_book::validation",
                     "Book path cannot be empty".to_string(),
                 ));
             }
@@ -191,17 +214,23 @@ impl BookService {
         }
         if let Some(hash) = request.hash {
             if hash.trim().is_empty() {
-                return Err(TingError::ValidationError(
+                return Err(TingError::validation(
+                    InputErrorKind::InvalidValue,
+                    "update_book::validation",
                     "Book hash cannot be empty".to_string(),
                 ));
             }
             if let Some(existing) = self.book_repo.find_by_hash(&hash).await?
                 && existing.id != id
             {
-                return Err(TingError::ValidationError(format!(
-                    "Another book with hash {} already exists with ID {}",
-                    hash, existing.id
-                )));
+                return Err(TingError::validation(
+                    InputErrorKind::Conflict,
+                    "update_book::validation",
+                    format!(
+                        "Another book with hash {} already exists with ID {}",
+                        hash, existing.id
+                    ),
+                ));
             }
             book.hash = hash;
         }
@@ -215,42 +244,56 @@ impl BookService {
 
     pub async fn delete_book(&self, id: &str) -> Result<()> {
         if id.trim().is_empty() {
-            return Err(TingError::ValidationError(
+            return Err(TingError::validation(
+                InputErrorKind::InvalidValue,
+                "delete_book::validation",
                 "Book ID cannot be empty".to_string(),
             ));
         }
-        let book = self
-            .book_repo
-            .find_by_id(id)
-            .await?
-            .ok_or_else(|| TingError::NotFound(format!("Book with ID {} not found", id)))?;
+        let book = self.book_repo.find_by_id(id).await?.ok_or_else(|| {
+            TingError::not_found(
+                LookupErrorKind::Book,
+                "delete_book::not_found",
+                format!("Book with ID {} not found", id),
+            )
+        })?;
         self.book_repo.delete(&book.id).await?;
         Ok(())
     }
 
     fn validate_create_request(&self, request: &CreateBookRequest) -> Result<()> {
         if request.library_id.trim().is_empty() {
-            return Err(TingError::ValidationError(
+            return Err(TingError::validation(
+                InputErrorKind::MissingField,
+                "validate_create_request::validation",
                 "Library ID is required and cannot be empty".to_string(),
             ));
         }
         if request.path.trim().is_empty() {
-            return Err(TingError::ValidationError(
+            return Err(TingError::validation(
+                InputErrorKind::MissingField,
+                "validate_create_request::validation",
                 "Book path is required and cannot be empty".to_string(),
             ));
         }
         if request.hash.trim().is_empty() {
-            return Err(TingError::ValidationError(
+            return Err(TingError::validation(
+                InputErrorKind::MissingField,
+                "validate_create_request::validation",
                 "Book hash is required and cannot be empty".to_string(),
             ));
         }
         if request.skip_intro < 0 {
-            return Err(TingError::ValidationError(
+            return Err(TingError::validation(
+                InputErrorKind::OutOfRange,
+                "validate_create_request::validation",
                 "skip_intro cannot be negative".to_string(),
             ));
         }
         if request.skip_outro < 0 {
-            return Err(TingError::ValidationError(
+            return Err(TingError::validation(
+                InputErrorKind::OutOfRange,
+                "validate_create_request::validation",
                 "skip_outro cannot be negative".to_string(),
             ));
         }

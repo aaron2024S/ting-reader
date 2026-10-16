@@ -51,7 +51,7 @@ impl SystemSettingsRepository {
     }
 
     pub async fn set_application_time_zone(&self, time_zone: &str) -> Result<()> {
-        let time_zone = parse_time_zone(time_zone).map_err(TingError::ValidationError)?;
+        let time_zone = parse_time_zone(time_zone)?;
         self.set(APPLICATION_TIME_ZONE_KEY, &time_zone).await
     }
 

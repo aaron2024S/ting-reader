@@ -1,4 +1,5 @@
 use super::*;
+use crate::core::app::error::EventErrorKind;
 use serde_json::json;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -120,7 +121,13 @@ async fn test_handler_isolation() {
 
     // First handler that fails
     let handler1: EventHandler = Arc::new(move |_event| {
-        Box::pin(async move { Err(TingError::EventError("Handler 1 failed".to_string())) })
+        Box::pin(async move {
+            Err(TingError::event(
+                EventErrorKind::Delivery,
+                "test_handler_isolation::event",
+                "Handler 1 failed".to_string(),
+            ))
+        })
     });
 
     // Second handler that succeeds

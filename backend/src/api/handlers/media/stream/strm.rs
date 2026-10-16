@@ -1,5 +1,8 @@
 use super::{StreamQuery, handle_hls_request};
 use crate::api::state::AppState;
+use crate::core::app::error::{
+    DeadlineErrorKind, InputErrorKind, LookupErrorKind, NetworkErrorKind, SystemErrorKind,
+};
 use crate::core::app::error::{Result, TingError};
 use crate::db::models::{Book, Chapter, Library};
 use crate::db::repository::Repository;
@@ -46,7 +49,15 @@ pub(super) async fn handle_strm_stream(
             .storage_service
             .get_webdav_reader(&library, &chapter.path, None, state.encryption_key.as_ref())
             .await
-            .map_err(|e| TingError::NotFound(format!("Failed to read strm file: {}", e)))?;
+            .map_err(|e| {
+                let message = format!("Failed to read strm file: {}", e);
+                TingError::not_found(
+                    LookupErrorKind::File,
+                    "handle_strm_stream::not_found",
+                    message,
+                )
+                .with_source(anyhow::anyhow!(e))
+            })?;
 
         read_strm_url(reader).await?
     } else {
@@ -54,7 +65,15 @@ pub(super) async fn handle_strm_stream(
             .storage_service
             .get_http_reader(&chapter.path, None)
             .await
-            .map_err(|e| TingError::NotFound(format!("Failed to read strm URL: {}", e)))?;
+            .map_err(|e| {
+                let message = format!("Failed to read strm URL: {}", e);
+                TingError::not_found(
+                    LookupErrorKind::File,
+                    "handle_strm_stream::not_found",
+                    message,
+                )
+                .with_source(anyhow::anyhow!(e))
+            })?;
 
         read_strm_url(reader).await?
     };
@@ -86,7 +105,9 @@ pub(super) async fn handle_strm_stream(
             "mp3" => "audio/mpeg",
             "wav" => "audio/wav",
             _ => {
-                return Err(TingError::InvalidRequest(
+                return Err(TingError::invalid_request(
+                    InputErrorKind::UnsupportedValue,
+                    "handle_strm_stream::invalid_request",
                     "Unsupported transcode format".to_string(),
                 ));
             }
@@ -264,12 +285,22 @@ pub(super) async fn handle_strm_stream(
 }
 
 async fn redirect_strm_url(url: String) -> Result<Response> {
-    let client = STRM_CLIENT
-        .as_ref()
-        .map_err(|error| TingError::InitializationError(error.to_string()))?;
+    let client = STRM_CLIENT.as_ref().map_err(|error| {
+        TingError::initialization(
+            SystemErrorKind::Initialization,
+            "redirect_strm_url",
+            error.to_string(),
+        )
+    })?;
     let target = tokio::time::timeout(STRM_RESOLVE_TIMEOUT, resolve_strm_url(client, &url))
         .await
-        .map_err(|_| TingError::Timeout("STRM redirect resolution timed out".into()))??;
+        .map_err(|_| {
+            TingError::timeout(
+                DeadlineErrorKind::Elapsed,
+                "redirect_strm_url::timeout",
+                "STRM redirect resolution timed out".into(),
+            )
+        })??;
 
     use axum::http::header;
     tracing::debug!("Redirecting strm playback to resolved source");
@@ -305,12 +336,19 @@ async fn resolve_strm_url(client: &reqwest::Client, url: &str) -> Result<String>
 
     loop {
         validate_strm_url(&current)?;
-        let parsed = Url::parse(&current)
-            .map_err(|_| TingError::InvalidRequest("Invalid strm URL".into()))?;
+        let parsed = Url::parse(&current).map_err(|_| {
+            TingError::invalid_request(
+                InputErrorKind::InvalidValue,
+                "resolve_strm_url::invalid_request",
+                "Invalid strm URL".into(),
+            )
+        })?;
         let mut visit_url = parsed.clone();
         visit_url.set_fragment(None);
         if !visited.insert(visit_url) {
-            return Err(TingError::NetworkError(
+            return Err(TingError::network(
+                NetworkErrorKind::Redirect,
+                "resolve_strm_url::network",
                 "STRM redirect loop detected".into(),
             ));
         }
@@ -346,13 +384,16 @@ async fn resolve_strm_url(client: &reqwest::Client, url: &str) -> Result<String>
                 // when no redirect occurred; reqwest strips URL credentials.
                 return Ok(current);
             }
-            return Err(TingError::NetworkError(format!(
-                "STRM source returned HTTP {}",
-                status.as_u16()
-            )));
+            return Err(TingError::network(
+                NetworkErrorKind::HttpStatus,
+                "resolve_strm_url::network",
+                format!("STRM source returned HTTP {}", status.as_u16()),
+            ));
         }
         if redirects >= STRM_MAX_REDIRECTS {
-            return Err(TingError::NetworkError(
+            return Err(TingError::network(
+                NetworkErrorKind::Redirect,
+                "resolve_strm_url::network",
                 "STRM redirect limit exceeded".into(),
             ));
         }
@@ -360,10 +401,20 @@ async fn resolve_strm_url(client: &reqwest::Client, url: &str) -> Result<String>
             .headers()
             .get(header::LOCATION)
             .and_then(|value| value.to_str().ok())
-            .ok_or_else(|| TingError::NetworkError("STRM redirect has no valid Location".into()))?;
-        let mut next = parsed
-            .join(location)
-            .map_err(|_| TingError::NetworkError("Invalid STRM redirect URL".into()))?;
+            .ok_or_else(|| {
+                TingError::network(
+                    NetworkErrorKind::Redirect,
+                    "resolve_strm_url::network",
+                    "STRM redirect has no valid Location".into(),
+                )
+            })?;
+        let mut next = parsed.join(location).map_err(|_| {
+            TingError::network(
+                NetworkErrorKind::Redirect,
+                "resolve_strm_url::network",
+                "Invalid STRM redirect URL".into(),
+            )
+        })?;
         validate_strm_url(next.as_str())?;
 
         // Carry URL credentials only within the same scheme/host/port. A new
@@ -372,10 +423,20 @@ async fn resolve_strm_url(client: &reqwest::Client, url: &str) -> Result<String>
             && next.username().is_empty()
             && next.password().is_none()
         {
-            next.set_username(parsed.username())
-                .map_err(|_| TingError::NetworkError("Invalid STRM redirect credentials".into()))?;
-            next.set_password(parsed.password())
-                .map_err(|_| TingError::NetworkError("Invalid STRM redirect credentials".into()))?;
+            next.set_username(parsed.username()).map_err(|_| {
+                TingError::network(
+                    NetworkErrorKind::Redirect,
+                    "resolve_strm_url::network",
+                    "Invalid STRM redirect credentials".into(),
+                )
+            })?;
+            next.set_password(parsed.password()).map_err(|_| {
+                TingError::network(
+                    NetworkErrorKind::Redirect,
+                    "resolve_strm_url::network",
+                    "Invalid STRM redirect credentials".into(),
+                )
+            })?;
         }
         current = next.to_string();
         redirects += 1;
@@ -386,7 +447,11 @@ async fn resolve_strm_url(client: &reqwest::Client, url: &str) -> Result<String>
 
 fn strm_resolve_error(error: reqwest::Error) -> TingError {
     if error.is_timeout() {
-        TingError::Timeout("STRM redirect resolution timed out".into())
+        TingError::timeout(
+            DeadlineErrorKind::Elapsed,
+            "strm_resolve_error::timeout",
+            "STRM redirect resolution timed out".into(),
+        )
     } else {
         TingError::from(error).with_context("Failed to resolve STRM source")
     }
@@ -396,7 +461,9 @@ pub(super) async fn read_strm_url(reader: impl tokio::io::AsyncRead + Unpin) -> 
     let mut content = String::new();
     reader.take(65_537).read_to_string(&mut content).await?;
     if content.len() > 65_536 {
-        return Err(TingError::InvalidRequest(
+        return Err(TingError::invalid_request(
+            InputErrorKind::OutOfRange,
+            "read_strm_url::invalid_request",
             "strm file exceeds 64 KiB".to_string(),
         ));
     }
@@ -404,10 +471,19 @@ pub(super) async fn read_strm_url(reader: impl tokio::io::AsyncRead + Unpin) -> 
 }
 
 pub(super) fn validate_strm_url(url: &str) -> Result<()> {
-    let parsed_url = reqwest::Url::parse(url)
-        .map_err(|_| TingError::InvalidRequest("Invalid strm URL".to_string()))?;
+    let parsed_url = reqwest::Url::parse(url).map_err(|_| {
+        TingError::invalid_request(
+            InputErrorKind::InvalidValue,
+            "validate_strm_url::invalid_request",
+            "Invalid strm URL".to_string(),
+        )
+    })?;
     if !matches!(parsed_url.scheme(), "http" | "https") || parsed_url.host_str().is_none() {
-        return Err(TingError::InvalidRequest("Invalid strm URL".to_string()));
+        return Err(TingError::invalid_request(
+            InputErrorKind::InvalidValue,
+            "validate_strm_url::invalid_request",
+            "Invalid strm URL".to_string(),
+        ));
     }
     Ok(())
 }

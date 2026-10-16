@@ -18,8 +18,14 @@ fn test_manager() -> PluginManager {
 
 async fn insert_metadata(manager: &PluginManager, metadata: PluginMetadata) -> PluginId {
     let plugin_id = metadata.instance_id();
-    let instance =
-        Arc::new(FailedPlugin::new(metadata.clone(), "unused".to_string())) as Arc<dyn Plugin>;
+    let instance = Arc::new(FailedPlugin::new(
+        metadata.clone(),
+        Arc::new(TingError::plugin_load(
+            crate::core::app::error::PluginErrorKind::Loading,
+            "test.fixture",
+            "unused".into(),
+        )),
+    )) as Arc<dyn Plugin>;
 
     manager
         .registry

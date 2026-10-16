@@ -2,6 +2,7 @@
 //!
 //! Provides configuration storage, validation, encryption, and hot reload for plugins.
 
+use crate::core::app::error::ConfigurationErrorKind;
 mod encryption;
 
 use super::types::PluginId;
@@ -72,7 +73,13 @@ impl PluginConfigManager {
 
     pub fn new(config_dir: PathBuf, encryption_key: [u8; 32]) -> Result<Self> {
         std::fs::create_dir_all(&config_dir).map_err(|e| {
-            TingError::ConfigError(format!("Failed to create config directory: {}", e))
+            let message = format!("Failed to create config directory: {}", e);
+            TingError::configuration(
+                ConfigurationErrorKind::Persistence,
+                "new::configuration",
+                message,
+            )
+            .with_source(anyhow::anyhow!(e))
         })?;
 
         let manager = Self {
@@ -122,7 +129,11 @@ impl PluginConfigManager {
 
         {
             let mut configs = self.configs.write().map_err(|e| {
-                TingError::ConfigError(format!("Failed to acquire config lock: {}", e))
+                TingError::configuration(
+                    ConfigurationErrorKind::Synchronization,
+                    "initialize_config::configuration",
+                    format!("Failed to acquire config lock: {}", e),
+                )
             })?;
             configs.insert(plugin_id.clone(), entry.clone());
         }
@@ -141,7 +152,11 @@ impl PluginConfigManager {
     ) -> Result<()> {
         let existing = {
             let configs = self.configs.read().map_err(|e| {
-                TingError::ConfigError(format!("Failed to acquire config lock: {}", e))
+                TingError::configuration(
+                    ConfigurationErrorKind::Synchronization,
+                    "ensure_config::configuration",
+                    format!("Failed to acquire config lock: {}", e),
+                )
             })?;
             configs.get(&plugin_id).cloned()
         };
@@ -179,7 +194,11 @@ impl PluginConfigManager {
 
         {
             let mut configs = self.configs.write().map_err(|e| {
-                TingError::ConfigError(format!("Failed to acquire config lock: {}", e))
+                TingError::configuration(
+                    ConfigurationErrorKind::Synchronization,
+                    "ensure_config::configuration",
+                    format!("Failed to acquire config lock: {}", e),
+                )
             })?;
             configs.insert(plugin_id, updated_entry.clone());
         }
@@ -189,13 +208,20 @@ impl PluginConfigManager {
     }
 
     pub fn get_config(&self, plugin_id: &PluginId) -> Result<Value> {
-        let configs = self
-            .configs
-            .read()
-            .map_err(|e| TingError::ConfigError(format!("Failed to acquire config lock: {}", e)))?;
+        let configs = self.configs.read().map_err(|e| {
+            TingError::configuration(
+                ConfigurationErrorKind::Synchronization,
+                "get_config::configuration",
+                format!("Failed to acquire config lock: {}", e),
+            )
+        })?;
 
         let entry = configs.get(plugin_id).ok_or_else(|| {
-            TingError::ConfigError(format!("Configuration not found for plugin: {}", plugin_id))
+            TingError::configuration(
+                ConfigurationErrorKind::Missing,
+                "get_config::configuration",
+                format!("Configuration not found for plugin: {}", plugin_id),
+            )
         })?;
 
         encryption::decrypt_sensitive_fields(
@@ -206,13 +232,20 @@ impl PluginConfigManager {
     }
 
     pub fn get_redacted_config(&self, plugin_id: &PluginId) -> Result<Value> {
-        let configs = self
-            .configs
-            .read()
-            .map_err(|e| TingError::ConfigError(format!("Failed to acquire config lock: {}", e)))?;
+        let configs = self.configs.read().map_err(|e| {
+            TingError::configuration(
+                ConfigurationErrorKind::Synchronization,
+                "get_redacted_config::configuration",
+                format!("Failed to acquire config lock: {}", e),
+            )
+        })?;
 
         let entry = configs.get(plugin_id).ok_or_else(|| {
-            TingError::ConfigError(format!("Configuration not found for plugin: {}", plugin_id))
+            TingError::configuration(
+                ConfigurationErrorKind::Missing,
+                "get_redacted_config::configuration",
+                format!("Configuration not found for plugin: {}", plugin_id),
+            )
         })?;
 
         let mut config = encryption::decrypt_sensitive_fields(
@@ -229,10 +262,13 @@ impl PluginConfigManager {
         plugin_id: &PluginId,
         incoming_config: Value,
     ) -> Result<Value> {
-        let configs = self
-            .configs
-            .read()
-            .map_err(|e| TingError::ConfigError(format!("Failed to acquire config lock: {}", e)))?;
+        let configs = self.configs.read().map_err(|e| {
+            TingError::configuration(
+                ConfigurationErrorKind::Synchronization,
+                "merge_preserved_sensitive_fields::configuration",
+                format!("Failed to acquire config lock: {}", e),
+            )
+        })?;
 
         let Some(entry) = configs.get(plugin_id) else {
             return Ok(incoming_config);
@@ -259,10 +295,18 @@ impl PluginConfigManager {
 
         let (old_config, schema, encrypted_fields, plugin_name) = {
             let configs = self.configs.read().map_err(|e| {
-                TingError::ConfigError(format!("Failed to acquire config lock: {}", e))
+                TingError::configuration(
+                    ConfigurationErrorKind::Synchronization,
+                    "update_config::configuration",
+                    format!("Failed to acquire config lock: {}", e),
+                )
             })?;
             let entry = configs.get(plugin_id).ok_or_else(|| {
-                TingError::ConfigError(format!("Configuration not found for plugin: {}", plugin_id))
+                TingError::configuration(
+                    ConfigurationErrorKind::Missing,
+                    "update_config::configuration",
+                    format!("Configuration not found for plugin: {}", plugin_id),
+                )
             })?;
             let old_config = encryption::decrypt_sensitive_fields(
                 &self.encryption_key,
@@ -289,7 +333,11 @@ impl PluginConfigManager {
 
         {
             let mut configs = self.configs.write().map_err(|e| {
-                TingError::ConfigError(format!("Failed to acquire config lock: {}", e))
+                TingError::configuration(
+                    ConfigurationErrorKind::Synchronization,
+                    "update_config::configuration",
+                    format!("Failed to acquire config lock: {}", e),
+                )
             })?;
             if let Some(entry) = configs.get_mut(plugin_id) {
                 entry.config = encrypted_config.clone();
@@ -299,10 +347,18 @@ impl PluginConfigManager {
 
         let entry = {
             let configs = self.configs.read().map_err(|e| {
-                TingError::ConfigError(format!("Failed to acquire config lock: {}", e))
+                TingError::configuration(
+                    ConfigurationErrorKind::Synchronization,
+                    "update_config::configuration",
+                    format!("Failed to acquire config lock: {}", e),
+                )
             })?;
             configs.get(plugin_id).cloned().ok_or_else(|| {
-                TingError::ConfigError(format!("Configuration not found for plugin: {}", plugin_id))
+                TingError::configuration(
+                    ConfigurationErrorKind::Missing,
+                    "update_config::configuration",
+                    format!("Configuration not found for plugin: {}", plugin_id),
+                )
             })?
         };
         self.save_config(&entry)?;
@@ -317,7 +373,11 @@ impl PluginConfigManager {
 
         {
             let mut configs = self.configs.write().map_err(|e| {
-                TingError::ConfigError(format!("Failed to acquire config lock: {}", e))
+                TingError::configuration(
+                    ConfigurationErrorKind::Synchronization,
+                    "delete_config::configuration",
+                    format!("Failed to acquire config lock: {}", e),
+                )
             })?;
             configs.remove(plugin_id);
         }
@@ -325,7 +385,13 @@ impl PluginConfigManager {
         let config_file = self.get_config_file_path(plugin_id);
         if config_file.exists() {
             std::fs::remove_file(&config_file).map_err(|e| {
-                TingError::ConfigError(format!("Failed to delete config file: {}", e))
+                let message = format!("Failed to delete config file: {}", e);
+                TingError::configuration(
+                    ConfigurationErrorKind::Persistence,
+                    "delete_config::configuration",
+                    message,
+                )
+                .with_source(anyhow::anyhow!(e))
             })?;
         }
 
@@ -338,7 +404,11 @@ impl PluginConfigManager {
         F: Fn(ConfigChangeEvent) + Send + Sync + 'static,
     {
         let mut subscribers = self.subscribers.write().map_err(|e| {
-            TingError::ConfigError(format!("Failed to acquire subscribers lock: {}", e))
+            TingError::configuration(
+                ConfigurationErrorKind::Synchronization,
+                "subscribe_to_changes::configuration",
+                format!("Failed to acquire subscribers lock: {}", e),
+            )
         })?;
         subscribers.push(Box::new(callback));
         Ok(())
@@ -347,13 +417,20 @@ impl PluginConfigManager {
     pub fn export_config(&self, plugin_id: &PluginId) -> Result<Value> {
         tracing::info!(plugin_id = %plugin_id, "Exporting plugin configuration");
 
-        let configs = self
-            .configs
-            .read()
-            .map_err(|e| TingError::ConfigError(format!("Failed to acquire config lock: {}", e)))?;
+        let configs = self.configs.read().map_err(|e| {
+            TingError::configuration(
+                ConfigurationErrorKind::Synchronization,
+                "export_config::configuration",
+                format!("Failed to acquire config lock: {}", e),
+            )
+        })?;
 
         let entry = configs.get(plugin_id).ok_or_else(|| {
-            TingError::ConfigError(format!("Configuration not found for plugin: {}", plugin_id))
+            TingError::configuration(
+                ConfigurationErrorKind::Missing,
+                "export_config::configuration",
+                format!("Configuration not found for plugin: {}", plugin_id),
+            )
         })?;
 
         let decrypted_config = encryption::decrypt_sensitive_fields(
@@ -380,16 +457,28 @@ impl PluginConfigManager {
         let config = import_data
             .get("config")
             .ok_or_else(|| {
-                TingError::ConfigError("Import data missing 'config' field".to_string())
+                TingError::configuration(
+                    ConfigurationErrorKind::Missing,
+                    "import_config::configuration",
+                    "Import data missing 'config' field".to_string(),
+                )
             })?
             .clone();
 
         let (schema, _encrypted_fields, _plugin_name) = {
             let configs = self.configs.read().map_err(|e| {
-                TingError::ConfigError(format!("Failed to acquire config lock: {}", e))
+                TingError::configuration(
+                    ConfigurationErrorKind::Synchronization,
+                    "import_config::configuration",
+                    format!("Failed to acquire config lock: {}", e),
+                )
             })?;
             let entry = configs.get(plugin_id).ok_or_else(|| {
-                TingError::ConfigError(format!("Configuration not found for plugin: {}", plugin_id))
+                TingError::configuration(
+                    ConfigurationErrorKind::Missing,
+                    "import_config::configuration",
+                    format!("Configuration not found for plugin: {}", plugin_id),
+                )
             })?;
             (
                 entry.schema.clone(),
@@ -410,10 +499,13 @@ impl PluginConfigManager {
     pub fn export_all_configs(&self) -> Result<Value> {
         tracing::info!("Exporting all plugin configurations");
 
-        let configs = self
-            .configs
-            .read()
-            .map_err(|e| TingError::ConfigError(format!("Failed to acquire config lock: {}", e)))?;
+        let configs = self.configs.read().map_err(|e| {
+            TingError::configuration(
+                ConfigurationErrorKind::Synchronization,
+                "export_all_configs::configuration",
+                format!("Failed to acquire config lock: {}", e),
+            )
+        })?;
 
         let mut exports = serde_json::Map::new();
         for (plugin_id, entry) in configs.iter() {
@@ -440,7 +532,11 @@ impl PluginConfigManager {
         tracing::info!("Importing all plugin configurations");
 
         let imports = import_data.as_object().ok_or_else(|| {
-            TingError::ConfigError("Import data must be a JSON object".to_string())
+            TingError::configuration(
+                ConfigurationErrorKind::InvalidValue,
+                "import_all_configs::configuration",
+                "Import data must be a JSON object".to_string(),
+            )
         })?;
 
         let mut imported_count = 0;
@@ -468,20 +564,31 @@ impl PluginConfigManager {
 
         let backup_dir = self.config_dir.join("backups");
         std::fs::create_dir_all(&backup_dir).map_err(|e| {
-            TingError::ConfigError(format!("Failed to create backup directory: {}", e))
+            let message = format!("Failed to create backup directory: {}", e);
+            TingError::configuration(
+                ConfigurationErrorKind::Persistence,
+                "backup_config::configuration",
+                message,
+            )
+            .with_source(anyhow::anyhow!(e))
         })?;
 
         let entry = {
             let configs = self.configs.read().map_err(|e| {
-                TingError::ConfigError(format!("Failed to acquire config lock: {}", e))
+                TingError::configuration(
+                    ConfigurationErrorKind::Synchronization,
+                    "backup_config::configuration",
+                    format!("Failed to acquire config lock: {}", e),
+                )
             })?;
             configs
                 .get(plugin_id)
                 .ok_or_else(|| {
-                    TingError::ConfigError(format!(
-                        "Configuration not found for plugin: {}",
-                        plugin_id
-                    ))
+                    TingError::configuration(
+                        ConfigurationErrorKind::Missing,
+                        "backup_config::configuration",
+                        format!("Configuration not found for plugin: {}", plugin_id),
+                    )
                 })?
                 .clone()
         };
@@ -490,10 +597,24 @@ impl PluginConfigManager {
         let safe_plugin_id = plugin_id.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
         let backup_path = backup_dir.join(format!("{}_{}.json", safe_plugin_id, timestamp));
 
-        let backup_content = serde_json::to_string_pretty(&entry)
-            .map_err(|e| TingError::ConfigError(format!("Failed to serialize backup: {}", e)))?;
-        std::fs::write(&backup_path, backup_content)
-            .map_err(|e| TingError::ConfigError(format!("Failed to write backup file: {}", e)))?;
+        let backup_content = serde_json::to_string_pretty(&entry).map_err(|e| {
+            let message = format!("Failed to serialize backup: {}", e);
+            TingError::configuration(
+                ConfigurationErrorKind::Persistence,
+                "backup_config::configuration",
+                message,
+            )
+            .with_source(anyhow::anyhow!(e))
+        })?;
+        std::fs::write(&backup_path, backup_content).map_err(|e| {
+            let message = format!("Failed to write backup file: {}", e);
+            TingError::configuration(
+                ConfigurationErrorKind::Persistence,
+                "backup_config::configuration",
+                message,
+            )
+            .with_source(anyhow::anyhow!(e))
+        })?;
 
         tracing::info!(plugin_id = %plugin_id, backup_path = ?backup_path, "Configuration backup created");
         Ok(backup_path)
@@ -503,31 +624,54 @@ impl PluginConfigManager {
         tracing::info!(backup_path = ?backup_path, "Restoring configuration from backup");
 
         if !backup_path.exists() {
-            return Err(TingError::ConfigError(format!(
-                "Backup file not found: {}",
-                backup_path.display()
-            )));
+            return Err(TingError::configuration(
+                ConfigurationErrorKind::Missing,
+                "restore_config::configuration",
+                format!("Backup file not found: {}", backup_path.display()),
+            ));
         }
 
-        let backup_content = std::fs::read_to_string(backup_path)
-            .map_err(|e| TingError::ConfigError(format!("Failed to read backup file: {}", e)))?;
+        let backup_content = std::fs::read_to_string(backup_path).map_err(|e| {
+            let message = format!("Failed to read backup file: {}", e);
+            TingError::configuration(
+                ConfigurationErrorKind::Persistence,
+                "restore_config::configuration",
+                message,
+            )
+            .with_source(anyhow::anyhow!(e))
+        })?;
 
-        let entry: PluginConfigEntry = serde_json::from_str(&backup_content)
-            .map_err(|e| TingError::ConfigError(format!("Failed to parse backup file: {}", e)))?;
+        let entry: PluginConfigEntry = serde_json::from_str(&backup_content).map_err(|e| {
+            let message = format!("Failed to parse backup file: {}", e);
+            TingError::configuration(
+                ConfigurationErrorKind::Persistence,
+                "restore_config::configuration",
+                message,
+            )
+            .with_source(anyhow::anyhow!(e))
+        })?;
 
         let plugin_id = entry.plugin_id.clone();
         let plugin_name = entry.plugin_name.clone();
 
         let old_config = {
             let configs = self.configs.read().map_err(|e| {
-                TingError::ConfigError(format!("Failed to acquire config lock: {}", e))
+                TingError::configuration(
+                    ConfigurationErrorKind::Synchronization,
+                    "restore_config::configuration",
+                    format!("Failed to acquire config lock: {}", e),
+                )
             })?;
             configs.get(&plugin_id).map(|e| e.config.clone())
         };
 
         {
             let mut configs = self.configs.write().map_err(|e| {
-                TingError::ConfigError(format!("Failed to acquire config lock: {}", e))
+                TingError::configuration(
+                    ConfigurationErrorKind::Synchronization,
+                    "restore_config::configuration",
+                    format!("Failed to acquire config lock: {}", e),
+                )
             })?;
             configs.insert(plugin_id.clone(), entry.clone());
         }
@@ -565,19 +709,35 @@ impl PluginConfigManager {
         }
 
         let entries = std::fs::read_dir(&self.config_dir).map_err(|e| {
-            TingError::ConfigError(format!("Failed to read config directory: {}", e))
+            let message = format!("Failed to read config directory: {}", e);
+            TingError::configuration(
+                ConfigurationErrorKind::Persistence,
+                "load_all_configs::configuration",
+                message,
+            )
+            .with_source(anyhow::anyhow!(e))
         })?;
 
         for entry in entries {
             let entry = entry.map_err(|e| {
-                TingError::ConfigError(format!("Failed to read directory entry: {}", e))
+                let message = format!("Failed to read directory entry: {}", e);
+                TingError::configuration(
+                    ConfigurationErrorKind::Persistence,
+                    "load_all_configs::configuration",
+                    message,
+                )
+                .with_source(anyhow::anyhow!(e))
             })?;
             let path = entry.path();
             if path.extension().and_then(|s| s.to_str()) == Some("json") {
                 match self.load_config(&path) {
                     Ok(config_entry) => {
                         let mut configs = self.configs.write().map_err(|e| {
-                            TingError::ConfigError(format!("Failed to acquire config lock: {}", e))
+                            TingError::configuration(
+                                ConfigurationErrorKind::Synchronization,
+                                "load_all_configs::configuration",
+                                format!("Failed to acquire config lock: {}", e),
+                            )
                         })?;
                         configs.insert(config_entry.plugin_id.clone(), config_entry);
                     }
@@ -591,18 +751,46 @@ impl PluginConfigManager {
     }
 
     fn load_config(&self, path: &Path) -> Result<PluginConfigEntry> {
-        let content = std::fs::read_to_string(path)
-            .map_err(|e| TingError::ConfigError(format!("Failed to read config file: {}", e)))?;
-        serde_json::from_str(&content)
-            .map_err(|e| TingError::ConfigError(format!("Failed to parse config file: {}", e)))
+        let content = std::fs::read_to_string(path).map_err(|e| {
+            let message = format!("Failed to read config file: {}", e);
+            TingError::configuration(
+                ConfigurationErrorKind::Persistence,
+                "load_config::configuration",
+                message,
+            )
+            .with_source(anyhow::anyhow!(e))
+        })?;
+        serde_json::from_str(&content).map_err(|e| {
+            let message = format!("Failed to parse config file: {}", e);
+            TingError::configuration(
+                ConfigurationErrorKind::Persistence,
+                "load_config::configuration",
+                message,
+            )
+            .with_source(anyhow::anyhow!(e))
+        })
     }
 
     fn save_config(&self, entry: &PluginConfigEntry) -> Result<()> {
         let config_file = self.get_config_file_path(&entry.plugin_id);
-        let content = serde_json::to_string_pretty(entry)
-            .map_err(|e| TingError::ConfigError(format!("Failed to serialize config: {}", e)))?;
-        std::fs::write(&config_file, content)
-            .map_err(|e| TingError::ConfigError(format!("Failed to write config file: {}", e)))?;
+        let content = serde_json::to_string_pretty(entry).map_err(|e| {
+            let message = format!("Failed to serialize config: {}", e);
+            TingError::configuration(
+                ConfigurationErrorKind::Encoding,
+                "save_config::configuration",
+                message,
+            )
+            .with_source(anyhow::anyhow!(e))
+        })?;
+        std::fs::write(&config_file, content).map_err(|e| {
+            let message = format!("Failed to write config file: {}", e);
+            TingError::configuration(
+                ConfigurationErrorKind::Persistence,
+                "save_config::configuration",
+                message,
+            )
+            .with_source(anyhow::anyhow!(e))
+        })?;
         Ok(())
     }
 

@@ -2,6 +2,9 @@
 
 use super::PluginManager;
 use super::compatibility::plugin_version_is_same_or_newer;
+use crate::core::app::error::{
+    ConfigurationErrorKind, DependencyErrorKind, LookupErrorKind, PluginErrorKind,
+};
 use crate::core::app::error::{Result, TingError};
 use crate::plugin::installer::PluginInstaller;
 use crate::plugin::installer::tr_package::{self, TrPackageSignatureIdentity};
@@ -30,16 +33,20 @@ impl PluginManager {
 
         let dependents = match self.find_plugin_dependents(plugin_id).await {
             Ok(dependents) => dependents,
-            Err(TingError::PluginNotFound(_)) => Vec::new(),
+            Err(error) if matches!(error.root_error(), TingError::PluginNotFound(_)) => Vec::new(),
             Err(e) => return Err(e),
         };
 
         if !dependents.is_empty() {
-            return Err(TingError::DependencyError(format!(
-                "Cannot uninstall plugin {} because these plugins depend on it: {}",
-                plugin_id,
-                dependents.join(", ")
-            )));
+            return Err(TingError::dependency(
+                DependencyErrorKind::Missing,
+                "uninstall_plugin_internal::dependency",
+                format!(
+                    "Cannot uninstall plugin {} because these plugins depend on it: {}",
+                    plugin_id,
+                    dependents.join(", ")
+                ),
+            ));
         }
 
         let cached_plugin_path = {
@@ -48,7 +55,7 @@ impl PluginManager {
         };
 
         if let Err(e) = self.unload_plugin(plugin_id).await
-            && !matches!(e, TingError::PluginNotFound(_))
+            && !matches!(e.root_error(), TingError::PluginNotFound(_))
         {
             tracing::warn!(
                 plugin_id = %plugin_id,
@@ -296,7 +303,11 @@ impl PluginManager {
             && let Some(ref schema) = metadata.config_schema
         {
             let manager = self.config_manager.read().map_err(|error| {
-                TingError::ConfigError(format!("Failed to acquire config manager: {error}"))
+                TingError::configuration(
+                    ConfigurationErrorKind::Synchronization,
+                    "install_plugin_package",
+                    format!("Failed to acquire config manager: {error}"),
+                )
             })?;
             if let Some(manager) = manager.as_ref() {
                 manager.migrate_config(
@@ -436,7 +447,11 @@ impl PluginManager {
 
         let plugins = self.get_store_plugins().await?;
         let plugin = plugins.iter().find(|p| p.id == plugin_id).ok_or_else(|| {
-            TingError::PluginNotFound(format!("Plugin {} not found in store", plugin_id))
+            TingError::plugin_not_found(
+                LookupErrorKind::Plugin,
+                "download_plugin_from_store::plugin_not_found",
+                format!("Plugin {} not found in store", plugin_id),
+            )
         })?;
 
         let download_url = crate::plugin::store::get_download_url(plugin)?;
@@ -499,12 +514,16 @@ impl PluginManager {
 
             let installed_identity = tr_package::read_installed_signature_identity(&path)?;
             if !installed_identity.is_compatible_with(&candidate_identity) {
-                return Err(TingError::PluginLoadError(format!(
-                    "Plugin {} is already installed with signature identity '{}', but the candidate package uses '{}'. Uninstall the existing plugin before installing a package from a different publisher.",
-                    metadata.id,
-                    installed_identity.label(),
-                    candidate_identity.label()
-                )));
+                return Err(TingError::plugin_load(
+                    PluginErrorKind::InvalidManifest,
+                    "ensure_install_signature_identity_allowed::plugin_load",
+                    format!(
+                        "Plugin {} is already installed with signature identity '{}', but the candidate package uses '{}'. Uninstall the existing plugin before installing a package from a different publisher.",
+                        metadata.id,
+                        installed_identity.label(),
+                        candidate_identity.label()
+                    ),
+                ));
             }
         }
 
@@ -555,8 +574,12 @@ pub(super) fn plugin_install_signature_identity(
         return tr_package::read_package_signature_identity(package_path);
     }
 
-    Err(TingError::PluginLoadError(format!(
-        "{} is not a valid Ting Reader .tr package",
-        package_path.display()
-    )))
+    Err(TingError::plugin_load(
+        PluginErrorKind::Loading,
+        "plugin_install_signature_identity::plugin_load",
+        format!(
+            "{} is not a valid Ting Reader .tr package",
+            package_path.display()
+        ),
+    ))
 }

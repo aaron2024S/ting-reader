@@ -1,3 +1,4 @@
+import { apiErrorMessage } from '../../core/api/errors';
 import React, { useState, useEffect, useCallback } from 'react';
 import apiClient from '../../core/api/client';
 import { X, Save, Loader2 } from 'lucide-react';
@@ -144,7 +145,7 @@ const PluginConfigDialog: React.FC<Props> = ({ pluginId, pluginName, configSchem
       onSaved();
       onClose();
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : t('pluginConfig.saveFailed');
+      const msg = apiErrorMessage(err, t('pluginConfig.saveFailed'));
       setError(msg);
     } finally {
       setSaving(false);

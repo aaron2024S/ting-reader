@@ -1,6 +1,7 @@
 //! Cover image proxy handler
 
 use crate::api::state::AppState;
+use crate::core::app::error::{InputErrorKind, LookupErrorKind, SecurityErrorKind};
 use crate::core::app::error::{Result, TingError};
 use crate::db::repository::Repository;
 use axum::{
@@ -26,7 +27,9 @@ pub async fn proxy_cover(
     use axum::http::header;
 
     if params.path == "embedded://first-chapter" {
-        return Err(TingError::NotFound(
+        return Err(TingError::not_found(
+            LookupErrorKind::Resource,
+            "proxy_cover::not_found",
             "Embedded cover extraction not yet implemented".to_string(),
         ));
     }
@@ -85,16 +88,18 @@ pub async fn proxy_cover(
                     .into_response());
             }
             Ok(resp) => {
-                return Err(TingError::NotFound(format!(
-                    "Failed to fetch external cover: HTTP {}",
-                    resp.status()
-                )));
+                return Err(TingError::not_found(
+                    LookupErrorKind::Resource,
+                    "proxy_cover::not_found",
+                    format!("Failed to fetch external cover: HTTP {}", resp.status()),
+                ));
             }
             Err(e) => {
-                return Err(TingError::NotFound(format!(
-                    "Failed to fetch external cover: {}",
-                    e
-                )));
+                return Err(TingError::not_found(
+                    LookupErrorKind::Resource,
+                    "proxy_cover::not_found",
+                    format!("Failed to fetch external cover: {}", e),
+                ));
             }
         }
     }
@@ -165,16 +170,19 @@ async fn resolve_cover_path(state: &AppState, params: &ProxyCoverQuery) -> Resul
         }
     }
 
-    Err(TingError::NotFound(format!(
-        "Cover image not found: {}",
-        params.path
-    )))
+    Err(TingError::not_found(
+        LookupErrorKind::File,
+        "resolve_cover_path::not_found",
+        format!("Cover image not found: {}", params.path),
+    ))
 }
 
 fn normalize_cover_relative_path(value: &str) -> Result<PathBuf> {
     let raw = Path::new(value.trim());
     if raw.is_absolute() {
-        return Err(TingError::SecurityViolation(
+        return Err(TingError::security(
+            SecurityErrorKind::PathEscape,
+            "normalize_cover_relative_path::security",
             "Cover image path must be relative".to_string(),
         ));
     }
@@ -185,7 +193,9 @@ fn normalize_cover_relative_path(value: &str) -> Result<PathBuf> {
             Component::CurDir => {}
             Component::Normal(part) => normalized.push(part),
             Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
-                return Err(TingError::SecurityViolation(
+                return Err(TingError::security(
+                    SecurityErrorKind::PathEscape,
+                    "normalize_cover_relative_path::security",
                     "Cover image path cannot escape its base directory".to_string(),
                 ));
             }
@@ -193,7 +203,9 @@ fn normalize_cover_relative_path(value: &str) -> Result<PathBuf> {
     }
 
     if normalized.as_os_str().is_empty() {
-        return Err(TingError::InvalidRequest(
+        return Err(TingError::invalid_request(
+            InputErrorKind::MissingField,
+            "normalize_cover_relative_path::invalid_request",
             "Cover image path is required".to_string(),
         ));
     }

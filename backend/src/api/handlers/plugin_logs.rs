@@ -1,6 +1,7 @@
 use crate::api::require_admin;
 use crate::api::state::AppState;
 use crate::auth::middleware::AuthUser;
+use crate::core::app::error::ExternalErrorKind;
 use crate::core::app::error::{Result, TingError};
 use crate::core::app::logging::{
     LogEntry, LogQueryFilter, normalized_log_filter as normalized_filter,
@@ -148,7 +149,15 @@ async fn filtered_plugin_logs(
         logs
     })
     .await
-    .map_err(|error| TingError::ExternalError(error.to_string()))
+    .map_err(|error| {
+        let message = error.to_string();
+        TingError::external_tool(
+            ExternalErrorKind::Response,
+            "filtered_plugin_logs::external_tool",
+            message,
+        )
+        .with_source(anyhow::anyhow!(error))
+    })
 }
 
 pub async fn get_plugin_logs(

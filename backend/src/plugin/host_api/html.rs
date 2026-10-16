@@ -1,6 +1,7 @@
 //! Host HTML document parsing and selection.
 
 use super::{PluginHostGateway, required_string_param, usize_param};
+use crate::core::app::error::{InputErrorKind, LimitErrorKind, LookupErrorKind, PluginErrorKind};
 use crate::core::app::error::{Result, TingError};
 use scraper::{ElementRef, Html, Selector};
 use serde_json::Value;
@@ -14,23 +15,33 @@ const MAX_SELECTOR_BYTES: usize = 512;
 
 impl PluginHostGateway {
     pub(super) async fn html_parse(&self, plugin_id: &str, params: &Value) -> Result<Value> {
-        let html = params
-            .get("html")
-            .and_then(Value::as_str)
-            .ok_or_else(|| TingError::InvalidRequest("html.parse requires html".into()))?;
+        let html = params.get("html").and_then(Value::as_str).ok_or_else(|| {
+            TingError::invalid_request(
+                InputErrorKind::MissingField,
+                "html_parse::invalid_request",
+                "html.parse requires html".into(),
+            )
+        })?;
         if html.len() > MAX_HTML_BYTES {
-            return Err(TingError::ResourceLimitExceeded(
+            return Err(TingError::resource_limit(
+                LimitErrorKind::Payload,
+                "html_parse::resource_limit",
                 "HTML document exceeds 2 MiB".into(),
             ));
         }
         let document_id = Uuid::new_v4().to_string();
         let key = handle_key(plugin_id, &document_id);
-        let mut documents = self
-            .html_documents
-            .write()
-            .map_err(|_| TingError::PluginExecutionError("HTML handle store unavailable".into()))?;
+        let mut documents = self.html_documents.write().map_err(|_| {
+            TingError::plugin_execution(
+                PluginErrorKind::Unavailable,
+                "html_parse::plugin_execution",
+                "HTML handle store unavailable".into(),
+            )
+        })?;
         if documents.len() >= MAX_HTML_HANDLES {
-            return Err(TingError::ResourceLimitExceeded(
+            return Err(TingError::resource_limit(
+                LimitErrorKind::Handles,
+                "html_parse::resource_limit",
                 "Too many HTML handles".into(),
             ));
         }
@@ -53,19 +64,29 @@ impl PluginHostGateway {
         let selector_text = bounded_selector(params)?;
         let html = self.load_document(plugin_id, &document_id)?;
         let document = Html::parse_document(&html);
-        let selector = Selector::parse(&selector_text)
-            .map_err(|_| TingError::InvalidRequest("Invalid HTML selector".into()))?;
+        let selector = Selector::parse(&selector_text).map_err(|_| {
+            TingError::invalid_request(
+                InputErrorKind::InvalidValue,
+                "html_select::invalid_request",
+                "Invalid HTML selector".into(),
+            )
+        })?;
         let limit = usize_param(params, "limit")
             .unwrap_or(100)
             .clamp(1, MAX_HTML_MATCHES);
         let mut matches = Vec::new();
-        let mut documents = self
-            .html_documents
-            .write()
-            .map_err(|_| TingError::PluginExecutionError("HTML handle store unavailable".into()))?;
+        let mut documents = self.html_documents.write().map_err(|_| {
+            TingError::plugin_execution(
+                PluginErrorKind::Unavailable,
+                "html_select::plugin_execution",
+                "HTML handle store unavailable".into(),
+            )
+        })?;
         for element in document.select(&selector).take(limit) {
             if documents.len() >= MAX_HTML_HANDLES {
-                return Err(TingError::ResourceLimitExceeded(
+                return Err(TingError::resource_limit(
+                    LimitErrorKind::Handles,
+                    "html_select::resource_limit",
                     "Too many HTML handles".into(),
                 ));
             }
@@ -116,7 +137,11 @@ impl PluginHostGateway {
             let document = Html::parse_document(html);
             normalized_text(document.root_element().text().collect::<Vec<_>>().join(" "))
         } else {
-            return Err(TingError::InvalidRequest("Unknown HTML handle".into()));
+            return Err(TingError::invalid_request(
+                InputErrorKind::UnsupportedValue,
+                "html_text::invalid_request",
+                "Unknown HTML handle".into(),
+            ));
         };
         Ok(serde_json::json!({ "text": text }))
     }
@@ -126,7 +151,9 @@ impl PluginHostGateway {
         let name = required_string_param(params, "name")?;
         let stored = self.load_handle(plugin_id, &selection_id)?;
         if stored.get("kind").and_then(Value::as_str) != Some("selection") {
-            return Err(TingError::InvalidRequest(
+            return Err(TingError::invalid_request(
+                InputErrorKind::MissingField,
+                "html_attr::invalid_request",
                 "html.attr requires a selection_id".into(),
             ));
         }
@@ -144,14 +171,27 @@ impl PluginHostGateway {
         let selector_text = bounded_selector(params)?;
         let html = self.load_document(plugin_id, &document_id)?;
         let document = Html::parse_document(&html);
-        let selector = Selector::parse(&selector_text)
-            .map_err(|_| TingError::InvalidRequest("Invalid HTML selector".into()))?;
+        let selector = Selector::parse(&selector_text).map_err(|_| {
+            TingError::invalid_request(
+                InputErrorKind::InvalidValue,
+                "html_extract::invalid_request",
+                "Invalid HTML selector".into(),
+            )
+        })?;
         let fields = params
             .get("fields")
             .and_then(Value::as_array)
-            .ok_or_else(|| TingError::InvalidRequest("html.extract requires fields".into()))?;
+            .ok_or_else(|| {
+                TingError::invalid_request(
+                    InputErrorKind::MissingField,
+                    "html_extract::invalid_request",
+                    "html.extract requires fields".into(),
+                )
+            })?;
         if fields.len() > 32 {
-            return Err(TingError::ResourceLimitExceeded(
+            return Err(TingError::resource_limit(
+                LimitErrorKind::Payload,
+                "html_extract::resource_limit",
                 "HTML extraction supports at most 32 fields".into(),
             ));
         }
@@ -167,7 +207,11 @@ impl PluginHostGateway {
                     .and_then(Value::as_str)
                     .filter(|name| !name.trim().is_empty())
                     .ok_or_else(|| {
-                        TingError::InvalidRequest("HTML extraction field name is required".into())
+                        TingError::invalid_request(
+                            InputErrorKind::MissingField,
+                            "html_extract::invalid_request",
+                            "HTML extraction field name is required".into(),
+                        )
                     })?;
                 let value = if let Some(attribute) = field.get("attr").and_then(Value::as_str) {
                     element
@@ -177,7 +221,11 @@ impl PluginHostGateway {
                         .unwrap_or(Value::Null)
                 } else if let Some(field_selector) = field.get("selector").and_then(Value::as_str) {
                     let field_selector = Selector::parse(field_selector).map_err(|_| {
-                        TingError::InvalidRequest("Invalid HTML field selector".into())
+                        TingError::invalid_request(
+                            InputErrorKind::InvalidValue,
+                            "html_extract::invalid_request",
+                            "Invalid HTML field selector".into(),
+                        )
                     })?;
                     element
                         .select(&field_selector)
@@ -207,10 +255,13 @@ impl PluginHostGateway {
     pub(super) async fn html_close(&self, plugin_id: &str, params: &Value) -> Result<Value> {
         let document_id = required_string_param(params, "document_id")?;
         let prefix = handle_key(plugin_id, &document_id);
-        let mut documents = self
-            .html_documents
-            .write()
-            .map_err(|_| TingError::PluginExecutionError("HTML handle store unavailable".into()))?;
+        let mut documents = self.html_documents.write().map_err(|_| {
+            TingError::plugin_execution(
+                PluginErrorKind::Unavailable,
+                "html_close::plugin_execution",
+                "HTML handle store unavailable".into(),
+            )
+        })?;
         let before = documents.len();
         documents.retain(|key, value| {
             if key == &prefix {
@@ -227,7 +278,9 @@ impl PluginHostGateway {
     fn load_document(&self, plugin_id: &str, document_id: &str) -> Result<String> {
         let value = self.load_handle(plugin_id, document_id)?;
         if value.get("kind").and_then(Value::as_str) != Some("document") {
-            return Err(TingError::InvalidRequest(
+            return Err(TingError::invalid_request(
+                InputErrorKind::MissingField,
+                "load_document::invalid_request",
                 "HTML operation requires a document handle".into(),
             ));
         }
@@ -235,27 +288,47 @@ impl PluginHostGateway {
             .get("html")
             .and_then(Value::as_str)
             .map(ToOwned::to_owned)
-            .ok_or_else(|| TingError::InvalidRequest("HTML document is unavailable".into()))
+            .ok_or_else(|| {
+                TingError::invalid_request(
+                    InputErrorKind::InvalidValue,
+                    "load_document::invalid_request",
+                    "HTML document is unavailable".into(),
+                )
+            })
     }
 
     fn load_handle(&self, plugin_id: &str, handle: &str) -> Result<Value> {
         let key = handle_key(plugin_id, handle);
-        let documents = self
-            .html_documents
-            .read()
-            .map_err(|_| TingError::PluginExecutionError("HTML handle store unavailable".into()))?;
-        let raw = documents
-            .get(&key)
-            .ok_or_else(|| TingError::NotFound("HTML handle does not exist".into()))?;
-        serde_json::from_str(raw)
-            .map_err(|_| TingError::PluginExecutionError("HTML handle is corrupted".into()))
+        let documents = self.html_documents.read().map_err(|_| {
+            TingError::plugin_execution(
+                PluginErrorKind::Unavailable,
+                "load_handle::plugin_execution",
+                "HTML handle store unavailable".into(),
+            )
+        })?;
+        let raw = documents.get(&key).ok_or_else(|| {
+            TingError::not_found(
+                LookupErrorKind::Resource,
+                "load_handle::not_found",
+                "HTML handle does not exist".into(),
+            )
+        })?;
+        serde_json::from_str(raw).map_err(|_| {
+            TingError::plugin_execution(
+                PluginErrorKind::Runtime,
+                "load_handle::plugin_execution",
+                "HTML handle is corrupted".into(),
+            )
+        })
     }
 }
 
 fn bounded_selector(params: &Value) -> Result<String> {
     let selector = required_string_param(params, "selector")?;
     if selector.len() > MAX_SELECTOR_BYTES {
-        return Err(TingError::ResourceLimitExceeded(
+        return Err(TingError::resource_limit(
+            LimitErrorKind::Payload,
+            "bounded_selector::resource_limit",
             "HTML selector exceeds 512 bytes".into(),
         ));
     }

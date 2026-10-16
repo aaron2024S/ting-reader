@@ -2,6 +2,7 @@
 //!
 //! The event bus enables plugins and system components to communicate through events.
 
+use crate::core::app::error::{CodecErrorKind, LookupErrorKind};
 // It supports:
 // - Asynchronous event publishing and handling
 // - Multiple subscribers per event type
@@ -159,10 +160,11 @@ impl EventBus {
             }
         }
 
-        Err(TingError::NotFound(format!(
-            "Subscription not found: {}",
-            subscription_id
-        )))
+        Err(TingError::not_found(
+            LookupErrorKind::Resource,
+            "unsubscribe::not_found",
+            format!("Subscription not found: {}", subscription_id),
+        ))
     }
 
     /// Publish an event to all subscribers
@@ -324,8 +326,15 @@ impl EventBus {
             log.clone()
         };
 
-        serde_json::to_string_pretty(&events)
-            .map_err(|e| TingError::SerializationError(format!("Failed to export events: {}", e)))
+        serde_json::to_string_pretty(&events).map_err(|e| {
+            let message = format!("Failed to export events: {}", e);
+            TingError::serialization(
+                CodecErrorKind::InvalidData,
+                "export_events::serialization",
+                message,
+            )
+            .with_source(anyhow::anyhow!(e))
+        })
     }
 
     /// Query events with advanced filtering

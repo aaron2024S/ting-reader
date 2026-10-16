@@ -4,6 +4,7 @@
 //! and discover audiobook files, creating book and chapter records.
 
 use crate::core::StorageService;
+use crate::core::app::error::{InputErrorKind, LookupErrorKind, TaskErrorKind};
 use crate::core::app::error::{Result, TingError};
 use crate::core::audio::AudioStreamer;
 use crate::core::books::ScraperService;
@@ -246,7 +247,11 @@ impl LibraryScanner {
             && let Ok(Some(task)) = repo.find_by_id(tid).await
             && task.status == "cancelled"
         {
-            return Err(TingError::TaskError("Task cancelled by user".to_string()));
+            return Err(TingError::task(
+                TaskErrorKind::InvalidState,
+                "check_cancellation::task",
+                "Task cancelled by user".to_string(),
+            ));
         }
         Ok(())
     }
@@ -327,7 +332,13 @@ impl LibraryScanner {
             .library_repo
             .find_by_id(library_id)
             .await?
-            .ok_or_else(|| TingError::NotFound(format!("Library not found: {}", library_id)))?;
+            .ok_or_else(|| {
+                TingError::not_found(
+                    LookupErrorKind::Library,
+                    "scan_library_scoped::not_found",
+                    format!("Library not found: {}", library_id),
+                )
+            })?;
 
         let scraper_config: crate::db::models::ScraperConfig = library
             .scraper_config
@@ -402,17 +413,19 @@ impl LibraryScanner {
             // Local library scan
             let path = Path::new(library_path);
             if !path.exists() {
-                return Err(TingError::NotFound(format!(
-                    "Library path does not exist: {}",
-                    library_path
-                )));
+                return Err(TingError::not_found(
+                    LookupErrorKind::Library,
+                    "scan_library_scoped::not_found",
+                    format!("Library path does not exist: {}", library_path),
+                ));
             }
 
             if !path.is_dir() {
-                return Err(TingError::ValidationError(format!(
-                    "Library path is not a directory: {}",
-                    library_path
-                )));
+                return Err(TingError::validation(
+                    InputErrorKind::InvalidPath,
+                    "scan_library_scoped::validation",
+                    format!("Library path is not a directory: {}", library_path),
+                ));
             }
 
             if effective_scan_paths

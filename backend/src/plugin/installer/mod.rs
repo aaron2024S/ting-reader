@@ -5,6 +5,7 @@
 //!
 //! **Validates: Requirements 26.2, 26.3, 26.4, 26.8**
 
+use crate::core::app::error::{LookupErrorKind, PluginErrorKind};
 pub(crate) mod confirmation;
 mod rollback;
 
@@ -120,10 +121,11 @@ impl PluginInstaller {
 
         // Check if package exists
         if !package_path.exists() {
-            return Err(TingError::PluginLoadError(format!(
-                "Plugin package not found: {}",
-                package_path.display()
-            )));
+            return Err(TingError::plugin_load(
+                PluginErrorKind::Unavailable,
+                "get_package_metadata::plugin_load",
+                format!("Plugin package not found: {}", package_path.display()),
+            ));
         }
 
         if package_path.is_dir() {
@@ -133,10 +135,14 @@ impl PluginInstaller {
             let metadata_content = tr_package::read_manifest_file(package_path, "plugin.yml")?;
             parse_plugin_metadata_content(&metadata_content, "plugin.yml")
         } else {
-            Err(TingError::PluginLoadError(format!(
-                "{} is not a valid Ting Reader .tr package",
-                package_path.display()
-            )))
+            Err(TingError::plugin_load(
+                PluginErrorKind::Loading,
+                "get_package_metadata::plugin_load",
+                format!(
+                    "{} is not a valid Ting Reader .tr package",
+                    package_path.display()
+                ),
+            ))
         }
     }
 
@@ -219,10 +225,14 @@ impl PluginInstaller {
             tr_package::extract_tr_package(source_path, target_path)?;
             tr_package::write_install_provenance(source_path, target_path)?;
         } else {
-            return Err(TingError::PluginLoadError(format!(
-                "{} is not a valid Ting Reader .tr package",
-                source_path.display()
-            )));
+            return Err(TingError::plugin_load(
+                PluginErrorKind::Loading,
+                "extract_and_install::plugin_load",
+                format!(
+                    "{} is not a valid Ting Reader .tr package",
+                    source_path.display()
+                ),
+            ));
         }
 
         info!("Plugin files extracted to: {}", target_path.display());
@@ -238,7 +248,11 @@ impl PluginInstaller {
         let plugin_path = self.resolve_plugin_path(plugin_id)?;
 
         if !plugin_path.exists() {
-            return Err(TingError::PluginNotFound(plugin_id.clone()));
+            return Err(TingError::plugin_not_found(
+                LookupErrorKind::Plugin,
+                "uninstall_plugin::plugin_not_found",
+                plugin_id.clone(),
+            ));
         }
 
         // Remove plugin directory
@@ -253,33 +267,49 @@ impl PluginInstaller {
 
         let candidate = self.plugin_dir.join(plugin_id);
         let parent = candidate.parent().ok_or_else(|| {
-            TingError::PluginLoadError(format!("Invalid plugin install path for {}", plugin_id))
+            TingError::plugin_load(
+                PluginErrorKind::InvalidOutput,
+                "resolve_plugin_path::plugin_load",
+                format!("Invalid plugin install path for {}", plugin_id),
+            )
         })?;
         let canonical_parent = fs::canonicalize(parent)?;
         if canonical_parent != self.plugin_dir {
-            return Err(TingError::PluginLoadError(format!(
-                "Plugin path escapes install directory: {}",
-                candidate.display()
-            )));
+            return Err(TingError::plugin_load(
+                PluginErrorKind::Runtime,
+                "resolve_plugin_path::plugin_load",
+                format!(
+                    "Plugin path escapes install directory: {}",
+                    candidate.display()
+                ),
+            ));
         }
 
         match fs::symlink_metadata(&candidate) {
             Ok(metadata) => {
                 if metadata.file_type().is_symlink() || !metadata.is_dir() {
-                    return Err(TingError::PluginLoadError(format!(
-                        "Plugin path must be a real directory: {}",
-                        candidate.display()
-                    )));
+                    return Err(TingError::plugin_load(
+                        PluginErrorKind::Runtime,
+                        "resolve_plugin_path::plugin_load",
+                        format!(
+                            "Plugin path must be a real directory: {}",
+                            candidate.display()
+                        ),
+                    ));
                 }
 
                 let canonical_candidate = fs::canonicalize(&candidate)?;
                 if canonical_candidate.parent() != Some(self.plugin_dir.as_path())
                     || canonical_candidate == self.plugin_dir
                 {
-                    return Err(TingError::PluginLoadError(format!(
-                        "Plugin path escapes install directory: {}",
-                        candidate.display()
-                    )));
+                    return Err(TingError::plugin_load(
+                        PluginErrorKind::Runtime,
+                        "resolve_plugin_path::plugin_load",
+                        format!(
+                            "Plugin path escapes install directory: {}",
+                            candidate.display()
+                        ),
+                    ));
                 }
                 Ok(canonical_candidate)
             }

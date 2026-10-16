@@ -1,4 +1,5 @@
 //! Plugin schema validation at manifest loading and invocation boundaries.
+use crate::core::app::error::PluginErrorKind;
 use crate::core::app::error::{Result, TingError};
 use crate::plugin::types::PluginCapability;
 use serde_json::Value;
@@ -23,19 +24,21 @@ pub(crate) fn validate_capability_schemas(capability: &PluginCapability) -> Resu
     };
     for schema in schemas {
         ting_plugin_contract::capability::validate_schema(schema).map_err(|_| {
-            TingError::PluginLoadError(format!(
-                "Invalid bounded schema in capability {}",
-                capability.id()
-            ))
+            TingError::plugin_load(
+                PluginErrorKind::AbiMismatch,
+                "validate_capability_schemas::plugin_load",
+                format!("Invalid bounded schema in capability {}", capability.id()),
+            )
         })?;
         jsonschema::JSONSchema::options()
             .with_draft(jsonschema::Draft::Draft202012)
             .compile(schema)
             .map_err(|_| {
-                TingError::PluginLoadError(format!(
-                    "Invalid JSON Schema in capability {}",
-                    capability.id()
-                ))
+                TingError::plugin_load(
+                    PluginErrorKind::AbiMismatch,
+                    "validate_capability_schemas::plugin_load",
+                    format!("Invalid JSON Schema in capability {}", capability.id()),
+                )
             })?;
     }
     Ok(())
@@ -46,26 +49,44 @@ pub(crate) fn validate_capability_schemas(capability: &PluginCapability) -> Resu
 /// used, even though the existing backend validator also serves other code.
 pub(crate) fn validate_payload(schema: &Value, payload: &Value, label: &str) -> Result<()> {
     ting_plugin_contract::capability::validate_schema(schema).map_err(|error| {
-        TingError::PluginExecutionError(format!("Invalid {label} schema: {error}"))
+        let message = format!("Invalid {label} schema: {error}");
+        TingError::plugin_execution(
+            PluginErrorKind::InvalidOutput,
+            "validate_payload::plugin_execution",
+            message,
+        )
+        .with_source(anyhow::anyhow!(error))
     })?;
     if payload.to_string().len() > 1024 * 1024 {
-        return Err(TingError::PluginExecutionError(format!(
-            "{label} exceeds 1 MiB"
-        )));
+        return Err(TingError::plugin_execution(
+            PluginErrorKind::Runtime,
+            "validate_payload::plugin_execution",
+            format!("{label} exceeds 1 MiB"),
+        ));
     }
     let validator = jsonschema::JSONSchema::options()
         .with_draft(jsonschema::Draft::Draft202012)
         .compile(schema)
-        .map_err(|_| TingError::PluginExecutionError(format!("Invalid {label} schema")))?;
+        .map_err(|_| {
+            TingError::plugin_execution(
+                PluginErrorKind::InvalidOutput,
+                "validate_payload::plugin_execution",
+                format!("Invalid {label} schema"),
+            )
+        })?;
     if let Err(mut errors) = validator.validate(payload) {
         let path = errors
             .next()
             .map(|error| error.instance_path.to_string())
             .unwrap_or_default();
-        return Err(TingError::PluginExecutionError(format!(
-            "Invalid {label} at {}: value does not match the declared schema",
-            path.chars().take(256).collect::<String>()
-        )));
+        return Err(TingError::plugin_execution(
+            PluginErrorKind::InvalidOutput,
+            "validate_payload::plugin_execution",
+            format!(
+                "Invalid {label} at {}: value does not match the declared schema",
+                path.chars().take(256).collect::<String>()
+            ),
+        ));
     }
     Ok(())
 }

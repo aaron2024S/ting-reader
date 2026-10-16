@@ -1,5 +1,6 @@
 //! Host-owned persistent plugin cache records.
 
+use crate::core::app::error::{CodecErrorKind, InputErrorKind, LimitErrorKind};
 use crate::core::app::error::{Result, TingError};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -44,8 +45,11 @@ impl PluginCache {
         }
 
         let bytes = tokio::fs::read(&path).await.map_err(TingError::IoError)?;
-        let record: PluginCacheRecord = serde_json::from_slice(&bytes)
-            .map_err(|e| TingError::DeserializationError(e.to_string()))?;
+        let record: PluginCacheRecord = serde_json::from_slice(&bytes).map_err(|e| {
+            let message = e.to_string();
+            TingError::deserialization(CodecErrorKind::InvalidData, "get::deserialization", message)
+                .with_source(anyhow::anyhow!(e))
+        })?;
         Ok(Some(PluginCacheItem {
             key: record.key,
             value: record.value,
@@ -68,13 +72,20 @@ impl PluginCache {
             created_at,
             updated_at: now,
         };
-        let bytes = serde_json::to_vec(&record)
-            .map_err(|e| TingError::SerializationError(e.to_string()))?;
+        let bytes = serde_json::to_vec(&record).map_err(|e| {
+            let message = e.to_string();
+            TingError::serialization(CodecErrorKind::InvalidData, "set::serialization", message)
+                .with_source(anyhow::anyhow!(e))
+        })?;
         if bytes.len() > MAX_PLUGIN_CACHE_VALUE_BYTES {
-            return Err(TingError::ResourceLimitExceeded(format!(
-                "Plugin cache value exceeds {} bytes",
-                MAX_PLUGIN_CACHE_VALUE_BYTES
-            )));
+            return Err(TingError::resource_limit(
+                LimitErrorKind::Payload,
+                "set::resource_limit",
+                format!(
+                    "Plugin cache value exceeds {} bytes",
+                    MAX_PLUGIN_CACHE_VALUE_BYTES
+                ),
+            ));
         }
 
         if let Some(parent) = path.parent() {
@@ -125,8 +136,15 @@ impl PluginCache {
                 continue;
             }
             let bytes = tokio::fs::read(path).await.map_err(TingError::IoError)?;
-            let record: PluginCacheRecord = serde_json::from_slice(&bytes)
-                .map_err(|error| TingError::DeserializationError(error.to_string()))?;
+            let record: PluginCacheRecord = serde_json::from_slice(&bytes).map_err(|error| {
+                let message = error.to_string();
+                TingError::deserialization(
+                    CodecErrorKind::InvalidData,
+                    "list::deserialization",
+                    message,
+                )
+                .with_source(anyhow::anyhow!(error))
+            })?;
             if prefix.is_none_or(|prefix| record.key.starts_with(prefix)) {
                 keys.push(record.key);
             }
@@ -188,18 +206,26 @@ impl PluginCache {
 fn validate_plugin_cache_key(key: &str) -> Result<()> {
     let bytes = key.as_bytes();
     if bytes.is_empty() {
-        return Err(TingError::InvalidRequest(
+        return Err(TingError::invalid_request(
+            InputErrorKind::InvalidValue,
+            "validate_plugin_cache_key::invalid_request",
             "Plugin cache key cannot be empty".to_string(),
         ));
     }
     if bytes.len() > MAX_PLUGIN_CACHE_KEY_BYTES {
-        return Err(TingError::InvalidRequest(format!(
-            "Plugin cache key exceeds {} bytes",
-            MAX_PLUGIN_CACHE_KEY_BYTES
-        )));
+        return Err(TingError::invalid_request(
+            InputErrorKind::OutOfRange,
+            "validate_plugin_cache_key::invalid_request",
+            format!(
+                "Plugin cache key exceeds {} bytes",
+                MAX_PLUGIN_CACHE_KEY_BYTES
+            ),
+        ));
     }
     if key.chars().any(char::is_control) {
-        return Err(TingError::InvalidRequest(
+        return Err(TingError::invalid_request(
+            InputErrorKind::InvalidValue,
+            "validate_plugin_cache_key::invalid_request",
             "Plugin cache key cannot contain control characters".to_string(),
         ));
     }

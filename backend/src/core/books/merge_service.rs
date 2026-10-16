@@ -1,3 +1,4 @@
+use crate::core::app::error::LookupErrorKind;
 use crate::core::app::error::{Result, TingError};
 use crate::db::models::Book;
 use crate::db::repository::{BookRepository, ChapterRepository, Repository};
@@ -30,12 +31,24 @@ impl MergeService {
             .book_repo
             .find_by_id(target_book_id)
             .await?
-            .ok_or_else(|| TingError::NotFound("Target book not found".to_string()))?;
+            .ok_or_else(|| {
+                TingError::not_found(
+                    LookupErrorKind::Book,
+                    "merge_books::not_found",
+                    "Target book not found".to_string(),
+                )
+            })?;
 
         self.book_repo
             .find_by_id(source_book_id)
             .await?
-            .ok_or_else(|| TingError::NotFound("Source book not found".to_string()))?;
+            .ok_or_else(|| {
+                TingError::not_found(
+                    LookupErrorKind::Book,
+                    "merge_books::not_found",
+                    "Source book not found".to_string(),
+                )
+            })?;
 
         // 1. Get all chapters
         let mut source_chapters = self.chapter_repo.find_by_book(source_book_id).await?;
@@ -134,12 +147,24 @@ impl MergeService {
         self.book_repo
             .find_by_id(target_book_id)
             .await?
-            .ok_or_else(|| TingError::NotFound("Target book not found".to_string()))?;
+            .ok_or_else(|| {
+                TingError::not_found(
+                    LookupErrorKind::Book,
+                    "absorb_scanned_book::not_found",
+                    "Target book not found".to_string(),
+                )
+            })?;
 
         self.book_repo
             .find_by_id(source_book_id)
             .await?
-            .ok_or_else(|| TingError::NotFound("Source book not found".to_string()))?;
+            .ok_or_else(|| {
+                TingError::not_found(
+                    LookupErrorKind::Book,
+                    "absorb_scanned_book::not_found",
+                    "Source book not found".to_string(),
+                )
+            })?;
 
         let target_chapters = self.chapter_repo.find_by_book(target_book_id).await?;
         let mut seen_hashes: HashSet<String> = target_chapters
@@ -291,7 +316,13 @@ impl MergeService {
         self.book_repo
             .find_by_id(target_book_id)
             .await?
-            .ok_or_else(|| TingError::NotFound("Target book not found".to_string()))?;
+            .ok_or_else(|| {
+                TingError::not_found(
+                    LookupErrorKind::Book,
+                    "move_chapters::not_found",
+                    "Target book not found".to_string(),
+                )
+            })?;
 
         // Get max index of target book
         let target_chapters = self.chapter_repo.find_by_book(target_book_id).await?;
@@ -321,11 +352,13 @@ impl MergeService {
         manual_corrected: bool,
         match_pattern: Option<String>,
     ) -> Result<()> {
-        let mut book = self
-            .book_repo
-            .find_by_id(book_id)
-            .await?
-            .ok_or_else(|| TingError::NotFound("Book not found".to_string()))?;
+        let mut book = self.book_repo.find_by_id(book_id).await?.ok_or_else(|| {
+            TingError::not_found(
+                LookupErrorKind::Book,
+                "update_manual_correction::not_found",
+                "Book not found".to_string(),
+            )
+        })?;
 
         book.manual_corrected = if manual_corrected { 1 } else { 0 };
         book.match_pattern = match_pattern;

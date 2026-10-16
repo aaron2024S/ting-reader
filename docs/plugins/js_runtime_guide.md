@@ -43,6 +43,14 @@ export async function search(request) {
 
 可用的宿主入口包括 `Ting.host.invoke(method, params)`、`Ting.resources`、内置的 `fetch` 和 `Ting.log.debug/info/warn/error(message, fields)`。Host 方法按声明权限和当前用户授权执行；资源 ID 带插件实例、用户及调用作用域，不应缓存供另一个用户使用。网络请求仅允许授权域名，重定向仍复核权限；HTTP 响应和二进制媒体资源使用宿主限额。`Ting.config` 包含当前插件的有效配置，不要在日志中记录密钥或完整请求体。权限及参数见[HostGateway](./hostgateway.md)，能力声明见[capabilities](./capabilities.md)。
 
+## 错误处理
+
+Host 和资源调用失败时抛出 `Error`，携带协议 `code`、`details`、`retryable` 以及完整的 `pluginError`。按错误码处理分支，不要匹配 `message` 文本。未捕获的 Host 错误返回宿主时仍保留分类。
+
+业务入口使用 SDK 的 `failure(code, message, context, options)` 返回失败，`code` 使用 `sdk.d.ts` 中的 `PluginErrorCode`。`context` 包含 `plugin_id/capability_id/operation/request_id`，由宿主重新绑定可信身份；`options` 可传入 `details` 和 `retryable`。消息限 512 UTF-8 字节，身份字段各限 128 字节，`details` 限 4096 字节。
+
+部分成功的业务结果若需附带失败原因，可用 SDK 的 `errorInfo(error)` 保留 `code/message/details/retryable`。它是业务数据，不代替操作失败时的协议信封。插件 Web 页面通过[页面桥接](./ui-logging-migration.md)接收 REST 错误对象，错误类型与运行时协议分别处理。
+
 运行 `trpack validate my-plugin`、`trpack build my-plugin --sign-key keys/private.json` 和 `trpack verify <package.tr>`；加载时还会检查具名导出，调用时检查请求和结果。
 
 ## 执行和内存预算

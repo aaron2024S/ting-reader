@@ -1,5 +1,6 @@
 //! Audio format detection, metadata reading and local file ranges.
 
+use crate::core::app::error::{InputErrorKind, LookupErrorKind};
 use crate::core::app::error::{Result, TingError};
 use id3::TagLike;
 use std::fs::File;
@@ -237,17 +238,19 @@ impl AudioStreamer {
     /// Validate that an audio file exists and is readable
     pub fn validate_audio(&self, file_path: &Path) -> Result<()> {
         if !file_path.exists() {
-            return Err(TingError::NotFound(format!(
-                "Audio file not found: {:?}",
-                file_path
-            )));
+            return Err(TingError::not_found(
+                LookupErrorKind::File,
+                "validate_audio::not_found",
+                format!("Audio file not found: {:?}", file_path),
+            ));
         }
 
         if !file_path.is_file() {
-            return Err(TingError::InvalidRequest(format!(
-                "Path is not a file: {:?}",
-                file_path
-            )));
+            return Err(TingError::invalid_request(
+                InputErrorKind::InvalidPath,
+                "validate_audio::invalid_request",
+                format!("Path is not a file: {:?}", file_path),
+            ));
         }
 
         let format = self.detect_format(file_path)?;
@@ -265,10 +268,11 @@ impl AudioStreamer {
         }
 
         if !self.config.supported_formats.contains(&format) {
-            return Err(TingError::InvalidRequest(format!(
-                "Unsupported audio format: {:?}",
-                format
-            )));
+            return Err(TingError::invalid_request(
+                InputErrorKind::UnsupportedValue,
+                "validate_audio::invalid_request",
+                format!("Unsupported audio format: {:?}", format),
+            ));
         }
 
         Ok(())
@@ -294,7 +298,9 @@ impl AudioStreamer {
             .unwrap_or("")
             .to_lowercase();
         if ext == "strm" {
-            return Err(TingError::InvalidRequest(
+            return Err(TingError::invalid_request(
+                InputErrorKind::InvalidValue,
+                "read_metadata::invalid_request",
                 "Cannot extract metadata from .strm files (URL redirects)".to_string(),
             ));
         }
@@ -331,40 +337,39 @@ impl AudioStreamer {
             .format(&hint, mss, &format_opts, &metadata_opts)
             .map_err(|e| {
                 let error_msg = e.to_string();
-                if error_msg.contains("probe limit") || error_msg.contains("unsupported format") {
-                    tracing::warn!(
-                        path = %file_path.display(),
-                        error = %error_msg,
-                        message_key = "audio.format.probe_failed",
-                        message_params = %serde_json::json!({
-                            "path": file_path.display().to_string(),
-                            "error": error_msg,
-                        }),
-                        "Audio format probe failed"
-                    );
-                    TingError::InvalidRequest(format!(
-                        "Audio format probe failed; the file may be damaged or unsupported: {}",
-                        error_msg
-                    ))
-                } else {
-                    tracing::warn!(
-                        path = %file_path.display(),
-                        error = %error_msg,
-                        message_key = "audio.format.probe_failed",
-                        message_params = %serde_json::json!({
-                            "path": file_path.display().to_string(),
-                            "error": error_msg,
-                        }),
-                        "Audio format probe failed"
-                    );
-                    TingError::InvalidRequest(format!("Audio format probe failed: {}", error_msg))
-                }
+                tracing::warn!(
+                    path = %file_path.display(),
+                    error = %error_msg,
+                    message_key = "audio.format.probe_failed",
+                    message_params = %serde_json::json!({
+                        "path": file_path.display().to_string(),
+                        "error": error_msg,
+                    }),
+                    "Audio format probe failed"
+                );
+                let (reason, message) = match &e {
+                    symphonia::core::errors::Error::LimitError(_)
+                    | symphonia::core::errors::Error::Unsupported(_) => (
+                        InputErrorKind::UnsupportedValue,
+                        format!("Audio format probe failed; the file may be damaged or unsupported: {error_msg}"),
+                    ),
+                    _ => (
+                        InputErrorKind::InvalidValue,
+                        format!("Audio format probe failed: {error_msg}"),
+                    ),
+                };
+                TingError::invalid_request(reason, "read_metadata", message)
+                    .with_source(anyhow::Error::new(e))
             })?;
 
         let mut format_reader = probed.format;
-        let track = format_reader
-            .default_track()
-            .ok_or_else(|| TingError::InvalidRequest("No audio track found".to_string()))?;
+        let track = format_reader.default_track().ok_or_else(|| {
+            TingError::invalid_request(
+                InputErrorKind::InvalidValue,
+                "read_metadata::invalid_request",
+                "No audio track found".to_string(),
+            )
+        })?;
 
         let codec_params = &track.codec_params;
 
@@ -464,7 +469,9 @@ impl AudioStreamer {
     /// Supports formats: "bytes=0-499", "bytes=500-", "bytes=-500"
     pub fn parse_range_header(&self, header: &str, file_size: u64) -> Result<Range<u64>> {
         if !header.starts_with("bytes=") {
-            return Err(TingError::InvalidRequest(
+            return Err(TingError::invalid_request(
+                InputErrorKind::OutOfRange,
+                "parse_range_header::invalid_request",
                 "Invalid Range header format".to_string(),
             ));
         }
@@ -473,7 +480,9 @@ impl AudioStreamer {
         let parts: Vec<&str> = range_str.split('-').collect();
 
         if parts.len() != 2 {
-            return Err(TingError::InvalidRequest(
+            return Err(TingError::invalid_request(
+                InputErrorKind::OutOfRange,
+                "parse_range_header::invalid_request",
                 "Invalid Range header format".to_string(),
             ));
         }
@@ -481,13 +490,21 @@ impl AudioStreamer {
         let (start, end) = if parts[0].is_empty() {
             // Suffix range: bytes=-500
             let suffix_len: u64 = parts[1].parse().map_err(|_| {
-                TingError::InvalidRequest("Invalid Range header: invalid suffix length".to_string())
+                TingError::invalid_request(
+                    InputErrorKind::OutOfRange,
+                    "parse_range_header::invalid_request",
+                    "Invalid Range header: invalid suffix length".to_string(),
+                )
             })?;
             let start = file_size.saturating_sub(suffix_len);
             (start, file_size)
         } else {
             let start: u64 = parts[0].parse().map_err(|_| {
-                TingError::InvalidRequest("Invalid Range header: invalid start".to_string())
+                TingError::invalid_request(
+                    InputErrorKind::OutOfRange,
+                    "parse_range_header::invalid_request",
+                    "Invalid Range header: invalid start".to_string(),
+                )
             })?;
 
             let end = if parts[1].is_empty() {
@@ -495,7 +512,11 @@ impl AudioStreamer {
                 file_size
             } else {
                 let end_val: u64 = parts[1].parse().map_err(|_| {
-                    TingError::InvalidRequest("Invalid Range header: invalid end".to_string())
+                    TingError::invalid_request(
+                        InputErrorKind::OutOfRange,
+                        "parse_range_header::invalid_request",
+                        "Invalid Range header: invalid end".to_string(),
+                    )
                 })?;
                 end_val.saturating_add(1).min(file_size) // Inclusive end
             };
@@ -504,17 +525,19 @@ impl AudioStreamer {
         };
 
         if start >= file_size {
-            return Err(TingError::InvalidRequest(format!(
-                "Range start {} exceeds file size {}",
-                start, file_size
-            )));
+            return Err(TingError::invalid_request(
+                InputErrorKind::OutOfRange,
+                "parse_range_header::invalid_request",
+                format!("Range start {} exceeds file size {}", start, file_size),
+            ));
         }
 
         if start >= end {
-            return Err(TingError::InvalidRequest(format!(
-                "Invalid range: start {} >= end {}",
-                start, end
-            )));
+            return Err(TingError::invalid_request(
+                InputErrorKind::OutOfRange,
+                "parse_range_header::invalid_request",
+                format!("Invalid range: start {} >= end {}", start, end),
+            ));
         }
 
         Ok(start..end)

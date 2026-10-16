@@ -1,5 +1,6 @@
 //! Plugin package reading, extraction, signatures and unpacked-size limits.
 
+use crate::core::app::error::PluginErrorKind;
 use crate::core::app::error::{Result, TingError};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
@@ -134,10 +135,20 @@ pub fn has_tr_magic(path: &Path) -> Result<bool> {
 pub fn read_manifest_file(path: &Path, manifest_name: &str) -> Result<String> {
     let package = read_tr_package(path)?;
     let bytes = package.files.get(manifest_name).ok_or_else(|| {
-        TingError::PluginLoadError(format!("{} not found in .tr package", manifest_name))
+        TingError::plugin_load(
+            PluginErrorKind::InvalidManifest,
+            "read_manifest_file::plugin_load",
+            format!("{} not found in .tr package", manifest_name),
+        )
     })?;
     String::from_utf8(bytes.clone()).map_err(|error| {
-        TingError::PluginLoadError(format!("Invalid UTF-8 in {}: {}", manifest_name, error))
+        let message = format!("Invalid UTF-8 in {}: {}", manifest_name, error);
+        TingError::plugin_load(
+            PluginErrorKind::InvalidManifest,
+            "read_manifest_file::plugin_load",
+            message,
+        )
+        .with_source(anyhow::anyhow!(error))
     })
 }
 
@@ -161,14 +172,26 @@ pub fn write_install_provenance(package_path: &Path, target: &Path) -> Result<()
     fs::create_dir_all(&trpack_dir)?;
 
     let manifest = serde_json::to_vec_pretty(&package.manifest).map_err(|error| {
-        TingError::PluginLoadError(format!("Failed to write .tr install metadata: {}", error))
+        let message = format!("Failed to write .tr install metadata: {}", error);
+        TingError::plugin_load(
+            PluginErrorKind::InvalidManifest,
+            "write_install_provenance::plugin_load",
+            message,
+        )
+        .with_source(anyhow::anyhow!(error))
     })?;
     fs::write(target.join(PACKAGE_MANIFEST_PATH), manifest)?;
 
     let signature_path = target.join(SIGNATURE_MANIFEST_PATH);
     if let Some(signature) = package.signature {
         let signature = serde_json::to_vec_pretty(&signature).map_err(|error| {
-            TingError::PluginLoadError(format!("Failed to write .tr signature metadata: {}", error))
+            let message = format!("Failed to write .tr signature metadata: {}", error);
+            TingError::plugin_load(
+                PluginErrorKind::InvalidManifest,
+                "write_install_provenance::plugin_load",
+                message,
+            )
+            .with_source(anyhow::anyhow!(error))
         })?;
         fs::write(signature_path, signature)?;
     } else if signature_path.exists() {
@@ -187,19 +210,29 @@ pub fn read_package_signature_identity(path: &Path) -> Result<TrPackageSignature
 pub fn read_installed_signature_identity(plugin_path: &Path) -> Result<TrPackageSignatureIdentity> {
     let manifest_path = plugin_path.join(PACKAGE_MANIFEST_PATH);
     if !manifest_path.exists() {
-        return Err(TingError::PluginLoadError(format!(
-            "Installed plugin {} is missing .trpack package metadata",
-            plugin_path.display()
-        )));
+        return Err(TingError::plugin_load(
+            PluginErrorKind::InvalidManifest,
+            "read_installed_signature_identity::plugin_load",
+            format!(
+                "Installed plugin {} is missing .trpack package metadata",
+                plugin_path.display()
+            ),
+        ));
     }
 
     let manifest_bytes = fs::read(&manifest_path)?;
     let manifest = serde_json::from_slice::<PackageManifest>(&manifest_bytes).map_err(|error| {
-        TingError::PluginLoadError(format!(
+        let message = format!(
             "Invalid installed .tr package metadata at {}: {}",
             manifest_path.display(),
             error
-        ))
+        );
+        TingError::plugin_load(
+            PluginErrorKind::InvalidManifest,
+            "read_installed_signature_identity::plugin_load",
+            message,
+        )
+        .with_source(anyhow::anyhow!(error))
     })?;
 
     verify_installed_package(&manifest, plugin_path)?;
@@ -209,18 +242,28 @@ pub fn read_installed_signature_identity(plugin_path: &Path) -> Result<TrPackage
         let signature_bytes = fs::read(&signature_path)?;
         Some(
             serde_json::from_slice::<PackageSignature>(&signature_bytes).map_err(|error| {
-                TingError::PluginLoadError(format!(
+                let message = format!(
                     "Invalid installed .tr signature metadata at {}: {}",
                     signature_path.display(),
                     error
-                ))
+                );
+                TingError::plugin_load(
+                    PluginErrorKind::InvalidManifest,
+                    "read_installed_signature_identity::plugin_load",
+                    message,
+                )
+                .with_source(anyhow::anyhow!(error))
             })?,
         )
     } else {
-        return Err(TingError::PluginLoadError(format!(
-            "Installed plugin {} is missing .trpack signature metadata",
-            plugin_path.display()
-        )));
+        return Err(TingError::plugin_load(
+            PluginErrorKind::InvalidManifest,
+            "read_installed_signature_identity::plugin_load",
+            format!(
+                "Installed plugin {} is missing .trpack signature metadata",
+                plugin_path.display()
+            ),
+        ));
     };
 
     let status = verify_signature_status(&manifest, signature.as_ref());
@@ -247,33 +290,53 @@ struct PackageReadBudget {
 impl PackageReadBudget {
     fn record_entry(&mut self) -> Result<()> {
         self.entry_count = self.entry_count.checked_add(1).ok_or_else(|| {
-            TingError::PluginLoadError(".tr package entry count overflow".to_string())
+            TingError::plugin_load(
+                PluginErrorKind::Loading,
+                "record_entry::plugin_load",
+                ".tr package entry count overflow".to_string(),
+            )
         })?;
         if self.entry_count > MAX_PACKAGE_ENTRY_COUNT {
-            return Err(TingError::PluginLoadError(format!(
-                ".tr package exceeds the {} entry limit",
-                MAX_PACKAGE_ENTRY_COUNT
-            )));
+            return Err(TingError::plugin_load(
+                PluginErrorKind::Loading,
+                "record_entry::plugin_load",
+                format!(
+                    ".tr package exceeds the {} entry limit",
+                    MAX_PACKAGE_ENTRY_COUNT
+                ),
+            ));
         }
         Ok(())
     }
 
     fn record_file(&mut self, path: &str, size: u64) -> Result<()> {
         if size > MAX_PACKAGE_SINGLE_FILE_BYTES {
-            return Err(TingError::PluginLoadError(format!(
-                ".tr package file {} exceeds the {} byte limit",
-                path, MAX_PACKAGE_SINGLE_FILE_BYTES
-            )));
+            return Err(TingError::plugin_load(
+                PluginErrorKind::Loading,
+                "record_file::plugin_load",
+                format!(
+                    ".tr package file {} exceeds the {} byte limit",
+                    path, MAX_PACKAGE_SINGLE_FILE_BYTES
+                ),
+            ));
         }
         self.total_unpacked_bytes =
             self.total_unpacked_bytes.checked_add(size).ok_or_else(|| {
-                TingError::PluginLoadError(".tr package total unpacked size overflow".to_string())
+                TingError::plugin_load(
+                    PluginErrorKind::Loading,
+                    "record_file::plugin_load",
+                    ".tr package total unpacked size overflow".to_string(),
+                )
             })?;
         if self.total_unpacked_bytes > MAX_PACKAGE_TOTAL_UNPACKED_BYTES {
-            return Err(TingError::PluginLoadError(format!(
-                ".tr package exceeds the {} byte total unpacked limit",
-                MAX_PACKAGE_TOTAL_UNPACKED_BYTES
-            )));
+            return Err(TingError::plugin_load(
+                PluginErrorKind::Loading,
+                "record_file::plugin_load",
+                format!(
+                    ".tr package exceeds the {} byte total unpacked limit",
+                    MAX_PACKAGE_TOTAL_UNPACKED_BYTES
+                ),
+            ));
         }
         Ok(())
     }
@@ -293,14 +356,21 @@ fn read_tr_package(path: &Path) -> Result<ReadPackage> {
     let mut magic = [0_u8; 8];
     reader.read_exact(&mut magic)?;
     if &magic != MAGIC {
-        return Err(TingError::PluginLoadError(format!(
-            "{} is not a Ting Reader .tr package",
-            path.display()
-        )));
+        return Err(TingError::plugin_load(
+            PluginErrorKind::Loading,
+            "read_tr_package::plugin_load",
+            format!("{} is not a Ting Reader .tr package", path.display()),
+        ));
     }
 
     let decoder = zstd::Decoder::new(reader).map_err(|error| {
-        TingError::PluginLoadError(format!("Failed to decode .tr package: {}", error))
+        let message = format!("Failed to decode .tr package: {}", error);
+        TingError::plugin_load(
+            PluginErrorKind::Loading,
+            "read_tr_package::plugin_load",
+            message,
+        )
+        .with_source(anyhow::anyhow!(error))
     })?;
     let mut archive = Archive::new(decoder);
     let mut package_manifest = None;
@@ -309,10 +379,22 @@ fn read_tr_package(path: &Path) -> Result<ReadPackage> {
     let mut budget = PackageReadBudget::default();
 
     for entry in archive.entries().map_err(|error| {
-        TingError::PluginLoadError(format!("Failed to read .tr package: {}", error))
+        let message = format!("Failed to read .tr package: {}", error);
+        TingError::plugin_load(
+            PluginErrorKind::Loading,
+            "read_tr_package::plugin_load",
+            message,
+        )
+        .with_source(anyhow::anyhow!(error))
     })? {
         let mut entry = entry.map_err(|error| {
-            TingError::PluginLoadError(format!("Failed to read .tr entry: {}", error))
+            let message = format!("Failed to read .tr entry: {}", error);
+            TingError::plugin_load(
+                PluginErrorKind::Runtime,
+                "read_tr_package::plugin_load",
+                message,
+            )
+            .with_source(anyhow::anyhow!(error))
         })?;
         budget.record_entry()?;
         if !entry.header().entry_type().is_file() {
@@ -321,7 +403,13 @@ fn read_tr_package(path: &Path) -> Result<ReadPackage> {
         let path = entry
             .path()
             .map_err(|error| {
-                TingError::PluginLoadError(format!("Invalid .tr entry path: {}", error))
+                let message = format!("Invalid .tr entry path: {}", error);
+                TingError::plugin_load(
+                    PluginErrorKind::InvalidOutput,
+                    "read_tr_package::plugin_load",
+                    message,
+                )
+                .with_source(anyhow::anyhow!(error))
             })?
             .to_string_lossy()
             .replace('\\', "/");
@@ -329,31 +417,57 @@ fn read_tr_package(path: &Path) -> Result<ReadPackage> {
         let entry_size = entry.size();
         budget.record_file(&path, entry_size)?;
         let capacity = usize::try_from(entry_size).map_err(|_| {
-            TingError::PluginLoadError(format!(".tr package file is too large: {}", path))
+            TingError::plugin_load(
+                PluginErrorKind::Loading,
+                "read_tr_package::plugin_load",
+                format!(".tr package file is too large: {}", path),
+            )
         })?;
         let mut bytes = Vec::with_capacity(capacity);
         entry.read_to_end(&mut bytes)?;
         if bytes.len() as u64 != entry_size {
-            return Err(TingError::PluginLoadError(format!(
-                ".tr package entry size mismatch for {}",
-                path
-            )));
+            return Err(TingError::plugin_load(
+                PluginErrorKind::Loading,
+                "read_tr_package::plugin_load",
+                format!(".tr package entry size mismatch for {}", path),
+            ));
         }
         if path == PACKAGE_MANIFEST_PATH {
             package_manifest = Some(serde_json::from_slice::<PackageManifest>(&bytes).map_err(
-                |error| TingError::PluginLoadError(format!("Invalid .tr manifest: {}", error)),
+                |error| {
+                    let message = format!("Invalid .tr manifest: {}", error);
+                    TingError::plugin_load(
+                        PluginErrorKind::InvalidManifest,
+                        "read_tr_package::plugin_load",
+                        message,
+                    )
+                    .with_source(anyhow::anyhow!(error))
+                },
             )?);
         } else if path == SIGNATURE_MANIFEST_PATH {
             package_signature = Some(serde_json::from_slice::<PackageSignature>(&bytes).map_err(
-                |error| TingError::PluginLoadError(format!("Invalid .tr signature: {}", error)),
+                |error| {
+                    let message = format!("Invalid .tr signature: {}", error);
+                    TingError::plugin_load(
+                        PluginErrorKind::InvalidManifest,
+                        "read_tr_package::plugin_load",
+                        message,
+                    )
+                    .with_source(anyhow::anyhow!(error))
+                },
             )?);
         } else {
             files.insert(path, bytes);
         }
     }
 
-    let manifest = package_manifest
-        .ok_or_else(|| TingError::PluginLoadError(".tr package metadata not found".to_string()))?;
+    let manifest = package_manifest.ok_or_else(|| {
+        TingError::plugin_load(
+            PluginErrorKind::InvalidManifest,
+            "read_tr_package::plugin_load",
+            ".tr package metadata not found".to_string(),
+        )
+    })?;
     verify_package(&manifest, &files)?;
     Ok(ReadPackage {
         manifest,
@@ -364,26 +478,38 @@ fn read_tr_package(path: &Path) -> Result<ReadPackage> {
 
 fn verify_package(manifest: &PackageManifest, files: &BTreeMap<String, Vec<u8>>) -> Result<()> {
     if manifest.format != FORMAT_NAME || manifest.format_version != FORMAT_VERSION {
-        return Err(TingError::PluginLoadError(format!(
-            "Unsupported .tr package format {} v{}",
-            manifest.format, manifest.format_version
-        )));
+        return Err(TingError::plugin_load(
+            PluginErrorKind::InvalidManifest,
+            "verify_package::plugin_load",
+            format!(
+                "Unsupported .tr package format {} v{}",
+                manifest.format, manifest.format_version
+            ),
+        ));
     }
     if manifest.plugin_id.trim().is_empty() || manifest.plugin_version.trim().is_empty() {
-        return Err(TingError::PluginLoadError(
+        return Err(TingError::plugin_load(
+            PluginErrorKind::InvalidManifest,
+            "verify_package::plugin_load",
             ".tr package metadata missing plugin id/version".to_string(),
         ));
     }
     if !files.contains_key("plugin.yml") {
-        return Err(TingError::PluginLoadError(
+        return Err(TingError::plugin_load(
+            PluginErrorKind::Loading,
+            "verify_package::plugin_load",
             ".tr package is missing plugin.yml".to_string(),
         ));
     }
     if !files.contains_key(&manifest.entry_point) {
-        return Err(TingError::PluginLoadError(format!(
-            ".tr package is missing entry_point {}",
-            manifest.entry_point
-        )));
+        return Err(TingError::plugin_load(
+            PluginErrorKind::InvalidManifest,
+            "verify_package::plugin_load",
+            format!(
+                ".tr package is missing entry_point {}",
+                manifest.entry_point
+            ),
+        ));
     }
 
     let expected: BTreeSet<_> = manifest
@@ -393,7 +519,9 @@ fn verify_package(manifest: &PackageManifest, files: &BTreeMap<String, Vec<u8>>)
         .collect();
     let actual: BTreeSet<_> = files.keys().map(String::as_str).collect();
     if expected != actual {
-        return Err(TingError::PluginLoadError(
+        return Err(TingError::plugin_load(
+            PluginErrorKind::Loading,
+            "verify_package::plugin_load",
             ".tr package file table does not match payload".to_string(),
         ));
     }
@@ -401,20 +529,26 @@ fn verify_package(manifest: &PackageManifest, files: &BTreeMap<String, Vec<u8>>)
     for file in &manifest.files {
         validate_archive_path(&file.path)?;
         let bytes = files.get(&file.path).ok_or_else(|| {
-            TingError::PluginLoadError(format!(".tr package missing file {}", file.path))
+            TingError::plugin_load(
+                PluginErrorKind::Loading,
+                "verify_package::plugin_load",
+                format!(".tr package missing file {}", file.path),
+            )
         })?;
         if bytes.len() as u64 != file.size {
-            return Err(TingError::PluginLoadError(format!(
-                ".tr package size mismatch for {}",
-                file.path
-            )));
+            return Err(TingError::plugin_load(
+                PluginErrorKind::Loading,
+                "verify_package::plugin_load",
+                format!(".tr package size mismatch for {}", file.path),
+            ));
         }
         let sha256 = hex_lower(&Sha256::digest(bytes));
         if sha256 != file.sha256 {
-            return Err(TingError::PluginLoadError(format!(
-                ".tr package checksum mismatch for {}",
-                file.path
-            )));
+            return Err(TingError::plugin_load(
+                PluginErrorKind::Loading,
+                "verify_package::plugin_load",
+                format!(".tr package checksum mismatch for {}", file.path),
+            ));
         }
     }
     Ok(())
@@ -422,18 +556,26 @@ fn verify_package(manifest: &PackageManifest, files: &BTreeMap<String, Vec<u8>>)
 
 fn verify_installed_package(manifest: &PackageManifest, plugin_path: &Path) -> Result<()> {
     if manifest.format != FORMAT_NAME || manifest.format_version != FORMAT_VERSION {
-        return Err(TingError::PluginLoadError(format!(
-            "Unsupported installed .tr package format {} v{}",
-            manifest.format, manifest.format_version
-        )));
+        return Err(TingError::plugin_load(
+            PluginErrorKind::InvalidManifest,
+            "verify_installed_package::plugin_load",
+            format!(
+                "Unsupported installed .tr package format {} v{}",
+                manifest.format, manifest.format_version
+            ),
+        ));
     }
     if manifest.plugin_id.trim().is_empty() || manifest.plugin_version.trim().is_empty() {
-        return Err(TingError::PluginLoadError(
+        return Err(TingError::plugin_load(
+            PluginErrorKind::InvalidManifest,
+            "verify_installed_package::plugin_load",
             "Installed .tr package metadata missing plugin id/version".to_string(),
         ));
     }
     if !manifest.files.iter().any(|file| file.path == "plugin.yml") {
-        return Err(TingError::PluginLoadError(
+        return Err(TingError::plugin_load(
+            PluginErrorKind::InvalidManifest,
+            "verify_installed_package::plugin_load",
             "Installed .tr package metadata is missing plugin.yml".to_string(),
         ));
     }
@@ -442,34 +584,46 @@ fn verify_installed_package(manifest: &PackageManifest, plugin_path: &Path) -> R
         .iter()
         .any(|file| file.path == manifest.entry_point)
     {
-        return Err(TingError::PluginLoadError(format!(
-            "Installed .tr package metadata is missing entry_point {}",
-            manifest.entry_point
-        )));
+        return Err(TingError::plugin_load(
+            PluginErrorKind::InvalidManifest,
+            "verify_installed_package::plugin_load",
+            format!(
+                "Installed .tr package metadata is missing entry_point {}",
+                manifest.entry_point
+            ),
+        ));
     }
 
     for file in &manifest.files {
         validate_archive_path(&file.path)?;
         let full_path = plugin_path.join(&file.path);
         let bytes = fs::read(&full_path).map_err(|error| {
-            TingError::PluginLoadError(format!(
+            let message = format!(
                 "Installed plugin file {} cannot be read: {}",
                 full_path.display(),
                 error
-            ))
+            );
+            TingError::plugin_load(
+                PluginErrorKind::Runtime,
+                "verify_installed_package::plugin_load",
+                message,
+            )
+            .with_source(anyhow::anyhow!(error))
         })?;
         if bytes.len() as u64 != file.size {
-            return Err(TingError::PluginLoadError(format!(
-                "Installed plugin file size mismatch for {}",
-                file.path
-            )));
+            return Err(TingError::plugin_load(
+                PluginErrorKind::Runtime,
+                "verify_installed_package::plugin_load",
+                format!("Installed plugin file size mismatch for {}", file.path),
+            ));
         }
         let sha256 = hex_lower(&Sha256::digest(&bytes));
         if sha256 != file.sha256 {
-            return Err(TingError::PluginLoadError(format!(
-                "Installed plugin file checksum mismatch for {}",
-                file.path
-            )));
+            return Err(TingError::plugin_load(
+                PluginErrorKind::Runtime,
+                "verify_installed_package::plugin_load",
+                format!("Installed plugin file checksum mismatch for {}", file.path),
+            ));
         }
     }
 
@@ -478,23 +632,27 @@ fn verify_installed_package(manifest: &PackageManifest, plugin_path: &Path) -> R
 
 fn validate_archive_path(path: &str) -> Result<()> {
     if path.is_empty() {
-        return Err(TingError::PluginLoadError(
+        return Err(TingError::plugin_load(
+            PluginErrorKind::Loading,
+            "validate_archive_path::plugin_load",
             ".tr package contains empty path".to_string(),
         ));
     }
     let path = Path::new(path);
     if path.is_absolute() {
-        return Err(TingError::PluginLoadError(format!(
-            ".tr package path must be relative: {}",
-            path.display()
-        )));
+        return Err(TingError::plugin_load(
+            PluginErrorKind::Loading,
+            "validate_archive_path::plugin_load",
+            format!(".tr package path must be relative: {}", path.display()),
+        ));
     }
     for component in path.components() {
         if !matches!(component, Component::Normal(_)) {
-            return Err(TingError::PluginLoadError(format!(
-                ".tr package contains unsafe path: {}",
-                path.display()
-            )));
+            return Err(TingError::plugin_load(
+                PluginErrorKind::Loading,
+                "validate_archive_path::plugin_load",
+                format!(".tr package contains unsafe path: {}", path.display()),
+            ));
         }
     }
     Ok(())
@@ -550,7 +708,11 @@ fn signature_identity_from_status(
     match status {
         TrPackageSignatureStatus::Trusted { key_id } => {
             let signature = signature.ok_or_else(|| {
-                TingError::PluginLoadError("Trusted .tr signature metadata missing".to_string())
+                TingError::plugin_load(
+                    PluginErrorKind::InvalidManifest,
+                    "signature_identity_from_status::plugin_load",
+                    "Trusted .tr signature metadata missing".to_string(),
+                )
             })?;
             Ok(TrPackageSignatureIdentity::Signed {
                 key_id: key_id.clone(),
@@ -559,17 +721,25 @@ fn signature_identity_from_status(
         }
         TrPackageSignatureStatus::Untrusted { key_id } => {
             let signature = signature.ok_or_else(|| {
-                TingError::PluginLoadError("Untrusted .tr signature metadata missing".to_string())
+                TingError::plugin_load(
+                    PluginErrorKind::InvalidManifest,
+                    "signature_identity_from_status::plugin_load",
+                    "Untrusted .tr signature metadata missing".to_string(),
+                )
             })?;
             Ok(TrPackageSignatureIdentity::Signed {
                 key_id: key_id.clone(),
                 public_key: signature.public_key.clone(),
             })
         }
-        TrPackageSignatureStatus::Unsigned => Err(TingError::PluginLoadError(
+        TrPackageSignatureStatus::Unsigned => Err(TingError::plugin_load(
+            PluginErrorKind::Loading,
+            "signature_identity_from_status::plugin_load",
             "Plugin package is not signed".to_string(),
         )),
-        TrPackageSignatureStatus::Invalid { reason, .. } => Err(TingError::PluginLoadError(
+        TrPackageSignatureStatus::Invalid { reason, .. } => Err(TingError::plugin_load(
+            PluginErrorKind::InvalidManifest,
+            "signature_identity_from_status::plugin_load",
             format!("Invalid plugin package signature: {}", reason),
         )),
     }
@@ -577,25 +747,36 @@ fn signature_identity_from_status(
 
 fn validate_signature_metadata(signature: &PackageSignature) -> Result<()> {
     if signature.format != SIGNATURE_FORMAT_NAME {
-        return Err(TingError::PluginLoadError(format!(
-            "Unsupported .tr signature format {}",
-            signature.format
-        )));
+        return Err(TingError::plugin_load(
+            PluginErrorKind::InvalidManifest,
+            "validate_signature_metadata::plugin_load",
+            format!("Unsupported .tr signature format {}", signature.format),
+        ));
     }
     if signature.format_version != SIGNATURE_FORMAT_VERSION {
-        return Err(TingError::PluginLoadError(format!(
-            "Unsupported .tr signature format version {}",
-            signature.format_version
-        )));
+        return Err(TingError::plugin_load(
+            PluginErrorKind::InvalidManifest,
+            "validate_signature_metadata::plugin_load",
+            format!(
+                "Unsupported .tr signature format version {}",
+                signature.format_version
+            ),
+        ));
     }
     if signature.algorithm != SIGNATURE_ALGORITHM {
-        return Err(TingError::PluginLoadError(format!(
-            "Unsupported .tr signature algorithm {}",
-            signature.algorithm
-        )));
+        return Err(TingError::plugin_load(
+            PluginErrorKind::InvalidManifest,
+            "validate_signature_metadata::plugin_load",
+            format!(
+                "Unsupported .tr signature algorithm {}",
+                signature.algorithm
+            ),
+        ));
     }
     if signature.key_id.trim().is_empty() {
-        return Err(TingError::PluginLoadError(
+        return Err(TingError::plugin_load(
+            PluginErrorKind::InvalidManifest,
+            "validate_signature_metadata::plugin_load",
             ".tr signature key_id is required".to_string(),
         ));
     }
@@ -611,14 +792,26 @@ fn verify_signature_with_public_key(
 ) -> Result<()> {
     let public_key = decode_fixed_hex::<32>(public_key_hex, "public_key")?;
     let verifying_key = VerifyingKey::from_bytes(&public_key).map_err(|error| {
-        TingError::PluginLoadError(format!("Invalid .tr signature public key: {}", error))
+        let message = format!("Invalid .tr signature public key: {}", error);
+        TingError::plugin_load(
+            PluginErrorKind::InvalidManifest,
+            "verify_signature_with_public_key::plugin_load",
+            message,
+        )
+        .with_source(anyhow::anyhow!(error))
     })?;
     let signature_bytes = decode_fixed_hex::<64>(&signature.signature, "signature")?;
     let signature = Signature::from_bytes(&signature_bytes);
     verifying_key
         .verify(&signature_payload(manifest), &signature)
         .map_err(|error| {
-            TingError::PluginLoadError(format!("Invalid .tr package signature: {}", error))
+            let message = format!("Invalid .tr package signature: {}", error);
+            TingError::plugin_load(
+                PluginErrorKind::InvalidManifest,
+                "verify_signature_with_public_key::plugin_load",
+                message,
+            )
+            .with_source(anyhow::anyhow!(error))
         })
 }
 
@@ -663,13 +856,20 @@ fn trusted_public_key(key_id: &str) -> Option<&'static str> {
 
 fn decode_fixed_hex<const N: usize>(value: &str, field: &str) -> Result<[u8; N]> {
     let bytes = hex_decode(value).map_err(|error| {
-        TingError::PluginLoadError(format!(".tr signature {} must be hex: {}", field, error))
+        let message = format!(".tr signature {} must be hex: {}", field, error);
+        TingError::plugin_load(
+            PluginErrorKind::InvalidManifest,
+            "decode_fixed_hex::plugin_load",
+            message,
+        )
+        .with_source(anyhow::anyhow!(error))
     })?;
     if bytes.len() != N {
-        return Err(TingError::PluginLoadError(format!(
-            ".tr signature {} must be {} bytes",
-            field, N
-        )));
+        return Err(TingError::plugin_load(
+            PluginErrorKind::InvalidManifest,
+            "decode_fixed_hex::plugin_load",
+            format!(".tr signature {} must be {} bytes", field, N),
+        ));
     }
     let mut output = [0_u8; N];
     output.copy_from_slice(&bytes);

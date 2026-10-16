@@ -1,7 +1,82 @@
 use super::*;
+use crate::core::app::error::PluginErrorKind;
 use crate::plugin::manager::{FailedPlugin, PluginConfig, PluginEntry};
 use crate::plugin::types::{Plugin, PluginMetadata};
 use std::sync::Arc;
+
+#[tokio::test]
+async fn resource_scope_rejections_preserve_permission_and_cancellation_codes() {
+    use crate::plugin::host_api::resources::ResourceScope;
+    use ting_plugin_contract::protocol::PluginErrorCode;
+    let dir = tempfile::tempdir().unwrap();
+    let manager = PluginManager::new(PluginConfig {
+        plugin_dir: dir.path().into(),
+        enable_hot_reload: false,
+        max_memory_per_plugin: 32 * 1024 * 1024,
+        max_execution_time: Duration::from_secs(1),
+    })
+    .unwrap();
+    let metadata = PluginMetadata::new(
+        "scoped".into(),
+        "Scoped".into(),
+        "2.0.0".into(),
+        "Test".into(),
+        "Test".into(),
+        "plugin.js".into(),
+    );
+    let id = metadata.instance_id();
+    let instance = Arc::new(FailedPlugin::new(
+        metadata.clone(),
+        Arc::new(TingError::plugin_load(
+            PluginErrorKind::Loading,
+            "test.fixture",
+            "unused".into(),
+        )),
+    ));
+    manager
+        .registry
+        .write()
+        .await
+        .insert(id.clone(), PluginEntry::new(metadata, instance));
+    let stale = Arc::new(ResourceScope::new(
+        id.clone(),
+        uuid::Uuid::new_v4(),
+        None,
+        dir.path().into(),
+        Default::default(),
+    ));
+    let cancelled = manager
+        .resource_scope(
+            &id,
+            &Default::default(),
+            dir.path().into(),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    cancelled.cancel();
+    for (scope, expected) in [
+        (stale, PluginErrorCode::PermissionDenied),
+        (cancelled, PluginErrorCode::Cancelled),
+    ] {
+        let error = manager
+            .invoke_capability(
+                &id,
+                "test",
+                "test",
+                serde_json::json!({}),
+                &PluginInvocationContext {
+                    user: None,
+                    resources: Some(scope),
+                },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.plugin_error_code(), expected);
+        assert!(!error.is_retryable());
+        assert!(std::error::Error::source(&error).is_some());
+    }
+}
 
 #[tokio::test]
 async fn zero_permission_js_uses_host_limits_and_marks_failed_after_timeout() {
@@ -63,13 +138,22 @@ async fn zero_permission_js_uses_host_limits_and_marks_failed_after_timeout() {
         )
         .await
         .unwrap_err();
-    assert!(matches!(error, TingError::Timeout(_)), "{error}");
+    assert!(
+        matches!(error.root_error(), TingError::Timeout(_)),
+        "{error}"
+    );
     assert!(started.elapsed() < Duration::from_secs(3));
     assert!(scope.cancellation_token().is_cancelled());
     let registry = manager.registry.read().await;
     let entry = registry.get(&id).unwrap();
     assert_eq!(entry.state, PluginState::Failed);
-    assert!(entry.load_error.as_ref().unwrap().contains("deadline"));
+    let retained = entry.load_error.as_ref().unwrap();
+    assert!(retained.to_string().contains("deadline"));
+    assert_eq!(retained.error_type(), "Timeout");
+    let info = crate::plugin::manager::PluginInfo::from_entry(entry);
+    let snapshot = info.error.unwrap();
+    assert_eq!(snapshot.error, "Timeout");
+    assert_eq!(snapshot.details.unwrap()["reason"], "elapsed");
     assert!(!entry.instance.is_available());
 }
 
@@ -183,8 +267,14 @@ async fn record_plugin_call_updates_listed_stats() {
         "plugin.js".to_string(),
     );
     let plugin_id = metadata.instance_id();
-    let instance =
-        Arc::new(FailedPlugin::new(metadata.clone(), "unused".to_string())) as Arc<dyn Plugin>;
+    let instance = Arc::new(FailedPlugin::new(
+        metadata.clone(),
+        Arc::new(TingError::plugin_load(
+            PluginErrorKind::Loading,
+            "test.fixture",
+            "unused".into(),
+        )),
+    )) as Arc<dyn Plugin>;
 
     manager
         .registry
@@ -206,7 +296,11 @@ async fn record_plugin_call_updates_listed_stats() {
             &plugin_id,
             "search",
             Duration::from_millis(5),
-            Some(&TingError::PluginExecutionError("boom".to_string())),
+            Some(&TingError::plugin_execution(
+                PluginErrorKind::Runtime,
+                "record_plugin_call_updates_listed_stats::plugin_execution",
+                "boom".to_string(),
+            )),
             PluginLogLevel::Info,
         )
         .await;
@@ -220,6 +314,31 @@ async fn record_plugin_call_updates_listed_stats() {
     assert_eq!(stats_plugin.total_calls, 2);
     assert_eq!(stats_plugin.successful_calls, 1);
     assert_eq!(stats_plugin.failed_calls, 1);
+
+    for index in 0..20 {
+        manager
+            .record_plugin_call(
+                &plugin_id,
+                "search",
+                Duration::from_millis(1),
+                Some(
+                    &TingError::plugin_execution(
+                        PluginErrorKind::Runtime,
+                        "search",
+                        format!("Different failure #{index}"),
+                    )
+                    .with_context(format!("Request #{index}")),
+                ),
+                PluginLogLevel::Info,
+            )
+            .await;
+    }
+    let registry = manager.registry.read().await;
+    let stats = &registry.get(&plugin_id).unwrap().stats;
+    assert_eq!(
+        stats.error_distribution_sorted(),
+        vec![("PluginExecutionError".into(), 21)]
+    );
 }
 
 #[tokio::test]
@@ -242,8 +361,14 @@ async fn invoke_plugin_records_failure_for_unsupported_runtime() {
         "plugin.js".to_string(),
     );
     let plugin_id = metadata.instance_id();
-    let instance =
-        Arc::new(FailedPlugin::new(metadata.clone(), "unused".to_string())) as Arc<dyn Plugin>;
+    let instance = Arc::new(FailedPlugin::new(
+        metadata.clone(),
+        Arc::new(TingError::plugin_load(
+            PluginErrorKind::Loading,
+            "test.fixture",
+            "unused".into(),
+        )),
+    )) as Arc<dyn Plugin>;
 
     manager
         .registry

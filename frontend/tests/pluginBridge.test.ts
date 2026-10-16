@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { readFileSync } from 'node:fs';
+import vm from 'node:vm';
 import {
   externalUrlRequest,
   isBridgeMessageWithinLimit,
@@ -54,4 +56,26 @@ test('lifecycle messages and responses are bound to their document and request',
   assert.equal(response.id, request.id);
   assert.equal(response.bridge_token, request.bridge_token);
   assert.equal(response.type, 'ting-plugin:response');
+});
+
+test('plugin bridge rejection preserves structured HTTP failures in the page Error', () => {
+  const source = readFileSync(new URL('../public/plugin-container-bootstrap.js', import.meta.url), 'utf8');
+  const start = source.indexOf('function createRequestError(');
+  const end = source.indexOf('  var postBridgeMessage', start);
+  const createError = vm.runInNewContext(`(${source.slice(start, end).trim()})`);
+  const payload = {
+    error: 'PluginExecutionError', message: 'Provider unavailable', status: 503,
+    details: { reason: 'plugin_unavailable', operation: 'search', retryable: true },
+    trace_id: 'trace-bridge',
+  };
+  const failure = responseFor(request as Parameters<typeof responseFor>[0], { ok: false, error: payload });
+  const error = createError(failure.error, 'fallback');
+  assert.equal(error.message, payload.message);
+  assert.equal(error.code, payload.error);
+  assert.equal(error.details.reason, payload.details.reason);
+  assert.equal(error.retryable, true);
+  assert.equal(error.trace_id, payload.trace_id);
+  assert.equal(error.status, 503);
+  assert.equal(error.body.message, payload.message);
+  assert.equal(createError(null, 'fallback').message, 'fallback');
 });

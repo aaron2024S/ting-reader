@@ -119,10 +119,10 @@ impl TaskQueue {
                 );
 
                 task.retries += 1;
-                task.error = Some(e.to_string());
+                task.error = Some(crate::core::app::error::ErrorResponse::from_error(&e));
 
                 // Check if we should retry
-                if task.retries < task.retry_policy.max_retries {
+                if task.retry_policy.should_retry(&e, task.retries) {
                     let delay = task.retry_policy.backoff.calculate_delay(task.retries);
 
                     warn!(
@@ -152,22 +152,24 @@ impl TaskQueue {
                     let mut queue = self.queue.write().await;
                     queue.push(PriorityTask { task });
                 } else {
-                    // Max retries exceeded
+                    // Terminal error or exhausted retry budget.
                     task.status = TaskStatus::Failed;
                     if let Err(e) = self.update_task_status(&task).await {
                         error!(task_id = %task_id, error = %e, "Failed to update task status");
                     }
 
-                    error!(
-                        message_key = "task.max_retries_failed",
-                        message_params = %serde_json::json!({
-                            "task_id": task_id,
-                            "retries": task.retries,
-                        }),
-                        task_id = %task_id,
-                        retries = task.retries,
-                        "Task failed after max retries"
-                    );
+                    if task.retries >= task.retry_policy.max_retries {
+                        error!(
+                            message_key = "task.max_retries_failed",
+                            message_params = %serde_json::json!({
+                                "task_id": task_id,
+                                "retries": task.retries,
+                            }),
+                            task_id = %task_id,
+                            retries = task.retries,
+                            "Task failed after max retries"
+                        );
+                    }
                 }
             }
             Err(_) => {
@@ -184,9 +186,12 @@ impl TaskQueue {
                 );
 
                 task.status = TaskStatus::Failed;
-                task.error = Some(format!(
-                    "Task timed out after {} seconds",
-                    task.timeout.as_secs()
+                task.error = Some(crate::core::app::error::ErrorResponse::from_error(
+                    &TingError::timeout(
+                        crate::core::app::error::DeadlineErrorKind::Elapsed,
+                        "task.execute",
+                        format!("Task timed out after {} seconds", task.timeout.as_secs()),
+                    ),
                 ));
 
                 if let Err(e) = self.update_task_status(&task).await {

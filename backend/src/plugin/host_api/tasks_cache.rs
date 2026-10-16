@@ -3,6 +3,7 @@
 use super::{
     PluginHostGateway, PluginHostUser, plugin_task_priority, required_string_param, string_param,
 };
+use crate::core::app::error::{AccessErrorKind, InputErrorKind, LimitErrorKind, LookupErrorKind};
 use crate::core::app::error::{Result, TingError};
 use crate::core::task_queue::{Task, TaskPayload};
 use crate::db::models::TaskRecord;
@@ -17,10 +18,11 @@ impl PluginHostGateway {
     ) -> Result<Value> {
         let task_type = required_string_param(params, "task_type")?;
         if matches!(task_type.as_str(), "library_scan" | "write_metadata") {
-            return Err(TingError::PermissionDenied(format!(
-                "Task type {} is reserved for core workflows",
-                task_type
-            )));
+            return Err(TingError::permission(
+                AccessErrorKind::ResourceDenied,
+                "tasks_create::permission",
+                format!("Task type {} is reserved for core workflows", task_type),
+            ));
         }
 
         let handlers = self
@@ -31,15 +33,21 @@ impl PluginHostGateway {
             .iter()
             .any(|handler| handler.registration.plugin_id == plugin_id)
         {
-            return Err(TingError::NotFound(format!(
-                "Plugin {} has no task_handler for task type {}",
-                plugin_id, task_type
-            )));
+            return Err(TingError::not_found(
+                LookupErrorKind::Plugin,
+                "tasks_create::not_found",
+                format!(
+                    "Plugin {} has no task_handler for task type {}",
+                    plugin_id, task_type
+                ),
+            ));
         }
 
         let data = params.get("data").cloned().unwrap_or(Value::Null);
         if data.to_string().len() > 1024 * 1024 {
-            return Err(TingError::ResourceLimitExceeded(
+            return Err(TingError::resource_limit(
+                LimitErrorKind::Concurrency,
+                "tasks_create::resource_limit",
                 "Plugin task data exceeds 1 MiB".into(),
             ));
         }
@@ -104,14 +112,18 @@ impl PluginHostGateway {
         let record = self.task_queue.get_task(&task_id).await?;
         ensure_task_owner(&record, plugin_id, user)?;
         if matches!(record.status.as_str(), "completed" | "failed" | "cancelled") {
-            return Err(TingError::InvalidRequest(
+            return Err(TingError::invalid_request(
+                InputErrorKind::InvalidValue,
+                "tasks_report_progress::invalid_request",
                 "Cannot report progress for a terminal task".into(),
             ));
         }
         let message = string_param(params, "message");
         let message_key = string_param(params, "message_key");
         if message.is_some() && message_key.is_some() {
-            return Err(TingError::InvalidRequest(
+            return Err(TingError::invalid_request(
+                InputErrorKind::InvalidValue,
+                "tasks_report_progress::invalid_request",
                 "Choose message or message_key, not both".into(),
             ));
         }
@@ -186,7 +198,9 @@ fn ensure_task_owner(record: &TaskRecord, plugin_id: &str, user: &PluginHostUser
         .as_deref()
         .and_then(|payload| serde_json::from_str::<TaskPayload>(payload).ok());
     let Some(TaskPayload::Custom { data, .. }) = payload else {
-        return Err(TingError::PermissionDenied(
+        return Err(TingError::permission(
+            AccessErrorKind::ResourceDenied,
+            "ensure_task_owner::permission",
             "Task is not owned by a plugin".into(),
         ));
     };
@@ -199,7 +213,9 @@ fn ensure_task_owner(record: &TaskRecord, plugin_id: &str, user: &PluginHostUser
         .and_then(Value::as_str)
         .unwrap_or_default();
     if owner != plugin_id || owner_user != user.id {
-        return Err(TingError::PermissionDenied(
+        return Err(TingError::permission(
+            AccessErrorKind::ResourceDenied,
+            "ensure_task_owner::permission",
             "Plugin cannot access this task".into(),
         ));
     }
@@ -207,5 +223,8 @@ fn ensure_task_owner(record: &TaskRecord, plugin_id: &str, user: &PluginHostUser
 }
 
 fn task_record_value(record: TaskRecord) -> Value {
-    serde_json::to_value(record).unwrap_or_else(|_| serde_json::json!({}))
+    let failure = record.failure();
+    let mut value = serde_json::to_value(record).unwrap_or_else(|_| serde_json::json!({}));
+    value["error"] = serde_json::to_value(failure).unwrap_or(Value::Null);
+    value
 }

@@ -5,6 +5,7 @@ use crate::api::models::{
 };
 use crate::api::require_admin;
 use crate::api::state::AppState;
+use crate::core::app::error::LookupErrorKind;
 use crate::core::app::error::{Result, TingError};
 use crate::db::repository::Repository;
 use axum::{
@@ -24,19 +25,37 @@ pub async fn cache_chapter(
         .chapter_repo
         .find_by_id(&chapter_id)
         .await?
-        .ok_or_else(|| TingError::NotFound(format!("Chapter {} not found", chapter_id)))?;
+        .ok_or_else(|| {
+            TingError::not_found(
+                LookupErrorKind::Chapter,
+                "cache_chapter::not_found",
+                format!("Chapter {} not found", chapter_id),
+            )
+        })?;
 
     let book = state
         .book_repo
         .find_by_id(&chapter.book_id)
         .await?
-        .ok_or_else(|| TingError::NotFound(format!("Book {} not found", chapter.book_id)))?;
+        .ok_or_else(|| {
+            TingError::not_found(
+                LookupErrorKind::Chapter,
+                "cache_chapter::not_found",
+                format!("Book {} not found", chapter.book_id),
+            )
+        })?;
 
     let library = state
         .library_repo
         .find_by_id(&book.library_id)
         .await?
-        .ok_or_else(|| TingError::NotFound(format!("Library {} not found", book.library_id)))?;
+        .ok_or_else(|| {
+            TingError::not_found(
+                LookupErrorKind::Book,
+                "cache_chapter::not_found",
+                format!("Library {} not found", book.library_id),
+            )
+        })?;
 
     if library.library_type == "local" {
         return Ok(Json(CacheOperationResponse {
@@ -200,8 +219,14 @@ pub async fn delete_chapter_cache(
         .delete_cache(&chapter_id)
         .await
         .map_err(|e| match e {
-            crate::cache::CacheError::NotFound(_) => {
-                TingError::NotFound(format!("Cache for chapter {} not found", chapter_id))
+            crate::cache::CacheError::NotFound { .. } => {
+                let message = format!("Cache for chapter {} not found", chapter_id);
+                TingError::not_found(
+                    LookupErrorKind::Chapter,
+                    "delete_chapter_cache::not_found",
+                    message,
+                )
+                .with_source(anyhow::anyhow!(e))
             }
             _ => TingError::IoError(std::io::Error::other(format!(
                 "Failed to delete cache: {}",

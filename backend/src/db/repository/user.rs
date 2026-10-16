@@ -1,3 +1,4 @@
+use crate::core::app::error::InputErrorKind;
 use crate::core::app::error::{Result, TingError};
 use crate::db::manager::DatabaseManager;
 use crate::db::models::{User, UserSettings};
@@ -51,7 +52,9 @@ impl UserRepository {
     /// Create a user together with its initial settings in one transaction.
     pub async fn create_with_settings(&self, user: &User, settings: &UserSettings) -> Result<()> {
         if user.id != settings.user_id {
-            return Err(TingError::ValidationError(
+            return Err(TingError::validation(
+                InputErrorKind::OutOfRange,
+                "create_with_settings::validation",
                 "Initial user settings must belong to the user being created".to_string(),
             ));
         }

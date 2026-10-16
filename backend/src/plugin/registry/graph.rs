@@ -1,5 +1,6 @@
 use super::super::types::{PluginId, PluginMetadata};
 use super::PluginRegistry;
+use crate::core::app::error::DependencyErrorKind;
 use crate::core::app::error::{Result, TingError};
 use semver::{Version, VersionReq};
 use std::collections::HashMap;
@@ -37,11 +38,15 @@ impl PluginRegistry {
         }
 
         if !missing_deps.is_empty() {
-            return Err(TingError::DependencyError(format!(
-                "Missing or incompatible dependencies for plugin {}: {}",
-                metadata.name,
-                missing_deps.join(", ")
-            )));
+            return Err(TingError::dependency(
+                DependencyErrorKind::Missing,
+                "check_dependencies::dependency",
+                format!(
+                    "Missing or incompatible dependencies for plugin {}: {}",
+                    metadata.name,
+                    missing_deps.join(", ")
+                ),
+            ));
         }
 
         Ok(())
@@ -262,25 +267,37 @@ impl PluginRegistry {
             for dep_id in dep_ids {
                 // Verify dependency exists
                 if !self.plugins.contains_key(dep_id) {
-                    return Err(TingError::DependencyError(format!(
-                        "Plugin {} depends on non-existent plugin {}",
-                        plugin_id, dep_id
-                    )));
+                    return Err(TingError::dependency(
+                        DependencyErrorKind::Missing,
+                        "validate_dependency_graph::dependency",
+                        format!(
+                            "Plugin {} depends on non-existent plugin {}",
+                            plugin_id, dep_id
+                        ),
+                    ));
                 }
 
                 // Verify reverse dependency is recorded
                 if let Some(dependents) = self.dependents.get(dep_id) {
                     if !dependents.contains(plugin_id) {
-                        return Err(TingError::DependencyError(format!(
-                            "Dependency graph inconsistency: {} -> {} not in reverse map",
-                            plugin_id, dep_id
-                        )));
+                        return Err(TingError::dependency(
+                            DependencyErrorKind::Missing,
+                            "validate_dependency_graph::dependency",
+                            format!(
+                                "Dependency graph inconsistency: {} -> {} not in reverse map",
+                                plugin_id, dep_id
+                            ),
+                        ));
                     }
                 } else {
-                    return Err(TingError::DependencyError(format!(
-                        "Dependency graph inconsistency: {} has no dependents entry",
-                        dep_id
-                    )));
+                    return Err(TingError::dependency(
+                        DependencyErrorKind::Missing,
+                        "validate_dependency_graph::dependency",
+                        format!(
+                            "Dependency graph inconsistency: {} has no dependents entry",
+                            dep_id
+                        ),
+                    ));
                 }
             }
         }
@@ -303,10 +320,11 @@ impl PluginRegistry {
                 if !visited.get(dep_id).copied().unwrap_or(false) {
                     self.detect_cycle(dep_id, visited, rec_stack)?;
                 } else if rec_stack.get(dep_id).copied().unwrap_or(false) {
-                    return Err(TingError::DependencyError(format!(
-                        "Circular dependency detected: {} -> {}",
-                        id, dep_id
-                    )));
+                    return Err(TingError::dependency(
+                        DependencyErrorKind::Missing,
+                        "detect_cycle::dependency",
+                        format!("Circular dependency detected: {} -> {}", id, dep_id),
+                    ));
                 }
             }
         }
@@ -331,7 +349,9 @@ impl PluginRegistry {
                 if !visited.get(dep_id).copied().unwrap_or(false) {
                     self.topological_sort(dep_id, visited, rec_stack, result)?;
                 } else if rec_stack.get(dep_id).copied().unwrap_or(false) {
-                    return Err(TingError::DependencyError(
+                    return Err(TingError::dependency(
+                        DependencyErrorKind::Missing,
+                        "topological_sort::dependency",
                         "Circular dependency detected during load order calculation".to_string(),
                     ));
                 }

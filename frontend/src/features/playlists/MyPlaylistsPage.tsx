@@ -1,3 +1,4 @@
+import { apiErrorMessage } from '../../core/api/errors';
 import React, { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router';
 import { useTranslation } from 'react-i18next';
@@ -208,7 +209,7 @@ const MyPlaylistsPage: React.FC = () => {
       navigate(`/playlists/${res.data.id}`);
     } catch (err) {
       console.error('Failed to create playlist', err);
-      alert(t('playlists.createFailed'));
+      alert(apiErrorMessage(err, t('playlists.createFailed')));
     } finally {
       setSaving(false);
     }

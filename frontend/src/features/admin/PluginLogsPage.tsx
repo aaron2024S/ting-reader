@@ -1,3 +1,4 @@
+import { apiErrorMessage } from '../../core/api/errors';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate, useParams } from 'react-router';
@@ -91,7 +92,7 @@ const PluginLogsPage: React.FC = () => {
       setError('');
     } catch (requestError) {
       console.error('Failed to fetch plugin logs', requestError);
-      setError(t('pluginLogs.loadFailed'));
+      setError(apiErrorMessage(requestError, t('pluginLogs.loadFailed')));
     } finally {
       setLoading(false);
     }

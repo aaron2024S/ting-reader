@@ -2,6 +2,7 @@ import { useEffect, useRef, useCallback, useState } from 'react';
 import { useAuthStore } from '../stores/authStore';
 import { usePlayerStore } from '../stores/playerStore';
 import { getRuntimeBaseUrl } from '../utils/runtimeUrl';
+import type { ApiErrorBody } from '../api/errors';
 
 interface ProgressUpdate {
   type: 'progress_updated';
@@ -11,7 +12,7 @@ interface ProgressUpdate {
   updated_at: string;
 }
 
-interface ServerError {
+interface ServerError extends ApiErrorBody {
   type: 'error';
   message: string;
 }

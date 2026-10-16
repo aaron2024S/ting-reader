@@ -1,3 +1,6 @@
+use crate::core::app::error::{
+    AccessErrorKind, DeadlineErrorKind, LookupErrorKind, PluginErrorKind,
+};
 use crate::plugin::types::schema::validate_payload;
 use serde_json::Value;
 use std::sync::Arc;
@@ -28,11 +31,17 @@ impl PluginManager {
         limits: crate::plugin::host_api::resources::ResourceLimits,
     ) -> Result<std::sync::Arc<crate::plugin::host_api::resources::ResourceScope>> {
         let registry = self.registry.read().await;
-        let entry = registry
-            .get(id)
-            .ok_or_else(|| TingError::PluginNotFound(id.clone()))?;
+        let entry = registry.get(id).ok_or_else(|| {
+            TingError::plugin_not_found(
+                LookupErrorKind::Plugin,
+                "resource_scope::plugin_not_found",
+                id.clone(),
+            )
+        })?;
         if !matches!(entry.state, PluginState::Active | PluginState::Loaded) {
-            return Err(TingError::PluginExecutionError(
+            return Err(TingError::plugin_execution(
+                PluginErrorKind::Unavailable,
+                "resource_scope::plugin_execution",
                 "Plugin is unavailable".into(),
             ));
         }
@@ -58,11 +67,15 @@ impl PluginManager {
         params: Value,
         context: &PluginInvocationContext,
     ) -> Result<Value> {
-        let capability = {
+        let (capability, stable_plugin_id) = {
             let registry = self.registry.read().await;
-            let entry = registry
-                .get(id)
-                .ok_or_else(|| TingError::PluginNotFound(id.clone()))?;
+            let entry = registry.get(id).ok_or_else(|| {
+                TingError::plugin_not_found(
+                    LookupErrorKind::Plugin,
+                    "invoke_capability::plugin_not_found",
+                    id.clone(),
+                )
+            })?;
             if let Some(scope) = &context.resources {
                 let principal = context.user.as_ref().map(|user| user.id.as_str());
                 let authorization = if matches!(operation, "close" | "cancel") {
@@ -70,30 +83,60 @@ impl PluginManager {
                 } else {
                     scope.authorize(id, entry.generation, principal)
                 };
-                authorization
-                    .map_err(|error| TingError::PluginExecutionError(error.to_string()))?;
+                authorization.map_err(|error| {
+                    let message = error.to_string();
+                    let failure = match error.code {
+                        ting_plugin_contract::protocol::PluginErrorCode::PermissionDenied => {
+                            TingError::permission(
+                                AccessErrorKind::ResourceDenied,
+                                "plugin.authorize_resources",
+                                message,
+                            )
+                        }
+                        ting_plugin_contract::protocol::PluginErrorCode::Cancelled => {
+                            TingError::timeout(
+                                DeadlineErrorKind::Cancelled,
+                                "plugin.authorize_resources",
+                                message,
+                            )
+                        }
+                        _ => TingError::plugin_execution(
+                            PluginErrorKind::Runtime,
+                            "plugin.authorize_resources",
+                            message,
+                        ),
+                    };
+                    failure.with_source(anyhow::anyhow!(error))
+                })?;
             }
             if matches!(entry.state, PluginState::Failed | PluginState::Unloaded) {
-                return Err(TingError::PluginExecutionError(
+                return Err(TingError::plugin_execution(
+                    PluginErrorKind::Unavailable,
+                    "invoke_capability::plugin_execution",
                     "Plugin is unavailable".into(),
                 ));
             }
-            entry
+            let capability = entry
                 .metadata
                 .capabilities
                 .iter()
                 .find(|cap| cap.id() == capability_id)
                 .cloned()
                 .ok_or_else(|| {
-                    TingError::PluginExecutionError(format!(
-                        "Undeclared capability: {capability_id}"
-                    ))
-                })?
+                    TingError::plugin_execution(
+                        PluginErrorKind::AbiMismatch,
+                        "invoke_capability::plugin_execution",
+                        format!("Undeclared capability: {capability_id}"),
+                    )
+                })?;
+            (capability, entry.metadata.id.clone())
         };
         if !capability.supports(operation) {
-            return Err(TingError::PluginExecutionError(format!(
-                "Capability {capability_id} does not declare operation {operation}"
-            )));
+            return Err(TingError::plugin_execution(
+                PluginErrorKind::AbiMismatch,
+                "invoke_capability::plugin_execution",
+                format!("Capability {capability_id} does not declare operation {operation}"),
+            ));
         }
         let output_schema = validate_capability_input(&capability, operation, &params)?;
         let request = params.clone();
@@ -111,21 +154,31 @@ impl PluginManager {
         }
         let raw = self
             .invoke_plugin(id, operation, params, &invocation)
-            .await?;
-        let output = match serde_json::from_value::<CallResult<Value>>(raw)
-            .map_err(|_| TingError::PluginExecutionError("Invalid plugin result envelope".into()))?
-        {
-            CallResult::Success(success) => success.data,
-            CallResult::Failure(failure) => {
-                failure.error.validate().map_err(|_| {
-                    TingError::PluginExecutionError("Invalid plugin error envelope".into())
-                })?;
-                return Err(TingError::PluginExecutionError(format!(
-                    "Plugin reported {:?}: {}",
-                    failure.error.code, failure.error.message
-                )));
-            }
-        };
+            .await
+            .map_err(|error| {
+                error.bind_plugin_error(&stable_plugin_id, capability_id, operation)
+            })?;
+        let output =
+            match serde_json::from_value::<CallResult<Value>>(raw).map_err(|_| {
+                TingError::plugin_execution(
+                    PluginErrorKind::InvalidOutput,
+                    "invoke_capability::plugin_execution",
+                    "Invalid plugin result envelope".into(),
+                )
+            })? {
+                CallResult::Success(success) => success.data,
+                CallResult::Failure(failure) => {
+                    failure.error.validate().map_err(|_| {
+                        TingError::plugin_execution(
+                            PluginErrorKind::InvalidOutput,
+                            "invoke_capability::plugin_execution",
+                            "Invalid plugin error envelope".into(),
+                        )
+                    })?;
+                    return Err(TingError::PluginReported(Box::new(failure.error))
+                        .bind_plugin_error(&stable_plugin_id, capability_id, operation));
+                }
+            };
         if let Some(schema) = output_schema {
             validate_payload(&schema, &output, "output")?;
         }
@@ -143,14 +196,21 @@ impl PluginManager {
     ) -> Result<Value> {
         let instance = {
             let registry = self.registry.read().await;
-            let entry = registry
-                .get(id)
-                .ok_or_else(|| TingError::PluginNotFound(id.clone()))?;
+            let entry = registry.get(id).ok_or_else(|| {
+                TingError::plugin_not_found(
+                    LookupErrorKind::Plugin,
+                    "invoke_plugin::plugin_not_found",
+                    id.clone(),
+                )
+            })?;
             entry.instance.clone()
         };
 
         let started_at = Instant::now();
-        let result = instance.invoke(method, params, context).await;
+        let result = instance
+            .invoke(method, params, context)
+            .await
+            .map_err(Arc::new);
 
         if result.is_err() && !instance.is_available() {
             let mut registry = self.registry.write().await;
@@ -158,7 +218,7 @@ impl PluginManager {
                 // A reload may have installed a different generation in flight.
                 if Arc::ptr_eq(&entry.instance, &instance) {
                     entry.set_state(PluginState::Failed);
-                    entry.load_error = result.as_ref().err().map(ToString::to_string);
+                    entry.load_error = result.as_ref().err().cloned();
                     entry.cancel_resource_scopes();
                 }
             }
@@ -168,11 +228,13 @@ impl PluginManager {
             id,
             method,
             started_at.elapsed(),
-            result.as_ref().err(),
+            result.as_ref().err().map(Arc::as_ref),
             PluginLogLevel::Debug,
         )
         .await;
-        result.map_err(TingError::mark_plugin_execution_logged)
+        result
+            .map_err(|error| Arc::try_unwrap(error).unwrap_or_else(TingError::Shared))
+            .map_err(TingError::mark_plugin_execution_logged)
     }
 
     /// Invoke a declared metadata operation using the shared contract.
@@ -184,27 +246,39 @@ impl PluginManager {
     ) -> Result<Value> {
         let (capability_id, method_name) = {
             let registry = self.registry.read().await;
-            let entry = registry
-                .get(id)
-                .ok_or_else(|| TingError::PluginNotFound(id.clone()))?;
+            let entry = registry.get(id).ok_or_else(|| {
+                TingError::plugin_not_found(
+                    LookupErrorKind::Plugin,
+                    "invoke_metadata::plugin_not_found",
+                    id.clone(),
+                )
+            })?;
             let metadata_provider = entry
                 .metadata
                 .effective_capabilities()
                 .into_iter()
                 .find(|capability| matches!(capability, PluginCapability::MetadataProvider(_)))
                 .ok_or_else(|| {
-                    TingError::PluginExecutionError(format!(
-                        "Plugin {} does not declare metadata_provider capability",
-                        id
-                    ))
+                    TingError::plugin_execution(
+                        PluginErrorKind::AbiMismatch,
+                        "invoke_metadata::plugin_execution",
+                        format!(
+                            "Plugin {} does not declare metadata_provider capability",
+                            id
+                        ),
+                    )
                 })?;
             let method_name = operation.as_str();
             if !metadata_provider.supports(method_name) {
-                return Err(TingError::PluginExecutionError(format!(
-                    "Capability {} does not declare operation {}",
-                    metadata_provider.id(),
-                    method_name
-                )));
+                return Err(TingError::plugin_execution(
+                    PluginErrorKind::AbiMismatch,
+                    "invoke_metadata::plugin_execution",
+                    format!(
+                        "Capability {} does not declare operation {}",
+                        metadata_provider.id(),
+                        method_name
+                    ),
+                ));
             }
             (metadata_provider.id().to_owned(), method_name)
         };
@@ -235,8 +309,7 @@ impl PluginManager {
 
         match error {
             Some(error) => {
-                let error_type = error.to_string();
-                entry.stats.record_failure(Some(error_type.as_str()));
+                entry.stats.record_failure(Some(error.error_type()));
             }
             None => {
                 entry.stats.record_success(duration_ms);
@@ -252,6 +325,8 @@ impl PluginManager {
             "duration_ms": duration_ms,
             "status": if failed { "error" } else { "success" },
             "error": error_message,
+            "error_type": error.map(TingError::error_type),
+            "details": error.map(TingError::diagnostic_details),
         });
         emit_plugin_event(
             &metadata,
@@ -278,7 +353,11 @@ fn validate_capability_input(
 ) -> Result<Option<Value>> {
     let field = |name: &str| {
         params.get(name).ok_or_else(|| {
-            TingError::PluginExecutionError(format!("Missing capability input field: {name}"))
+            TingError::plugin_execution(
+                PluginErrorKind::AbiMismatch,
+                "validate_capability_input::plugin_execution",
+                format!("Missing capability input field: {name}"),
+            )
         })
     };
     match capability {
@@ -287,17 +366,29 @@ fn validate_capability_input(
                 "search" => {
                     let request: SearchRequest =
                         serde_json::from_value(params.clone()).map_err(|error| {
-                            TingError::PluginExecutionError(format!(
-                                "Invalid search request: {error}"
-                            ))
+                            let message = format!("Invalid search request: {error}");
+                            TingError::plugin_execution(
+                                PluginErrorKind::InvalidOutput,
+                                "validate_capability_input::plugin_execution",
+                                message,
+                            )
+                            .with_source(anyhow::anyhow!(error))
                         })?;
                     request.validate().map_err(|error| {
-                        TingError::PluginExecutionError(format!("Invalid search request: {error}"))
+                        let message = format!("Invalid search request: {error}");
+                        TingError::plugin_execution(
+                            PluginErrorKind::InvalidOutput,
+                            "validate_capability_input::plugin_execution",
+                            message,
+                        )
+                        .with_source(anyhow::anyhow!(error))
                     })?;
                     if request.context.as_ref().is_some_and(|context| {
                         !matches!(context.mode, SearchMode::Search) && !cap.aggregate_auto_scrape
                     }) {
-                        return Err(TingError::PluginExecutionError(
+                        return Err(TingError::plugin_execution(
+                            PluginErrorKind::Runtime,
+                            "validate_capability_input::plugin_execution",
                             "Aggregate search context requires aggregate_auto_scrape".into(),
                         ));
                     }
@@ -324,10 +415,11 @@ fn validate_capability_input(
                             }),
                         };
                         if !present {
-                            return Err(TingError::PluginExecutionError(format!(
-                                "Required search field {} is empty",
-                                field.key
-                            )));
+                            return Err(TingError::plugin_execution(
+                                PluginErrorKind::Runtime,
+                                "validate_capability_input::plugin_execution",
+                                format!("Required search field {} is empty", field.key),
+                            ));
                         }
                     }
                     if request
@@ -343,7 +435,9 @@ fn validate_capability_input(
                             .as_deref()
                             .is_some_and(|text| text.trim().is_empty())
                     {
-                        return Err(TingError::PluginExecutionError(
+                        return Err(TingError::plugin_execution(
+                            PluginErrorKind::Runtime,
+                            "validate_capability_input::plugin_execution",
                             "Empty search fields must use null".into(),
                         ));
                     }
@@ -354,7 +448,9 @@ fn validate_capability_input(
                             "search filters",
                         )?;
                     } else if !request.filters.is_empty() {
-                        return Err(TingError::PluginExecutionError(
+                        return Err(TingError::plugin_execution(
+                            PluginErrorKind::AbiMismatch,
+                            "validate_capability_input::plugin_execution",
                             "Search filters are not declared by this capability".into(),
                         ));
                     }
@@ -362,49 +458,85 @@ fn validate_capability_input(
                 "detail" => {
                     let reference: SourceRef =
                         serde_json::from_value(params.clone()).map_err(|error| {
-                            TingError::PluginExecutionError(format!(
-                                "Invalid detail reference: {error}"
-                            ))
+                            let message = format!("Invalid detail reference: {error}");
+                            TingError::plugin_execution(
+                                PluginErrorKind::InvalidOutput,
+                                "validate_capability_input::plugin_execution",
+                                message,
+                            )
+                            .with_source(anyhow::anyhow!(error))
                         })?;
                     reference.validate().map_err(|error| {
-                        TingError::PluginExecutionError(format!(
-                            "Invalid detail reference: {error}"
-                        ))
+                        let message = format!("Invalid detail reference: {error}");
+                        TingError::plugin_execution(
+                            PluginErrorKind::InvalidOutput,
+                            "validate_capability_input::plugin_execution",
+                            message,
+                        )
+                        .with_source(anyhow::anyhow!(error))
                     })?;
                 }
                 "list_chapters" => {
                     let page: ChapterListRequest =
                         serde_json::from_value(params.clone()).map_err(|error| {
-                            TingError::PluginExecutionError(format!(
-                                "Invalid chapter list request: {error}"
-                            ))
+                            let message = format!("Invalid chapter list request: {error}");
+                            TingError::plugin_execution(
+                                PluginErrorKind::InvalidOutput,
+                                "validate_capability_input::plugin_execution",
+                                message,
+                            )
+                            .with_source(anyhow::anyhow!(error))
                         })?;
                     page.validate().map_err(|error| {
-                        TingError::PluginExecutionError(format!(
-                            "Invalid chapter list request: {error}"
-                        ))
+                        let message = format!("Invalid chapter list request: {error}");
+                        TingError::plugin_execution(
+                            PluginErrorKind::InvalidOutput,
+                            "validate_capability_input::plugin_execution",
+                            message,
+                        )
+                        .with_source(anyhow::anyhow!(error))
                     })?;
                 }
                 "chapter_detail" | "resolve_audio" => {
                     let chapter: ChapterId =
                         serde_json::from_value(params.clone()).map_err(|error| {
-                            TingError::PluginExecutionError(format!(
-                                "Invalid chapter request: {error}"
-                            ))
+                            let message = format!("Invalid chapter request: {error}");
+                            TingError::plugin_execution(
+                                PluginErrorKind::InvalidOutput,
+                                "validate_capability_input::plugin_execution",
+                                message,
+                            )
+                            .with_source(anyhow::anyhow!(error))
                         })?;
                     chapter.validate().map_err(|error| {
-                        TingError::PluginExecutionError(format!("Invalid chapter request: {error}"))
+                        let message = format!("Invalid chapter request: {error}");
+                        TingError::plugin_execution(
+                            PluginErrorKind::InvalidOutput,
+                            "validate_capability_input::plugin_execution",
+                            message,
+                        )
+                        .with_source(anyhow::anyhow!(error))
                     })?;
                 }
                 "fetch_cover" => {
                     let request: FetchCoverRequest = serde_json::from_value(params.clone())
                         .map_err(|error| {
-                            TingError::PluginExecutionError(format!(
-                                "Invalid cover request: {error}"
-                            ))
+                            let message = format!("Invalid cover request: {error}");
+                            TingError::plugin_execution(
+                                PluginErrorKind::InvalidOutput,
+                                "validate_capability_input::plugin_execution",
+                                message,
+                            )
+                            .with_source(anyhow::anyhow!(error))
                         })?;
                     request.source.validate().map_err(|error| {
-                        TingError::PluginExecutionError(format!("Invalid cover request: {error}"))
+                        let message = format!("Invalid cover request: {error}");
+                        TingError::plugin_execution(
+                            PluginErrorKind::InvalidOutput,
+                            "validate_capability_input::plugin_execution",
+                            message,
+                        )
+                        .with_source(anyhow::anyhow!(error))
                     })?;
                 }
                 _ => {}
@@ -416,23 +548,41 @@ fn validate_capability_input(
                 "operation": operation, "input": params
             }))
             .map_err(|error| {
-                TingError::PluginExecutionError(format!("Invalid format call: {error}"))
+                let message = format!("Invalid format call: {error}");
+                TingError::plugin_execution(
+                    PluginErrorKind::InvalidOutput,
+                    "validate_capability_input::plugin_execution",
+                    message,
+                )
+                .with_source(anyhow::anyhow!(error))
             })?;
             call.validate(cap).map_err(|error| {
-                TingError::PluginExecutionError(format!("Invalid format call: {error}"))
+                let message = format!("Invalid format call: {error}");
+                TingError::plugin_execution(
+                    PluginErrorKind::InvalidOutput,
+                    "validate_capability_input::plugin_execution",
+                    message,
+                )
+                .with_source(anyhow::anyhow!(error))
             })?;
             Ok(None)
         }
         PluginCapability::ToolProvider(cap) => {
             let name = field("tool_name")?.as_str().ok_or_else(|| {
-                TingError::PluginExecutionError("tool_name must be a string".into())
+                TingError::plugin_execution(
+                    PluginErrorKind::Runtime,
+                    "validate_capability_input::plugin_execution",
+                    "tool_name must be a string".into(),
+                )
             })?;
             let tool = cap
                 .tools
                 .iter()
                 .find(|tool| tool.name == name)
                 .ok_or_else(|| {
-                    TingError::PluginExecutionError(
+                    TingError::plugin_execution(
+                        PluginErrorKind::AbiMismatch,
+                        "validate_capability_input::plugin_execution",
                         "Tool is not declared by this capability".into(),
                     )
                 })?;
@@ -441,14 +591,20 @@ fn validate_capability_input(
         }
         PluginCapability::TaskHandler(cap) => {
             let name = field("task_type")?.as_str().ok_or_else(|| {
-                TingError::PluginExecutionError("task_type must be a string".into())
+                TingError::plugin_execution(
+                    PluginErrorKind::Runtime,
+                    "validate_capability_input::plugin_execution",
+                    "task_type must be a string".into(),
+                )
             })?;
             let task = cap
                 .tasks
                 .iter()
                 .find(|task| task.task_type == name)
                 .ok_or_else(|| {
-                    TingError::PluginExecutionError(
+                    TingError::plugin_execution(
+                        PluginErrorKind::AbiMismatch,
+                        "validate_capability_input::plugin_execution",
                         "Task type is not declared by this capability".into(),
                     )
                 })?;
@@ -456,15 +612,21 @@ fn validate_capability_input(
             Ok(Some(task.output_schema.clone()))
         }
         PluginCapability::EventHandler(cap) => {
-            let name = field("event")?
-                .as_str()
-                .ok_or_else(|| TingError::PluginExecutionError("event must be a string".into()))?;
+            let name = field("event")?.as_str().ok_or_else(|| {
+                TingError::plugin_execution(
+                    PluginErrorKind::Runtime,
+                    "validate_capability_input::plugin_execution",
+                    "event must be a string".into(),
+                )
+            })?;
             let event = cap
                 .events
                 .iter()
                 .find(|event| event.name == name)
                 .ok_or_else(|| {
-                    TingError::PluginExecutionError(
+                    TingError::plugin_execution(
+                        PluginErrorKind::AbiMismatch,
+                        "validate_capability_input::plugin_execution",
                         "Event is not declared by this capability".into(),
                     )
                 })?;
@@ -485,17 +647,37 @@ fn validate_capability_output(
         match operation {
             "search" => {
                 let page: SearchPage = serde_json::from_value(output.clone()).map_err(|error| {
-                    TingError::PluginExecutionError(format!("Invalid search page: {error}"))
+                    let message = format!("Invalid search page: {error}");
+                    TingError::plugin_execution(
+                        PluginErrorKind::InvalidOutput,
+                        "validate_capability_output::plugin_execution",
+                        message,
+                    )
+                    .with_source(anyhow::anyhow!(error))
                 })?;
                 page.validate().map_err(|error| {
-                    TingError::PluginExecutionError(format!("Invalid search page: {error}"))
+                    let message = format!("Invalid search page: {error}");
+                    TingError::plugin_execution(
+                        PluginErrorKind::InvalidOutput,
+                        "validate_capability_output::plugin_execution",
+                        message,
+                    )
+                    .with_source(anyhow::anyhow!(error))
                 })?;
                 let requested: SearchRequest =
                     serde_json::from_value(request.clone()).map_err(|error| {
-                        TingError::PluginExecutionError(format!("Invalid search request: {error}"))
+                        let message = format!("Invalid search request: {error}");
+                        TingError::plugin_execution(
+                            PluginErrorKind::InvalidOutput,
+                            "validate_capability_output::plugin_execution",
+                            message,
+                        )
+                        .with_source(anyhow::anyhow!(error))
                     })?;
                 if page.page != requested.page {
-                    return Err(TingError::PluginExecutionError(
+                    return Err(TingError::plugin_execution(
+                        PluginErrorKind::Runtime,
+                        "validate_capability_output::plugin_execution",
                         "Search page must match the requested page".into(),
                     ));
                 }
@@ -505,7 +687,9 @@ fn validate_capability_output(
                             && item.chapter_titles.len() != requested.chapter_candidates.len()
                     })
                 {
-                    return Err(TingError::PluginExecutionError(
+                    return Err(TingError::plugin_execution(
+                        PluginErrorKind::Runtime,
+                        "validate_capability_output::plugin_execution",
                         "Cleaned chapter titles must match the supplied candidates".into(),
                     ));
                 }
@@ -513,28 +697,58 @@ fn validate_capability_output(
             "detail" => {
                 let result: ScraperResult =
                     serde_json::from_value(output.clone()).map_err(|error| {
-                        TingError::PluginExecutionError(format!("Invalid detail result: {error}"))
+                        let message = format!("Invalid detail result: {error}");
+                        TingError::plugin_execution(
+                            PluginErrorKind::InvalidOutput,
+                            "validate_capability_output::plugin_execution",
+                            message,
+                        )
+                        .with_source(anyhow::anyhow!(error))
                     })?;
                 result.validate().map_err(|error| {
-                    TingError::PluginExecutionError(format!("Invalid detail result: {error}"))
+                    let message = format!("Invalid detail result: {error}");
+                    TingError::plugin_execution(
+                        PluginErrorKind::InvalidOutput,
+                        "validate_capability_output::plugin_execution",
+                        message,
+                    )
+                    .with_source(anyhow::anyhow!(error))
                 })?;
             }
             "list_chapters" => {
                 let page: ChapterPage =
                     serde_json::from_value(output.clone()).map_err(|error| {
-                        TingError::PluginExecutionError(format!("Invalid chapter page: {error}"))
+                        let message = format!("Invalid chapter page: {error}");
+                        TingError::plugin_execution(
+                            PluginErrorKind::InvalidOutput,
+                            "validate_capability_output::plugin_execution",
+                            message,
+                        )
+                        .with_source(anyhow::anyhow!(error))
                     })?;
                 page.validate().map_err(|error| {
-                    TingError::PluginExecutionError(format!("Invalid chapter page: {error}"))
+                    let message = format!("Invalid chapter page: {error}");
+                    TingError::plugin_execution(
+                        PluginErrorKind::InvalidOutput,
+                        "validate_capability_output::plugin_execution",
+                        message,
+                    )
+                    .with_source(anyhow::anyhow!(error))
                 })?;
                 let requested: ChapterListRequest = serde_json::from_value(request.clone())
                     .map_err(|error| {
-                        TingError::PluginExecutionError(format!(
-                            "Invalid chapter list request: {error}"
-                        ))
+                        let message = format!("Invalid chapter list request: {error}");
+                        TingError::plugin_execution(
+                            PluginErrorKind::InvalidOutput,
+                            "validate_capability_output::plugin_execution",
+                            message,
+                        )
+                        .with_source(anyhow::anyhow!(error))
                     })?;
                 if page.page != requested.page {
-                    return Err(TingError::PluginExecutionError(
+                    return Err(TingError::plugin_execution(
+                        PluginErrorKind::Runtime,
+                        "validate_capability_output::plugin_execution",
                         "Chapter page must match the requested page".into(),
                     ));
                 }
@@ -542,28 +756,64 @@ fn validate_capability_output(
             "chapter_detail" => {
                 let detail: ChapterDetail =
                     serde_json::from_value(output.clone()).map_err(|error| {
-                        TingError::PluginExecutionError(format!("Invalid chapter detail: {error}"))
+                        let message = format!("Invalid chapter detail: {error}");
+                        TingError::plugin_execution(
+                            PluginErrorKind::InvalidOutput,
+                            "validate_capability_output::plugin_execution",
+                            message,
+                        )
+                        .with_source(anyhow::anyhow!(error))
                     })?;
                 detail.validate().map_err(|error| {
-                    TingError::PluginExecutionError(format!("Invalid chapter detail: {error}"))
+                    let message = format!("Invalid chapter detail: {error}");
+                    TingError::plugin_execution(
+                        PluginErrorKind::InvalidOutput,
+                        "validate_capability_output::plugin_execution",
+                        message,
+                    )
+                    .with_source(anyhow::anyhow!(error))
                 })?;
             }
             "resolve_audio" => {
                 let source: MediaSourceDescriptor = serde_json::from_value(output.clone())
                     .map_err(|error| {
-                        TingError::PluginExecutionError(format!("Invalid media source: {error}"))
+                        let message = format!("Invalid media source: {error}");
+                        TingError::plugin_execution(
+                            PluginErrorKind::InvalidOutput,
+                            "validate_capability_output::plugin_execution",
+                            message,
+                        )
+                        .with_source(anyhow::anyhow!(error))
                     })?;
                 source.validate().map_err(|error| {
-                    TingError::PluginExecutionError(format!("Invalid media source: {error}"))
+                    let message = format!("Invalid media source: {error}");
+                    TingError::plugin_execution(
+                        PluginErrorKind::InvalidOutput,
+                        "validate_capability_output::plugin_execution",
+                        message,
+                    )
+                    .with_source(anyhow::anyhow!(error))
                 })?;
             }
             "fetch_cover" => {
                 let cover: CoverAssetRef =
                     serde_json::from_value(output.clone()).map_err(|error| {
-                        TingError::PluginExecutionError(format!("Invalid cover resource: {error}"))
+                        let message = format!("Invalid cover resource: {error}");
+                        TingError::plugin_execution(
+                            PluginErrorKind::InvalidOutput,
+                            "validate_capability_output::plugin_execution",
+                            message,
+                        )
+                        .with_source(anyhow::anyhow!(error))
                     })?;
                 cover.validate().map_err(|error| {
-                    TingError::PluginExecutionError(format!("Invalid cover resource: {error}"))
+                    let message = format!("Invalid cover resource: {error}");
+                    TingError::plugin_execution(
+                        PluginErrorKind::InvalidOutput,
+                        "validate_capability_output::plugin_execution",
+                        message,
+                    )
+                    .with_source(anyhow::anyhow!(error))
                 })?;
             }
             _ => {}
@@ -574,17 +824,35 @@ fn validate_capability_output(
             "operation": operation, "input": request
         }))
         .map_err(|error| {
-            TingError::PluginExecutionError(format!("Invalid format request: {error}"))
+            let message = format!("Invalid format request: {error}");
+            TingError::plugin_execution(
+                PluginErrorKind::InvalidOutput,
+                "validate_capability_output::plugin_execution",
+                message,
+            )
+            .with_source(anyhow::anyhow!(error))
         })?;
         let response: FormatOutput = serde_json::from_value(serde_json::json!({
             "operation": operation,
             "data": output,
         }))
         .map_err(|error| {
-            TingError::PluginExecutionError(format!("Invalid format response: {error}"))
+            let message = format!("Invalid format response: {error}");
+            TingError::plugin_execution(
+                PluginErrorKind::InvalidOutput,
+                "validate_capability_output::plugin_execution",
+                message,
+            )
+            .with_source(anyhow::anyhow!(error))
         })?;
         response.validate_for(&call).map_err(|error| {
-            TingError::PluginExecutionError(format!("Invalid format response: {error}"))
+            let message = format!("Invalid format response: {error}");
+            TingError::plugin_execution(
+                PluginErrorKind::InvalidOutput,
+                "validate_capability_output::plugin_execution",
+                message,
+            )
+            .with_source(anyhow::anyhow!(error))
         })?;
     }
     Ok(())

@@ -1,5 +1,6 @@
 use crate::api::state::AppState;
 use crate::auth::middleware::AuthUser;
+use crate::core::app::error::{AccessErrorKind, InputErrorKind, LookupErrorKind};
 use crate::core::app::error::{Result, TingError};
 use crate::core::books::{BookmarkService, CreateBookmark};
 use crate::db::repository::{Repository, reading::ReadingRepository};
@@ -37,14 +38,22 @@ fn bookmarks<'a>(state: &'a AppState, user: &'a AuthUser) -> BookmarkService<'a>
 }
 async fn ensure_access(state: &AppState, user: &AuthUser, book: &str) -> Result<()> {
     if state.book_repo.find_by_id(book).await?.is_none() {
-        return Err(TingError::NotFound("Book not found".into()));
+        return Err(TingError::not_found(
+            LookupErrorKind::Book,
+            "ensure_access::not_found",
+            "Book not found".into(),
+        ));
     }
     if !state
         .book_repo
         .check_access(book, &user.id, user.role == "admin")
         .await?
     {
-        return Err(TingError::PermissionDenied("Book access denied".into()));
+        return Err(TingError::permission(
+            AccessErrorKind::ResourceDenied,
+            "ensure_access::permission",
+            "Book access denied".into(),
+        ));
     }
     Ok(())
 }
@@ -115,7 +124,9 @@ pub async fn mark_books(
     Json(request): Json<MarkBooksRequest>,
 ) -> Result<impl IntoResponse> {
     if request.book_ids.is_empty() || request.book_ids.len() > 200 {
-        return Err(TingError::InvalidRequest(
+        return Err(TingError::invalid_request(
+            InputErrorKind::InvalidValue,
+            "mark_books::invalid_request",
             "Select between 1 and 200 books".into(),
         ));
     }

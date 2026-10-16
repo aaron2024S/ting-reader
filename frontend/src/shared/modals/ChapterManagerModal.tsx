@@ -1,3 +1,4 @@
+import { apiErrorMessage } from '../../core/api/errors';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Loader2, Save } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -235,7 +236,7 @@ const ChapterManagerModal: React.FC<Props> = ({ book, bookId, initialChapters, o
       onClose();
     } catch (err) {
       console.error('保存章节失败', err);
-      alert(t('chapterManager.saveFailed'));
+      alert(apiErrorMessage(err, t('chapterManager.saveFailed')));
     } finally {
       setSaving(false);
     }
@@ -253,7 +254,7 @@ const ChapterManagerModal: React.FC<Props> = ({ book, bookId, initialChapters, o
       onClose();
     } catch (err) {
       console.error('移动章节失败', err);
-      alert(t('chapterManager.moveFailed'));
+      alert(apiErrorMessage(err, t('chapterManager.moveFailed')));
     } finally {
       setMoving(false);
     }

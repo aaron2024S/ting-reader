@@ -7,6 +7,7 @@
 //! - Database backup functionality
 //! - Error handling integration with TingError
 
+use crate::core::app::error::TaskErrorKind;
 use crate::core::app::error::{Result, TingError};
 use r2d2::{Pool, PooledConnection};
 use r2d2_sqlite::SqliteConnectionManager;
@@ -127,7 +128,11 @@ impl DatabaseManager {
             f(&conn)
         })
         .await
-        .map_err(|e| TingError::TaskError(format!("数据库任务执行失败: {}", e)))?
+        .map_err(|e| {
+            let message = format!("数据库任务执行失败: {}", e);
+            TingError::task(TaskErrorKind::Join, "execute::task", message)
+                .with_source(anyhow::anyhow!(e))
+        })?
     }
 
     /// Execute a database operation within a transaction
@@ -151,7 +156,11 @@ impl DatabaseManager {
             Ok(result)
         })
         .await
-        .map_err(|e| TingError::TaskError(format!("事务执行失败: {}", e)))?
+        .map_err(|e| {
+            let message = format!("事务执行失败: {}", e);
+            TingError::task(TaskErrorKind::Join, "transaction::task", message)
+                .with_source(anyhow::anyhow!(e))
+        })?
     }
 
     /// Execute database migrations
@@ -219,7 +228,11 @@ impl DatabaseManager {
             Ok(())
         })
         .await
-        .map_err(|e| TingError::TaskError(format!("Backup task panicked: {}", e)))?
+        .map_err(|e| {
+            let message = format!("Backup task panicked: {}", e);
+            TingError::task(TaskErrorKind::Join, "backup_async::task", message)
+                .with_source(anyhow::anyhow!(e))
+        })?
     }
 
     /// Get the database file path

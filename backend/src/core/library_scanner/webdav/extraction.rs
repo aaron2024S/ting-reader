@@ -1,5 +1,6 @@
 use super::super::LibraryScanner;
 use crate::core::StorageService;
+use crate::core::app::error::InputErrorKind;
 use crate::core::audio::{AudioService, metadata::AudioInput};
 use crate::db::models::Library;
 use crate::plugin::host_api::resources::{ResourceError, ResourceResult, ResourceSource};
@@ -144,7 +145,9 @@ impl LibraryScanner {
                 let mut bytes = Vec::new();
                 reader.take(64 * 1024 + 1).read_to_end(&mut bytes).await?;
                 if bytes.len() > 64 * 1024 {
-                    return Err(crate::core::app::error::TingError::InvalidRequest(
+                    return Err(crate::core::app::error::TingError::invalid_request(
+                        InputErrorKind::OutOfRange,
+                        "extract_webdav_metadata::invalid_request",
                         "STRM file is too large".into(),
                     ));
                 }
@@ -153,7 +156,9 @@ impl LibraryScanner {
                     .and_then(|value| url::Url::parse(value.trim()).ok())
                     .filter(|url| matches!(url.scheme(), "http" | "https"))
                     .ok_or_else(|| {
-                        crate::core::app::error::TingError::InvalidRequest(
+                        crate::core::app::error::TingError::invalid_request(
+                            InputErrorKind::InvalidValue,
+                            "extract_webdav_metadata::invalid_request",
                             "Invalid STRM URL".into(),
                         )
                     })?;

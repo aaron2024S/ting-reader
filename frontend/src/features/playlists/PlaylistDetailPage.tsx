@@ -1,3 +1,4 @@
+import { apiErrorMessage } from '../../core/api/errors';
 import React, { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router';
 import { useTranslation } from 'react-i18next';
@@ -204,7 +205,7 @@ const PlaylistDetailPage: React.FC = () => {
       setManageView('books');
     } catch (err) {
       console.error('Failed to save playlist items', err);
-      alert(t('common.saveFailed'));
+      alert(apiErrorMessage(err, t('common.saveFailed')));
     } finally {
       setSaving(false);
     }
@@ -224,7 +225,7 @@ const PlaylistDetailPage: React.FC = () => {
       setShowEditModal(false);
     } catch (err) {
       console.error('Failed to save playlist info', err);
-      alert(t('common.saveFailed'));
+      alert(apiErrorMessage(err, t('common.saveFailed')));
     } finally {
       setSaving(false);
     }
@@ -239,7 +240,7 @@ const PlaylistDetailPage: React.FC = () => {
       navigate('/playlists');
     } catch (err) {
       console.error('Failed to delete playlist', err);
-      alert(t('playlists.deleteFailed'));
+      alert(apiErrorMessage(err, t('playlists.deleteFailed')));
     }
   };
 

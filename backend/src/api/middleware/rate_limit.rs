@@ -1,3 +1,4 @@
+use crate::core::app::error::ErrorResponse;
 use axum::{
     Json,
     extract::{ConnectInfo, Request},
@@ -178,18 +179,21 @@ impl IntoResponse for RateLimitError {
                 window_seconds,
                 retry_after,
             } => {
-                let body = Json(json!({
-                    "error": "RateLimitExceeded",
-                    "message": format!(
+                let body = Json(ErrorResponse::with_details(
+                    "RateLimitExceeded".into(),
+                    format!(
                         "Rate limit exceeded. Maximum {} requests per {} seconds allowed.",
                         limit, window_seconds
                     ),
-                    "details": {
+                    json!({
+                        "reason": "rate_limit",
+                        "operation": "rate_limit_middleware",
+                        "retryable": true,
                         "limit": limit,
                         "window_seconds": window_seconds,
                         "retry_after": retry_after,
-                    }
-                }));
+                    }),
+                ));
 
                 // Build response with Retry-After header
                 let mut response = (StatusCode::TOO_MANY_REQUESTS, body).into_response();
@@ -203,10 +207,16 @@ impl IntoResponse for RateLimitError {
             RateLimitError::CapacityExceeded => {
                 let mut response = (
                     StatusCode::TOO_MANY_REQUESTS,
-                    Json(json!({
-                        "error": "RateLimitExceeded",
-                        "message": "Authentication rate limiter capacity reached. Retry later.",
-                    })),
+                    Json(ErrorResponse::with_details(
+                        "RateLimitExceeded".into(),
+                        "Authentication rate limiter capacity reached. Retry later.".into(),
+                        json!({
+                            "reason": "capacity",
+                            "operation": "rate_limit_middleware",
+                            "retryable": true,
+                            "retry_after": 1,
+                        }),
+                    )),
                 )
                     .into_response();
                 response
@@ -215,10 +225,19 @@ impl IntoResponse for RateLimitError {
                 response
             }
             RateLimitError::MissingClientIp | RateLimitError::MissingConfiguration => {
-                let body = Json(json!({
-                    "error": "RateLimitError",
-                    "message": "Authentication rate limiter is not configured for this transport",
-                }));
+                let reason = match self {
+                    Self::MissingClientIp => "missing_client_ip",
+                    _ => "missing_configuration",
+                };
+                let body = Json(ErrorResponse::with_details(
+                    "RateLimitError".into(),
+                    "Authentication rate limiter is not configured for this transport".into(),
+                    json!({
+                        "reason": reason,
+                        "operation": "rate_limit_middleware",
+                        "retryable": false,
+                    }),
+                ));
 
                 (StatusCode::INTERNAL_SERVER_ERROR, body).into_response()
             }

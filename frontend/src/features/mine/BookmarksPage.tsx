@@ -1,3 +1,4 @@
+import { apiErrorMessage } from '../../core/api/errors';
 import React, { useCallback, useEffect, useState } from 'react';
 import { BookMarked, Clock, MessageSquare, Pencil, Trash2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -60,7 +61,7 @@ const BookmarksPage: React.FC = () => {
       return response.data.total;
     } catch (error) {
       console.error('获取书签失败', error);
-      alert(t('bookmarks.loadFailed', '加载书签失败'));
+      alert(apiErrorMessage(error, t('bookmarks.loadFailed', '加载书签失败')));
     } finally {
       setLoadingIds((current) => { const next = new Set(current); next.delete(bookId); return next; });
     }
@@ -85,7 +86,7 @@ const BookmarksPage: React.FC = () => {
       await loadBookmarks(bookmark.book_id, 1);
     } catch (error) {
       console.error('更新书签失败', error);
-      alert(t('common.saveFailed'));
+      alert(apiErrorMessage(error, t('common.saveFailed')));
     }
   };
 
@@ -101,7 +102,7 @@ const BookmarksPage: React.FC = () => {
       }
     } catch (error) {
       console.error('删除书签失败', error);
-      alert(t('common.deleteFailed', '删除失败'));
+      alert(apiErrorMessage(error, t('common.deleteFailed', '删除失败')));
     }
   };
 
@@ -109,7 +110,7 @@ const BookmarksPage: React.FC = () => {
     if (playingBookmark) return;
     setPlayingBookmark(true);
     try { await playBookmark(bookmark); }
-    catch { alert(t('bookmarks.playFailed', '书签播放失败')); }
+    catch (error) { alert(apiErrorMessage(error, t('bookmarks.playFailed', '书签播放失败'))); }
     finally { setPlayingBookmark(false); }
   };
 

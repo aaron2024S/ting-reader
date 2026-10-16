@@ -9,6 +9,7 @@
 //! - 使用系统派生的主密钥加密
 //! - 支持密钥轮换和平滑过渡
 
+use crate::core::app::error::ConfigurationErrorKind;
 use crate::core::app::error::{Result, TingError};
 use crate::core::security::crypto::{decrypt, encrypt};
 use rand::Rng;
@@ -208,8 +209,16 @@ impl JwtKeyManager {
             .map_err(TingError::DatabaseError)?;
 
         // 反序列化加密的密钥对
-        let encrypted: EncryptedJwtKeyPair = serde_json::from_str(&encrypted_json)
-            .map_err(|e| TingError::ConfigError(format!("解析加密的 JWT 密钥失败: {}", e)))?;
+        let encrypted: EncryptedJwtKeyPair =
+            serde_json::from_str(&encrypted_json).map_err(|e| {
+                let message = format!("解析加密的 JWT 密钥失败: {}", e);
+                TingError::configuration(
+                    ConfigurationErrorKind::InvalidValue,
+                    "load_from_db::configuration",
+                    message,
+                )
+                .with_source(anyhow::anyhow!(e))
+            })?;
 
         // 解密密钥对
         JwtKeyPair::decrypt(&encrypted, encryption_key)
@@ -229,8 +238,15 @@ impl JwtKeyManager {
         let encrypted = keys.encrypt(encryption_key)?;
 
         // 序列化加密后的数据
-        let encrypted_json = serde_json::to_string(&encrypted)
-            .map_err(|e| TingError::ConfigError(format!("序列化加密的 JWT 密钥失败: {}", e)))?;
+        let encrypted_json = serde_json::to_string(&encrypted).map_err(|e| {
+            let message = format!("序列化加密的 JWT 密钥失败: {}", e);
+            TingError::configuration(
+                ConfigurationErrorKind::Encoding,
+                "save_to_db::configuration",
+                message,
+            )
+            .with_source(anyhow::anyhow!(e))
+        })?;
 
         conn.execute(
             "INSERT OR REPLACE INTO system_settings (key, value, updated_at) VALUES ('jwt_keys', ?, CURRENT_TIMESTAMP)",

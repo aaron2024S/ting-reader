@@ -1,6 +1,7 @@
 //! Host access to plugin configuration and user-scoped persistent storage.
 
 use super::{PluginHostGateway, PluginHostUser, required_string_param, string_param};
+use crate::core::app::error::{ConfigurationErrorKind, InputErrorKind};
 use crate::core::app::error::{Result, TingError};
 use serde_json::Value;
 
@@ -12,7 +13,15 @@ impl PluginHostGateway {
     pub(super) async fn config_get(&self, plugin_id: &str) -> Result<Value> {
         self.config_manager
             .get_config(&plugin_id.to_string())
-            .map_err(|error| TingError::ConfigError(error.to_string()))
+            .map_err(|error| {
+                let message = error.to_string();
+                TingError::configuration(
+                    ConfigurationErrorKind::Encoding,
+                    "config_get::configuration",
+                    message,
+                )
+                .with_source(anyhow::anyhow!(error))
+            })
     }
 
     pub(super) async fn storage_get(
@@ -39,10 +48,13 @@ impl PluginHostGateway {
         params: &Value,
     ) -> Result<Value> {
         let key = required_string_param(params, "key")?;
-        let value = params
-            .get("value")
-            .cloned()
-            .ok_or_else(|| TingError::InvalidRequest("storage.set requires value".into()))?;
+        let value = params.get("value").cloned().ok_or_else(|| {
+            TingError::invalid_request(
+                InputErrorKind::MissingField,
+                "storage_set::invalid_request",
+                "storage.set requires value".into(),
+            )
+        })?;
         let item = self
             .plugin_storage
             .set(plugin_id, &storage_key(user, &key), value)

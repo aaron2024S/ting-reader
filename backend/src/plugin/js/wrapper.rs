@@ -1,3 +1,4 @@
+use crate::core::app::error::PluginErrorKind;
 use serde_json::Value;
 use std::thread;
 use std::time::Duration;
@@ -66,7 +67,7 @@ impl JavaScriptPluginWrapper {
         let (tx, mut rx) = mpsc::channel::<JsCommand>(32);
 
         // Create error channel to detect early failures
-        let (error_tx, mut error_rx) = oneshot::channel::<String>();
+        let (error_tx, mut error_rx) = oneshot::channel::<TingError>();
 
         let plugin_id_clone = plugin_id.clone();
         let plugin_id_clone2 = plugin_id.clone(); // For panic handler
@@ -90,7 +91,14 @@ impl JavaScriptPluginWrapper {
                         Err(e) => {
                             let err_msg = format!("Failed to create Tokio runtime: {}", e);
                             error!("{} for {}", err_msg, plugin_id_clone);
-                            let _ = error_tx.send(err_msg);
+                            let _ = error_tx.send(
+                                TingError::plugin_load(
+                                    PluginErrorKind::Loading,
+                                    "javascript.create_worker",
+                                    err_msg,
+                                )
+                                .with_source(anyhow::Error::new(e)),
+                            );
                             return;
                         }
                     };
@@ -105,7 +113,14 @@ impl JavaScriptPluginWrapper {
                             Err(e) => {
                                 let err_msg = format!("Failed to initialize JS loader: {}", e);
                                 error!("{} for {}", err_msg, plugin_id_clone);
-                                let _ = error_tx.send(err_msg);
+                                let _ = error_tx.send(
+                                    TingError::plugin_load(
+                                        PluginErrorKind::Loading,
+                                        "javascript.create_loader",
+                                        err_msg,
+                                    )
+                                    .with_source(e),
+                                );
                                 return;
                             }
                         };
@@ -118,7 +133,14 @@ impl JavaScriptPluginWrapper {
                             Err(e) => {
                                 let err_msg = format!("Failed to create JS executor: {}", e);
                                 error!("{} for {}", err_msg, plugin_id_clone);
-                                let _ = error_tx.send(err_msg);
+                                let _ = error_tx.send(
+                                    TingError::plugin_load(
+                                        PluginErrorKind::Loading,
+                                        "javascript.create_executor",
+                                        err_msg,
+                                    )
+                                    .with_source(e),
+                                );
                                 return;
                             }
                         };
@@ -135,13 +157,27 @@ impl JavaScriptPluginWrapper {
                             Ok(Err(e)) => {
                                 let err_msg = format!("Failed to load JS module: {}", e);
                                 error!("{} for {}", err_msg, plugin_id_clone);
-                                let _ = error_tx.send(err_msg);
+                                let _ = error_tx.send(
+                                    TingError::plugin_load(
+                                        PluginErrorKind::Loading,
+                                        "javascript.load_module",
+                                        err_msg,
+                                    )
+                                    .with_source(e),
+                                );
                                 return;
                             }
-                            Err(_) => {
+                            Err(error) => {
                                 let err_msg = "Module load timeout after 30s".to_string();
                                 error!("{} for {}", err_msg, plugin_id_clone);
-                                let _ = error_tx.send(err_msg);
+                                let _ = error_tx.send(
+                                    TingError::timeout(
+                                        crate::core::app::error::DeadlineErrorKind::Elapsed,
+                                        "javascript.load_module",
+                                        err_msg,
+                                    )
+                                    .with_source(anyhow::Error::new(error)),
+                                );
                                 return;
                             }
                         }
@@ -194,7 +230,13 @@ impl JavaScriptPluginWrapper {
                                 }
                                 JsCommand::GarbageCollect { resp } => {
                                     let result = executor.garbage_collect().map_err(|e| {
-                                        TingError::PluginExecutionError(e.to_string())
+                                        let message = e.to_string();
+                                        TingError::plugin_execution(
+                                            PluginErrorKind::Runtime,
+                                            "new_with_limits::plugin_execution",
+                                            message,
+                                        )
+                                        .with_source(anyhow::anyhow!(e))
                                     });
 
                                     let _ = resp.send(result);
@@ -223,8 +265,15 @@ impl JavaScriptPluginWrapper {
             });
 
         // Check if thread spawn failed
-        thread_result
-            .map_err(|e| TingError::PluginLoadError(format!("Failed to spawn thread: {}", e)))?;
+        thread_result.map_err(|e| {
+            let message = format!("Failed to spawn thread: {}", e);
+            TingError::plugin_load(
+                PluginErrorKind::Communication,
+                "new_with_limits::plugin_load",
+                message,
+            )
+            .with_source(anyhow::anyhow!(e))
+        })?;
 
         // Wait for early initialization errors (increased timeout for slow machines)
         // This gives slow machines enough time to detect initialization failures
@@ -242,16 +291,13 @@ impl JavaScriptPluginWrapper {
         match init_check.join() {
             Ok(recv_result) => {
                 match recv_result {
-                    Ok(err_msg) => {
+                    Ok(error) => {
                         // Early error detected
                         error!(
                             "JS plugin {} failed early initialization check: {}",
-                            plugin_id, err_msg
+                            plugin_id, error
                         );
-                        return Err(TingError::PluginLoadError(format!(
-                            "Plugin initialization failed: {}",
-                            err_msg
-                        )));
+                        return Err(error.with_context("Plugin initialization failed"));
                     }
                     Err(_) => {
                         // Channel closed without error = success
@@ -268,7 +314,9 @@ impl JavaScriptPluginWrapper {
             Err(_) => {
                 // Join failed
                 error!("JS plugin {} init check thread panicked", plugin_id);
-                return Err(TingError::PluginLoadError(
+                return Err(TingError::plugin_load(
+                    PluginErrorKind::Communication,
+                    "new_with_limits::plugin_load",
                     "Init check thread panicked".to_string(),
                 ));
             }
@@ -285,7 +333,12 @@ impl JavaScriptPluginWrapper {
 fn js_execution_error(error: anyhow::Error) -> TingError {
     match error.downcast::<TingError>() {
         Ok(error) => error,
-        Err(error) => TingError::PluginExecutionError(error.to_string()),
+        Err(error) => TingError::plugin_execution(
+            PluginErrorKind::Runtime,
+            "js_execution_error::plugin_execution",
+            error.to_string(),
+        )
+        .with_source(error),
     }
 }
 
@@ -318,13 +371,19 @@ impl Plugin for JavaScriptPluginWrapper {
             })
             .await
             .map_err(|e| {
-                TingError::PluginExecutionError(format!("Failed to send init command: {}", e))
+                TingError::plugin_execution(
+                    PluginErrorKind::Communication,
+                    "initialize::plugin_execution",
+                    format!("Failed to send init command: {}", e),
+                )
             })?;
 
         // Await response
         match resp_rx.await {
             Ok(res) => res,
-            Err(_) => Err(TingError::PluginExecutionError(
+            Err(_) => Err(TingError::plugin_execution(
+                PluginErrorKind::Communication,
+                "initialize::plugin_execution",
                 "Channel closed".to_string(),
             )),
         }
@@ -337,12 +396,18 @@ impl Plugin for JavaScriptPluginWrapper {
             .send(JsCommand::Shutdown { resp: resp_tx })
             .await
             .map_err(|e| {
-                TingError::PluginExecutionError(format!("Failed to send shutdown command: {}", e))
+                TingError::plugin_execution(
+                    PluginErrorKind::Communication,
+                    "shutdown::plugin_execution",
+                    format!("Failed to send shutdown command: {}", e),
+                )
             })?;
 
         match resp_rx.await {
             Ok(res) => res,
-            Err(_) => Err(TingError::PluginExecutionError(
+            Err(_) => Err(TingError::plugin_execution(
+                PluginErrorKind::Communication,
+                "shutdown::plugin_execution",
                 "Channel closed".to_string(),
             )),
         }
@@ -355,12 +420,18 @@ impl Plugin for JavaScriptPluginWrapper {
             .send(JsCommand::GarbageCollect { resp: resp_tx })
             .await
             .map_err(|e| {
-                TingError::PluginExecutionError(format!("Failed to send gc command: {}", e))
+                TingError::plugin_execution(
+                    PluginErrorKind::Communication,
+                    "garbage_collect::plugin_execution",
+                    format!("Failed to send gc command: {}", e),
+                )
             })?;
 
         match resp_rx.await {
             Ok(res) => res,
-            Err(_) => Err(TingError::PluginExecutionError(
+            Err(_) => Err(TingError::plugin_execution(
+                PluginErrorKind::Communication,
+                "garbage_collect::plugin_execution",
                 "Channel closed".to_string(),
             )),
         }
@@ -386,12 +457,18 @@ impl JavaScriptPluginWrapper {
             })
             .await
             .map_err(|e| {
-                TingError::PluginExecutionError(format!("Failed to send call command: {}", e))
+                TingError::plugin_execution(
+                    PluginErrorKind::Communication,
+                    "call_function::plugin_execution",
+                    format!("Failed to send call command: {}", e),
+                )
             })?;
 
         match resp_rx.await {
             Ok(res) => res,
-            Err(_) => Err(TingError::PluginExecutionError(
+            Err(_) => Err(TingError::plugin_execution(
+                PluginErrorKind::Communication,
+                "call_function::plugin_execution",
                 "Channel closed".to_string(),
             )),
         }

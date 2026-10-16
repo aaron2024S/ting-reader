@@ -1,5 +1,6 @@
 //! Pure scraper candidate ranking and configured metadata selection.
 //! Shared by interactive aggregate search and automatic library scraping.
+use crate::core::app::error::CodecErrorKind;
 use crate::core::app::error::{Result, TingError};
 use crate::plugin::types::scraper::{BookDetail, BookItem, ScraperSourceInfo, SearchResult};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -107,7 +108,15 @@ pub(super) fn collect_candidates(
                 source_result_rank: rank + 1,
                 title_relevance_score: candidate_title_relevance_score(query, item),
             })
-            .map_err(|error| TingError::SerializationError(error.to_string()))?,
+            .map_err(|error| {
+                let message = error.to_string();
+                TingError::serialization(
+                    CodecErrorKind::InvalidData,
+                    "collect_candidates::serialization",
+                    message,
+                )
+                .with_source(anyhow::anyhow!(error))
+            })?,
         );
     }
     Ok(())

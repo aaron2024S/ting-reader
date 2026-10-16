@@ -1,5 +1,6 @@
 //! AES-256-GCM encryption for sensitive plugin configuration values
 
+use crate::core::app::error::ConfigurationErrorKind;
 use crate::core::app::error::{Result, TingError};
 use serde_json::Value;
 
@@ -110,15 +111,24 @@ pub fn decrypt_sensitive_fields(
 
 /// Validate a configuration against a JSON Schema
 pub fn validate_config(schema: &Value, config: &Value) -> Result<()> {
-    let compiled_schema = jsonschema::JSONSchema::compile(schema)
-        .map_err(|e| TingError::ConfigError(format!("Invalid configuration schema: {}", e)))?;
+    let compiled_schema = jsonschema::JSONSchema::compile(schema).map_err(|e| {
+        TingError::configuration(
+            ConfigurationErrorKind::InvalidValue,
+            "validate_config",
+            format!("Invalid configuration schema: {e}"),
+        )
+    })?;
 
     if let Err(errors) = compiled_schema.validate(config) {
         let error_messages: Vec<String> = errors.map(|e| format!("{}", e)).collect();
-        return Err(TingError::ConfigError(format!(
-            "Configuration validation failed: {}",
-            error_messages.join(", ")
-        )));
+        return Err(TingError::configuration(
+            ConfigurationErrorKind::InvalidValue,
+            "validate_config::configuration",
+            format!(
+                "Configuration validation failed: {}",
+                error_messages.join(", ")
+            ),
+        ));
     }
 
     Ok(())

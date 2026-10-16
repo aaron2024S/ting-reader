@@ -1,3 +1,4 @@
+use crate::core::app::error::{CodecErrorKind, NetworkErrorKind, PluginErrorKind};
 use crate::core::app::error::{Result, TingError};
 use futures::StreamExt;
 use reqwest::{Url, header::LOCATION};
@@ -141,7 +142,13 @@ pub struct StoreDownload {
 pub fn parse_store_plugins_response(value: serde_json::Value) -> Result<Vec<StorePlugin>> {
     let payload = value.get("plugins").cloned().unwrap_or(value);
     let mut plugins: Vec<StorePlugin> = serde_json::from_value(payload).map_err(|e| {
-        TingError::SerializationError(format!("Failed to parse store provider response: {}", e))
+        let message = format!("Failed to parse store provider response: {}", e);
+        TingError::serialization(
+            CodecErrorKind::InvalidData,
+            "parse_store_plugins_response::serialization",
+            message,
+        )
+        .with_source(anyhow::anyhow!(e))
     })?;
     for plugin in &mut plugins {
         plugin.normalize_i18n();
@@ -166,22 +173,31 @@ pub fn get_download_url(plugin: &StorePlugin) -> Result<String> {
 
         // Direct package plugins may not have a repo, so provide a clearer error message.
         if plugin.repo.as_ref().is_none_or(|r| r.is_empty()) {
-            return Err(TingError::PluginLoadError(format!(
-                "Plugin {} is not available for platform '{}'. This plugin uses direct package downloads with limited platform support.",
-                plugin.id, platform_key
-            )));
+            return Err(TingError::plugin_load(
+                PluginErrorKind::Loading,
+                "get_download_url::plugin_load",
+                format!(
+                    "Plugin {} is not available for platform '{}'. This plugin uses direct package downloads with limited platform support.",
+                    plugin.id, platform_key
+                ),
+            ));
         }
 
-        return Err(TingError::PluginLoadError(format!(
-            "No download URL found for platform '{}' for plugin {}",
-            platform_key, plugin.id
-        )));
+        return Err(TingError::plugin_load(
+            PluginErrorKind::Loading,
+            "get_download_url::plugin_load",
+            format!(
+                "No download URL found for platform '{}' for plugin {}",
+                platform_key, plugin.id
+            ),
+        ));
     }
 
-    Err(TingError::PluginLoadError(format!(
-        "Invalid download_url format for plugin {}",
-        plugin.id
-    )))
+    Err(TingError::plugin_load(
+        PluginErrorKind::InvalidOutput,
+        "get_download_url::plugin_load",
+        format!("Invalid download_url format for plugin {}", plugin.id),
+    ))
 }
 
 /// Get the platform key for the current system
@@ -218,19 +234,34 @@ pub async fn download_plugin(
     temp_dir: &std::path::Path,
 ) -> Result<std::path::PathBuf> {
     let mut current_url = Url::parse(url).map_err(|error| {
-        TingError::NetworkError(format!("Invalid absolute plugin download URL: {error}"))
+        let message = format!("Invalid absolute plugin download URL: {error}");
+        TingError::network(
+            NetworkErrorKind::InvalidResponse,
+            "download_plugin::network",
+            message,
+        )
+        .with_source(anyhow::anyhow!(error))
     })?;
     let mut redirect_count = 0_usize;
     let response = loop {
         let resolved = validate_plugin_download_target(&current_url).await?;
         let response = client.get(current_url.clone()).send().await.map_err(|e| {
-            TingError::NetworkError(format!("Failed to download plugin: {}", e.without_url()))
+            let e = e.without_url();
+            let message = format!("Failed to download plugin: {e}");
+            TingError::network(NetworkErrorKind::Transport, "download_plugin", message)
+                .with_source(anyhow::anyhow!(e))
         })?;
         let remote = response.remote_addr().ok_or_else(|| {
-            TingError::NetworkError("Plugin download did not expose its remote address".to_string())
+            TingError::network(
+                NetworkErrorKind::Transport,
+                "download_plugin::network",
+                "Plugin download did not expose its remote address".to_string(),
+            )
         })?;
         if !resolved.iter().any(|address| address.ip() == remote.ip()) {
-            return Err(TingError::NetworkError(
+            return Err(TingError::network(
+                NetworkErrorKind::Transport,
+                "download_plugin::network",
                 "Plugin download connected to an unexpected address".to_string(),
             ));
         }
@@ -239,12 +270,16 @@ pub async fn download_plugin(
             break response;
         }
         if response.url() != &current_url {
-            return Err(TingError::NetworkError(
+            return Err(TingError::network(
+                NetworkErrorKind::Redirect,
+                "download_plugin::network",
                 "Plugin download client followed an unvalidated redirect".to_string(),
             ));
         }
         if redirect_count >= MAX_PLUGIN_DOWNLOAD_REDIRECTS {
-            return Err(TingError::NetworkError(
+            return Err(TingError::network(
+                NetworkErrorKind::Redirect,
+                "download_plugin::network",
                 "Plugin download exceeded the redirect limit".to_string(),
             ));
         }
@@ -253,30 +288,45 @@ pub async fn download_plugin(
             .get(LOCATION)
             .and_then(|value| value.to_str().ok())
             .ok_or_else(|| {
-                TingError::NetworkError("Plugin download redirect omitted Location".to_string())
+                TingError::network(
+                    NetworkErrorKind::Redirect,
+                    "download_plugin::network",
+                    "Plugin download redirect omitted Location".to_string(),
+                )
             })?;
         let next_url = current_url.join(location).map_err(|error| {
-            TingError::NetworkError(format!("Invalid plugin download redirect: {error}"))
+            let message = format!("Invalid plugin download redirect: {error}");
+            TingError::network(
+                NetworkErrorKind::Redirect,
+                "download_plugin::network",
+                message,
+            )
+            .with_source(anyhow::anyhow!(error))
         })?;
         redirect_count += 1;
         current_url = next_url;
     };
 
     if !response.status().is_success() {
-        return Err(TingError::NetworkError(format!(
-            "Download returned status: {}",
-            response.status()
-        )));
+        return Err(TingError::network(
+            NetworkErrorKind::HttpStatus,
+            "download_plugin::network",
+            format!("Download returned status: {}", response.status()),
+        ));
     }
 
     if response
         .content_length()
         .is_some_and(|length| length > MAX_PLUGIN_DOWNLOAD_BYTES)
     {
-        return Err(TingError::NetworkError(format!(
-            "Plugin download exceeds {} bytes",
-            MAX_PLUGIN_DOWNLOAD_BYTES
-        )));
+        return Err(TingError::network(
+            NetworkErrorKind::Transport,
+            "download_plugin::network",
+            format!(
+                "Plugin download exceeds {} bytes",
+                MAX_PLUGIN_DOWNLOAD_BYTES
+            ),
+        ));
     }
 
     tokio::fs::create_dir_all(temp_dir)
@@ -298,19 +348,33 @@ pub async fn download_plugin(
         let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(|error| {
-                TingError::NetworkError(format!(
-                    "Failed to read download content: {}",
-                    error.without_url()
-                ))
+                let error = error.without_url();
+                {
+                    let message = format!("Failed to read download content: {}", error);
+                    TingError::network(
+                        NetworkErrorKind::Transport,
+                        "download_plugin::network",
+                        message,
+                    )
+                    .with_source(anyhow::anyhow!(error))
+                }
             })?;
             downloaded = downloaded.checked_add(chunk.len() as u64).ok_or_else(|| {
-                TingError::NetworkError("Plugin download is too large".to_string())
+                TingError::network(
+                    NetworkErrorKind::Transport,
+                    "download_plugin::network",
+                    "Plugin download is too large".to_string(),
+                )
             })?;
             if downloaded > MAX_PLUGIN_DOWNLOAD_BYTES {
-                return Err(TingError::NetworkError(format!(
-                    "Plugin download exceeds {} bytes",
-                    MAX_PLUGIN_DOWNLOAD_BYTES
-                )));
+                return Err(TingError::network(
+                    NetworkErrorKind::Transport,
+                    "download_plugin::network",
+                    format!(
+                        "Plugin download exceeds {} bytes",
+                        MAX_PLUGIN_DOWNLOAD_BYTES
+                    ),
+                ));
             }
             file.write_all(&chunk).await.map_err(TingError::IoError)?;
         }
@@ -328,22 +392,34 @@ pub async fn download_plugin(
 
 async fn validate_plugin_download_target(url: &Url) -> Result<Vec<std::net::SocketAddr>> {
     if !matches!(url.scheme(), "http" | "https") {
-        return Err(TingError::NetworkError(
+        return Err(TingError::network(
+            NetworkErrorKind::Transport,
+            "validate_plugin_download_target::network",
             "Plugin downloads require HTTP or HTTPS URLs".to_string(),
         ));
     }
     if !url.username().is_empty() || url.password().is_some() {
-        return Err(TingError::NetworkError(
+        return Err(TingError::network(
+            NetworkErrorKind::Transport,
+            "validate_plugin_download_target::network",
             "Plugin download URLs cannot contain credentials".to_string(),
         ));
     }
 
     let host = url.host_str().ok_or_else(|| {
-        TingError::NetworkError("Plugin download URL is missing a host".to_string())
+        TingError::network(
+            NetworkErrorKind::Transport,
+            "validate_plugin_download_target::network",
+            "Plugin download URL is missing a host".to_string(),
+        )
     })?;
     let normalized_host = host.trim_end_matches('.').to_ascii_lowercase();
     let port = url.port_or_known_default().ok_or_else(|| {
-        TingError::NetworkError("Plugin download URL uses an unknown port".to_string())
+        TingError::network(
+            NetworkErrorKind::Transport,
+            "validate_plugin_download_target::network",
+            "Plugin download URL uses an unknown port".to_string(),
+        )
     })?;
     if let Ok(ip) = normalized_host.parse::<IpAddr>() {
         return Ok(vec![std::net::SocketAddr::new(ip, port)]);
@@ -352,11 +428,19 @@ async fn validate_plugin_download_target(url: &Url) -> Result<Vec<std::net::Sock
     let resolved = tokio::net::lookup_host((normalized_host.as_str(), port))
         .await
         .map_err(|error| {
-            TingError::NetworkError(format!("Failed to resolve plugin download host: {error}"))
+            let message = format!("Failed to resolve plugin download host: {error}");
+            TingError::network(
+                NetworkErrorKind::Transport,
+                "validate_plugin_download_target::network",
+                message,
+            )
+            .with_source(anyhow::anyhow!(error))
         })?
         .collect::<Vec<_>>();
     if resolved.is_empty() {
-        return Err(TingError::NetworkError(
+        return Err(TingError::network(
+            NetworkErrorKind::Transport,
+            "validate_plugin_download_target::network",
             "Plugin download host did not resolve to an address".to_string(),
         ));
     }

@@ -8,38 +8,61 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
-    #[error("Invalid server configuration: {0}")]
-    InvalidServer(String),
-
-    #[error("Invalid database configuration: {0}")]
-    InvalidDatabase(String),
-
-    #[error("Invalid plugin configuration: {0}")]
-    InvalidPlugin(String),
-
-    #[error("Invalid task queue configuration: {0}")]
-    InvalidTaskQueue(String),
-
-    #[error("Invalid logging configuration: {0}")]
-    InvalidLogging(String),
-
-    #[error("Invalid security configuration: {0}")]
-    InvalidSecurity(String),
-
-    #[error("Invalid storage configuration: {0}")]
-    InvalidStorage(String),
-
+    #[error("Invalid {section} configuration: {field} {reason}")]
+    InvalidSetting {
+        section: ConfigSection,
+        field: &'static str,
+        reason: ConfigValueError,
+    },
     #[error("Failed to load configuration: {0}")]
-    LoadError(String),
-
-    #[error("Configuration file not found: {0}")]
-    FileNotFound(String),
+    LoadError(#[from] BuilderError),
+    #[error("Configuration file not found: {path}", path = .0.display())]
+    FileNotFound(PathBuf),
 }
 
-impl From<BuilderError> for ConfigError {
-    fn from(err: BuilderError) -> Self {
-        ConfigError::LoadError(err.to_string())
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigSection {
+    Server,
+    Database,
+    Plugin,
+    TaskQueue,
+    Logging,
+    Security,
+    Storage,
+    Audio,
+}
+
+impl std::fmt::Display for ConfigSection {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Server => "server",
+            Self::Database => "database",
+            Self::Plugin => "plugin",
+            Self::TaskQueue => "task queue",
+            Self::Logging => "logging",
+            Self::Security => "security",
+            Self::Storage => "storage",
+            Self::Audio => "audio",
+        })
     }
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum ConfigValueError {
+    #[error("cannot be empty")]
+    Empty,
+    #[error("must be greater than 0")]
+    Zero,
+    #[error("must be one of: {0:?}")]
+    UnsupportedChoice(&'static [&'static str]),
+    #[error("must be provided when {0}")]
+    RequiredWhen(&'static str),
+    #[error("must be greater than 0 when {0}")]
+    PositiveWhen(&'static str),
+    #[error("must be a non-empty URL path without a query string")]
+    InvalidGatewayPath,
+    #[error("cannot contain empty paths")]
+    EmptyPaths,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -110,7 +133,7 @@ impl Config {
 
         if let Some(path) = config_path {
             if !path.exists() {
-                return Err(ConfigError::FileNotFound(path.display().to_string()));
+                return Err(ConfigError::FileNotFound(path.to_path_buf()));
             }
             builder = builder.add_source(File::from(path.as_path()));
         }
@@ -166,7 +189,7 @@ impl Config {
     /// Load configuration from a specific file path
     pub fn from_file(path: &Path) -> Result<Self, ConfigError> {
         if !path.exists() {
-            return Err(ConfigError::FileNotFound(path.display().to_string()));
+            return Err(ConfigError::FileNotFound(path.to_path_buf()));
         }
 
         let config: Config = ConfigBuilder::builder()
@@ -304,45 +327,56 @@ pub struct ServerConfig {
 impl ServerConfig {
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.host.is_empty() {
-            return Err(ConfigError::InvalidServer(
-                "host cannot be empty".to_string(),
-            ));
+            return Err(ConfigError::InvalidSetting {
+                section: ConfigSection::Server,
+                field: "host",
+                reason: ConfigValueError::Empty,
+            });
         }
 
         if self.port == 0 {
-            return Err(ConfigError::InvalidServer(
-                "port must be greater than 0".to_string(),
-            ));
+            return Err(ConfigError::InvalidSetting {
+                section: ConfigSection::Server,
+                field: "port",
+                reason: ConfigValueError::Zero,
+            });
         }
 
         if self.max_connections == 0 {
-            return Err(ConfigError::InvalidServer(
-                "max_connections must be greater than 0".to_string(),
-            ));
+            return Err(ConfigError::InvalidSetting {
+                section: ConfigSection::Server,
+                field: "max_connections",
+                reason: ConfigValueError::Zero,
+            });
         }
 
         if self.request_timeout == 0 {
-            return Err(ConfigError::InvalidServer(
-                "request_timeout must be greater than 0".to_string(),
-            ));
+            return Err(ConfigError::InvalidSetting {
+                section: ConfigSection::Server,
+                field: "request_timeout",
+                reason: ConfigValueError::Zero,
+            });
         }
 
         if let Some(prefix) = &self.gateway_prefix {
             let prefix = prefix.trim();
             if prefix.is_empty() || !prefix.starts_with('/') || prefix.contains('?') {
-                return Err(ConfigError::InvalidServer(
-                    "gateway_prefix must be a non-empty URL path without a query string"
-                        .to_string(),
-                ));
+                return Err(ConfigError::InvalidSetting {
+                    section: ConfigSection::Server,
+                    field: "gateway_prefix",
+                    reason: ConfigValueError::InvalidGatewayPath,
+                });
             }
         }
 
         if let Some(socket) = &self.gateway_socket
             && socket.as_os_str().is_empty()
         {
-            return Err(ConfigError::InvalidServer(
-                "gateway_socket cannot be empty".to_string(),
-            ));
+            return Err(ConfigError::InvalidSetting {
+                section: ConfigSection::Server,
+                field: "gateway_socket",
+                reason: ConfigValueError::Empty,
+            });
         }
 
         Ok(())
@@ -359,21 +393,27 @@ pub struct DatabaseConfig {
 impl DatabaseConfig {
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.path.as_os_str().is_empty() {
-            return Err(ConfigError::InvalidDatabase(
-                "path cannot be empty".to_string(),
-            ));
+            return Err(ConfigError::InvalidSetting {
+                section: ConfigSection::Database,
+                field: "path",
+                reason: ConfigValueError::Empty,
+            });
         }
 
         if self.connection_pool_size == 0 {
-            return Err(ConfigError::InvalidDatabase(
-                "connection_pool_size must be greater than 0".to_string(),
-            ));
+            return Err(ConfigError::InvalidSetting {
+                section: ConfigSection::Database,
+                field: "connection_pool_size",
+                reason: ConfigValueError::Zero,
+            });
         }
 
         if self.busy_timeout == 0 {
-            return Err(ConfigError::InvalidDatabase(
-                "busy_timeout must be greater than 0".to_string(),
-            ));
+            return Err(ConfigError::InvalidSetting {
+                section: ConfigSection::Database,
+                field: "busy_timeout",
+                reason: ConfigValueError::Zero,
+            });
         }
 
         Ok(())
@@ -392,21 +432,27 @@ pub struct PluginConfig {
 impl PluginConfig {
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.plugin_dir.as_os_str().is_empty() {
-            return Err(ConfigError::InvalidPlugin(
-                "plugin_dir cannot be empty".to_string(),
-            ));
+            return Err(ConfigError::InvalidSetting {
+                section: ConfigSection::Plugin,
+                field: "plugin_dir",
+                reason: ConfigValueError::Empty,
+            });
         }
 
         if self.max_memory_per_plugin == 0 {
-            return Err(ConfigError::InvalidPlugin(
-                "max_memory_per_plugin must be greater than 0".to_string(),
-            ));
+            return Err(ConfigError::InvalidSetting {
+                section: ConfigSection::Plugin,
+                field: "max_memory_per_plugin",
+                reason: ConfigValueError::Zero,
+            });
         }
 
         if self.max_execution_time == 0 {
-            return Err(ConfigError::InvalidPlugin(
-                "max_execution_time must be greater than 0".to_string(),
-            ));
+            return Err(ConfigError::InvalidSetting {
+                section: ConfigSection::Plugin,
+                field: "max_execution_time",
+                reason: ConfigValueError::Zero,
+            });
         }
 
         Ok(())
@@ -423,15 +469,19 @@ pub struct TaskQueueConfig {
 impl TaskQueueConfig {
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.max_concurrent_tasks == 0 {
-            return Err(ConfigError::InvalidTaskQueue(
-                "max_concurrent_tasks must be greater than 0".to_string(),
-            ));
+            return Err(ConfigError::InvalidSetting {
+                section: ConfigSection::TaskQueue,
+                field: "max_concurrent_tasks",
+                reason: ConfigValueError::Zero,
+            });
         }
 
         if self.task_timeout == 0 {
-            return Err(ConfigError::InvalidTaskQueue(
-                "task_timeout must be greater than 0".to_string(),
-            ));
+            return Err(ConfigError::InvalidSetting {
+                section: ConfigSection::TaskQueue,
+                field: "task_timeout",
+                reason: ConfigValueError::Zero,
+            });
         }
 
         Ok(())
@@ -450,46 +500,55 @@ pub struct LoggingConfig {
 
 impl LoggingConfig {
     pub fn validate(&self) -> Result<(), ConfigError> {
-        let valid_levels = ["debug", "info", "warn", "error"];
-        if !valid_levels.contains(&self.level.as_str()) {
-            return Err(ConfigError::InvalidLogging(format!(
-                "level must be one of: {:?}",
-                valid_levels
-            )));
+        const VALID_LEVELS: &[&str] = &["debug", "info", "warn", "error"];
+        if !VALID_LEVELS.contains(&self.level.as_str()) {
+            return Err(ConfigError::InvalidSetting {
+                section: ConfigSection::Logging,
+                field: "level",
+                reason: ConfigValueError::UnsupportedChoice(VALID_LEVELS),
+            });
         }
 
-        let valid_formats = ["json", "text"];
-        if !valid_formats.contains(&self.format.as_str()) {
-            return Err(ConfigError::InvalidLogging(format!(
-                "format must be one of: {:?}",
-                valid_formats
-            )));
+        const VALID_FORMATS: &[&str] = &["json", "text"];
+        if !VALID_FORMATS.contains(&self.format.as_str()) {
+            return Err(ConfigError::InvalidSetting {
+                section: ConfigSection::Logging,
+                field: "format",
+                reason: ConfigValueError::UnsupportedChoice(VALID_FORMATS),
+            });
         }
 
-        let valid_outputs = ["stdout", "file"];
-        if !valid_outputs.contains(&self.output.as_str()) {
-            return Err(ConfigError::InvalidLogging(format!(
-                "output must be one of: {:?}",
-                valid_outputs
-            )));
+        const VALID_OUTPUTS: &[&str] = &["stdout", "file"];
+        if !VALID_OUTPUTS.contains(&self.output.as_str()) {
+            return Err(ConfigError::InvalidSetting {
+                section: ConfigSection::Logging,
+                field: "output",
+                reason: ConfigValueError::UnsupportedChoice(VALID_OUTPUTS),
+            });
         }
 
         if self.output == "file" && self.log_file.is_none() {
-            return Err(ConfigError::InvalidLogging(
-                "log_file must be specified when output is 'file'".to_string(),
-            ));
+            return Err(ConfigError::InvalidSetting {
+                section: ConfigSection::Logging,
+                field: "log_file",
+                reason: ConfigValueError::RequiredWhen("output is 'file'"),
+            });
         }
 
         if self.max_file_size == 0 {
-            return Err(ConfigError::InvalidLogging(
-                "max_file_size must be greater than 0".to_string(),
-            ));
+            return Err(ConfigError::InvalidSetting {
+                section: ConfigSection::Logging,
+                field: "max_file_size",
+                reason: ConfigValueError::Zero,
+            });
         }
 
         if self.max_backups == 0 {
-            return Err(ConfigError::InvalidLogging(
-                "max_backups must be greater than 0".to_string(),
-            ));
+            return Err(ConfigError::InvalidSetting {
+                section: ConfigSection::Logging,
+                field: "max_backups",
+                reason: ConfigValueError::Zero,
+            });
         }
 
         Ok(())
@@ -525,39 +584,51 @@ fn rate_limit_max_clients_default() -> usize {
 impl SecurityConfig {
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.enable_auth && self.api_key.is_empty() {
-            return Err(ConfigError::InvalidSecurity(
-                "api_key must be provided when enable_auth is true".to_string(),
-            ));
+            return Err(ConfigError::InvalidSetting {
+                section: ConfigSection::Security,
+                field: "api_key",
+                reason: ConfigValueError::RequiredWhen("enable_auth is true"),
+            });
         }
 
         if self.allowed_origins.is_empty() {
-            return Err(ConfigError::InvalidSecurity(
-                "allowed_origins cannot be empty".to_string(),
-            ));
+            return Err(ConfigError::InvalidSetting {
+                section: ConfigSection::Security,
+                field: "allowed_origins",
+                reason: ConfigValueError::Empty,
+            });
         }
 
         if self.rate_limit_requests == 0 {
-            return Err(ConfigError::InvalidSecurity(
-                "rate_limit_requests must be greater than 0".to_string(),
-            ));
+            return Err(ConfigError::InvalidSetting {
+                section: ConfigSection::Security,
+                field: "rate_limit_requests",
+                reason: ConfigValueError::Zero,
+            });
         }
 
         if self.rate_limit_window == 0 {
-            return Err(ConfigError::InvalidSecurity(
-                "rate_limit_window must be greater than 0".to_string(),
-            ));
+            return Err(ConfigError::InvalidSetting {
+                section: ConfigSection::Security,
+                field: "rate_limit_window",
+                reason: ConfigValueError::Zero,
+            });
         }
 
         if self.rate_limit_max_clients == 0 {
-            return Err(ConfigError::InvalidSecurity(
-                "rate_limit_max_clients must be greater than 0".to_string(),
-            ));
+            return Err(ConfigError::InvalidSetting {
+                section: ConfigSection::Security,
+                field: "rate_limit_max_clients",
+                reason: ConfigValueError::Zero,
+            });
         }
 
         if self.enable_hsts && self.hsts_max_age == 0 {
-            return Err(ConfigError::InvalidSecurity(
-                "hsts_max_age must be greater than 0 when enable_hsts is true".to_string(),
-            ));
+            return Err(ConfigError::InvalidSetting {
+                section: ConfigSection::Security,
+                field: "hsts_max_age",
+                reason: ConfigValueError::PositiveWhen("enable_hsts is true"),
+            });
         }
 
         Ok(())
@@ -577,21 +648,27 @@ pub struct StorageConfig {
 impl StorageConfig {
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.data_dir.as_os_str().is_empty() {
-            return Err(ConfigError::InvalidStorage(
-                "data_dir cannot be empty".to_string(),
-            ));
+            return Err(ConfigError::InvalidSetting {
+                section: ConfigSection::Storage,
+                field: "data_dir",
+                reason: ConfigValueError::Empty,
+            });
         }
 
         if self.temp_dir.as_os_str().is_empty() {
-            return Err(ConfigError::InvalidStorage(
-                "temp_dir cannot be empty".to_string(),
-            ));
+            return Err(ConfigError::InvalidSetting {
+                section: ConfigSection::Storage,
+                field: "temp_dir",
+                reason: ConfigValueError::Empty,
+            });
         }
 
         if self.local_storage_root.as_os_str().is_empty() {
-            return Err(ConfigError::InvalidStorage(
-                "local_storage_root cannot be empty".to_string(),
-            ));
+            return Err(ConfigError::InvalidSetting {
+                section: ConfigSection::Storage,
+                field: "local_storage_root",
+                reason: ConfigValueError::Empty,
+            });
         }
 
         if self
@@ -599,15 +676,19 @@ impl StorageConfig {
             .iter()
             .any(|root| root.as_os_str().is_empty())
         {
-            return Err(ConfigError::InvalidStorage(
-                "local_library_roots cannot contain empty paths".to_string(),
-            ));
+            return Err(ConfigError::InvalidSetting {
+                section: ConfigSection::Storage,
+                field: "local_library_roots",
+                reason: ConfigValueError::EmptyPaths,
+            });
         }
 
         if self.max_disk_usage == 0 {
-            return Err(ConfigError::InvalidStorage(
-                "max_disk_usage must be greater than 0".to_string(),
-            ));
+            return Err(ConfigError::InvalidSetting {
+                section: ConfigSection::Storage,
+                field: "max_disk_usage",
+                reason: ConfigValueError::Zero,
+            });
         }
 
         Ok(())
@@ -624,15 +705,19 @@ pub struct AudioConfig {
 impl AudioConfig {
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.cache_enabled && self.cache_size == 0 {
-            return Err(ConfigError::InvalidStorage(
-                "audio.cache_size must be greater than 0 when cache is enabled".to_string(),
-            ));
+            return Err(ConfigError::InvalidSetting {
+                section: ConfigSection::Audio,
+                field: "cache_size",
+                reason: ConfigValueError::PositiveWhen("cache is enabled"),
+            });
         }
 
         if self.buffer_size == 0 {
-            return Err(ConfigError::InvalidStorage(
-                "audio.buffer_size must be greater than 0".to_string(),
-            ));
+            return Err(ConfigError::InvalidSetting {
+                section: ConfigSection::Audio,
+                field: "buffer_size",
+                reason: ConfigValueError::Zero,
+            });
         }
 
         Ok(())

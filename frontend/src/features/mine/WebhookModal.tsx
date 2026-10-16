@@ -1,3 +1,4 @@
+import { apiErrorMessage, apiErrorPayload, type ApiErrorBody } from '../../core/api/errors';
 import React, { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import apiClient from '../../core/api/client';
@@ -56,7 +57,7 @@ const WebhookModal: React.FC<Props> = ({
     status: number;
     response_body: string;
     rendered_body: string;
-    error?: string;
+    error?: ApiErrorBody | null;
   } | null>(null);
 
   const selectCommonEvents = () => {
@@ -115,7 +116,7 @@ const WebhookModal: React.FC<Props> = ({
         status: 0,
         response_body: '',
         rendered_body: '',
-        error: t('notifications.testRequestFailed'),
+        error: apiErrorPayload(error, t('notifications.testRequestFailed')),
       });
     } finally {
       setTesting(false);
@@ -276,7 +277,7 @@ const WebhookModal: React.FC<Props> = ({
               >
                 {testResult.success
                   ? t('notifications.sendSuccess', { status: testResult.status })
-                  : testResult.error || t('notifications.sendFailed', { status: testResult.status })}
+                  : apiErrorMessage(testResult.error, t('notifications.sendFailed', { status: testResult.status }))}
               </p>
               {testResult.response_body && (
                 <pre className="max-h-32 overflow-auto whitespace-pre-wrap break-all text-xs text-slate-600 dark:text-slate-300">

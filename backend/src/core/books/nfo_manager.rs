@@ -17,6 +17,7 @@
 //! │   │   └── ...
 //! ```
 
+use crate::core::app::error::{CodecErrorKind, InputErrorKind, LookupErrorKind};
 use crate::core::app::error::{Result, TingError};
 use quick_xml::de::from_str;
 use quick_xml::se::to_string;
@@ -340,11 +341,17 @@ impl NfoManager {
 
         // Deserialize from XML
         from_str(&xml).map_err(|e| {
-            TingError::DeserializationError(format!(
+            let message = format!(
                 "Failed to deserialize book metadata from {}: {}",
                 nfo_path.display(),
                 e
-            ))
+            );
+            TingError::deserialization(
+                CodecErrorKind::InvalidData,
+                "read_book_nfo::deserialization",
+                message,
+            )
+            .with_source(anyhow::anyhow!(e))
         })
     }
 
@@ -414,11 +421,17 @@ impl NfoManager {
 
         // Deserialize from XML
         from_str(&xml).map_err(|e| {
-            TingError::DeserializationError(format!(
+            let message = format!(
                 "Failed to deserialize chapter metadata from {}: {}",
                 nfo_path.display(),
                 e
-            ))
+            );
+            TingError::deserialization(
+                CodecErrorKind::InvalidData,
+                "read_chapter_nfo::deserialization",
+                message,
+            )
+            .with_source(anyhow::anyhow!(e))
         })
     }
 
@@ -481,10 +494,11 @@ impl NfoManager {
     /// Result indicating whether the file is valid
     pub fn validate_nfo(&self, nfo_path: &Path) -> Result<()> {
         if !nfo_path.exists() {
-            return Err(TingError::NotFound(format!(
-                "NFO file not found: {}",
-                nfo_path.display()
-            )));
+            return Err(TingError::not_found(
+                LookupErrorKind::File,
+                "validate_nfo::not_found",
+                format!("NFO file not found: {}", nfo_path.display()),
+            ));
         }
 
         // Try to read the file
@@ -502,10 +516,14 @@ impl NfoManager {
         let is_chapter = from_str::<ChapterMetadata>(&xml).is_ok();
 
         if !is_book && !is_chapter {
-            return Err(TingError::ValidationError(format!(
-                "NFO file {} is not a valid book or chapter metadata file",
-                nfo_path.display()
-            )));
+            return Err(TingError::validation(
+                InputErrorKind::InvalidPath,
+                "validate_nfo::validation",
+                format!(
+                    "NFO file {} is not a valid book or chapter metadata file",
+                    nfo_path.display()
+                ),
+            ));
         }
 
         Ok(())
@@ -514,7 +532,13 @@ impl NfoManager {
 
 fn write_nfo_document(path: &Path, metadata: &impl Serialize) -> Result<PathBuf> {
     let xml = to_string(metadata).map_err(|error| {
-        TingError::SerializationError(format!("Failed to serialize NFO metadata: {error}"))
+        let message = format!("Failed to serialize NFO metadata: {error}");
+        TingError::serialization(
+            CodecErrorKind::InvalidData,
+            "write_nfo_document::serialization",
+            message,
+        )
+        .with_source(anyhow::anyhow!(error))
     })?;
     let document = format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n{xml}");
     fs::write(path, document)?;

@@ -4,6 +4,7 @@
 //! It uses wasmtime as the WASM engine and provides sandboxed execution with resource limits.
 
 use super::plugin::{PluginState, StoreLimits, WasmExports, WasmPlugin, WasmPluginInner};
+use crate::core::app::error::{DeadlineErrorKind, PluginErrorKind};
 use crate::core::app::error::{Result, TingError};
 use crate::plugin::PluginHostGatewayHandle;
 use crate::plugin::sandbox::{Permission, ResourceLimits, Sandbox};
@@ -37,7 +38,9 @@ impl WasmRuntime {
 
     pub fn with_limits(max_memory_bytes: usize, max_execution_time: Duration) -> Result<Self> {
         if max_memory_bytes == 0 || max_execution_time.is_zero() {
-            return Err(TingError::PluginExecutionError(
+            return Err(TingError::plugin_execution(
+                PluginErrorKind::Runtime,
+                "with_limits::plugin_execution",
                 "WASM memory and execution limits must be greater than zero".into(),
             ));
         }
@@ -50,7 +53,13 @@ impl WasmRuntime {
 
         // Create engine with configuration
         let engine = Arc::new(Engine::new(&config).map_err(|e| {
-            TingError::PluginExecutionError(format!("Failed to create WASM engine: {}", e))
+            let message = format!("Failed to create WASM engine: {}", e);
+            TingError::plugin_execution(
+                PluginErrorKind::Runtime,
+                "with_limits::plugin_execution",
+                message,
+            )
+            .with_source(anyhow::anyhow!(e))
         })?);
 
         // Periodic guest yielding lets Tokio enforce deadlines even for loops
@@ -68,7 +77,11 @@ impl WasmRuntime {
                 }
             })
             .map_err(|error| {
-                TingError::PluginExecutionError(format!("Failed to start WASM clock: {error}"))
+                TingError::plugin_execution(
+                    PluginErrorKind::Synchronization,
+                    "with_limits::plugin_execution",
+                    format!("Failed to start WASM clock: {error}"),
+                )
             })?;
 
         Ok(Self {
@@ -90,8 +103,15 @@ impl WasmRuntime {
     /// # Returns
     /// A compiled WASM module ready for instantiation
     pub async fn load_module(&self, wasm_bytes: &[u8]) -> Result<Module> {
-        Module::from_binary(&self.engine, wasm_bytes)
-            .map_err(|e| TingError::PluginLoadError(format!("Failed to load WASM module: {}", e)))
+        Module::from_binary(&self.engine, wasm_bytes).map_err(|e| {
+            let message = format!("Failed to load WASM module: {}", e);
+            TingError::plugin_load(
+                PluginErrorKind::Loading,
+                "load_module::plugin_load",
+                message,
+            )
+            .with_source(anyhow::anyhow!(e))
+        })
     }
 
     /// Load a WASM module from a file
@@ -103,7 +123,13 @@ impl WasmRuntime {
     /// A compiled WASM module ready for instantiation
     pub async fn load_module_from_file(&self, path: &Path) -> Result<Module> {
         Module::from_file(&self.engine, path).map_err(|e| {
-            TingError::PluginLoadError(format!("Failed to load WASM module from file: {}", e))
+            let message = format!("Failed to load WASM module from file: {}", e);
+            TingError::plugin_load(
+                PluginErrorKind::Loading,
+                "load_module_from_file::plugin_load",
+                message,
+            )
+            .with_source(anyhow::anyhow!(e))
         })
     }
 
@@ -136,7 +162,13 @@ impl WasmRuntime {
             self.instantiate_module(module, metadata, host_gateway),
         )
         .await
-        .map_err(|_| TingError::Timeout("WASM initialization exceeded its deadline".into()))?
+        .map_err(|_| {
+            TingError::timeout(
+                DeadlineErrorKind::Elapsed,
+                "instantiate_with_host_gateway::timeout",
+                "WASM initialization exceeded its deadline".into(),
+            )
+        })?
     }
 
     async fn instantiate_module(
@@ -182,12 +214,24 @@ impl WasmRuntime {
             &mut state.wasi
         })
         .map_err(|e| {
-            TingError::PluginExecutionError(format!("Failed to add WASI to linker: {}", e))
+            let message = format!("Failed to add WASI to linker: {}", e);
+            TingError::plugin_execution(
+                PluginErrorKind::Runtime,
+                "instantiate_module::plugin_execution",
+                message,
+            )
+            .with_source(anyhow::anyhow!(e))
         })?;
 
         // Register custom HTTP host functions
         super::host_functions::add_host_functions(&mut linker).map_err(|e| {
-            TingError::PluginExecutionError(format!("Failed to register host functions: {}", e))
+            let message = format!("Failed to register host functions: {}", e);
+            TingError::plugin_execution(
+                PluginErrorKind::Runtime,
+                "instantiate_module::plugin_execution",
+                message,
+            )
+            .with_source(anyhow::anyhow!(e))
         })?;
 
         // Instantiate the module
@@ -195,7 +239,13 @@ impl WasmRuntime {
             .instantiate_async(&mut store, &module)
             .await
             .map_err(|e| {
-                TingError::PluginExecutionError(format!("Failed to instantiate WASM module: {}", e))
+                let message = format!("Failed to instantiate WASM module: {}", e);
+                TingError::plugin_execution(
+                    PluginErrorKind::Loading,
+                    "instantiate_module::plugin_execution",
+                    message,
+                )
+                .with_source(anyhow::anyhow!(e))
             })?;
 
         // Extract exported functions
@@ -203,33 +253,73 @@ impl WasmRuntime {
         {
             let revision = instance
                 .get_typed_func::<(), i32>(&mut store, "ting_abi_revision")
-                .map_err(|error| TingError::PluginLoadError(format!("WASM SDK ABI: {error}")))?
+                .map_err(|error| {
+                    let message = format!("WASM SDK ABI: {error}");
+                    TingError::plugin_load(
+                        PluginErrorKind::AbiMismatch,
+                        "instantiate_module::plugin_load",
+                        message,
+                    )
+                    .with_source(anyhow::anyhow!(error))
+                })?
                 .call_async(&mut store, ())
                 .await
                 .map_err(|error| {
-                    TingError::PluginLoadError(format!("WASM SDK ABI call: {error}"))
+                    let message = format!("WASM SDK ABI call: {error}");
+                    TingError::plugin_load(
+                        PluginErrorKind::AbiMismatch,
+                        "instantiate_module::plugin_load",
+                        message,
+                    )
+                    .with_source(anyhow::anyhow!(error))
                 })?;
             if revision != 2 {
-                return Err(TingError::PluginLoadError(format!(
-                    "Unsupported WASM ABI {revision}"
-                )));
+                return Err(TingError::plugin_load(
+                    PluginErrorKind::AbiMismatch,
+                    "instantiate_module::plugin_load",
+                    format!("Unsupported WASM ABI {revision}"),
+                ));
             }
             let supports = instance
                 .get_typed_func::<(i32, i32), i32>(&mut store, "supports")
                 .map_err(|error| {
-                    TingError::PluginLoadError(format!("WASM SDK supports: {error}"))
+                    let message = format!("WASM SDK supports: {error}");
+                    TingError::plugin_load(
+                        PluginErrorKind::Loading,
+                        "instantiate_module::plugin_load",
+                        message,
+                    )
+                    .with_source(anyhow::anyhow!(error))
                 })?;
             let alloc = instance
                 .get_typed_func::<i32, i32>(&mut store, "alloc")
-                .map_err(|error| TingError::PluginLoadError(format!("WASM SDK alloc: {error}")))?;
+                .map_err(|error| {
+                    let message = format!("WASM SDK alloc: {error}");
+                    TingError::plugin_load(
+                        PluginErrorKind::Loading,
+                        "instantiate_module::plugin_load",
+                        message,
+                    )
+                    .with_source(anyhow::anyhow!(error))
+                })?;
             let dealloc = instance
                 .get_typed_func::<(i32, i32), ()>(&mut store, "dealloc")
                 .map_err(|error| {
-                    TingError::PluginLoadError(format!("WASM SDK dealloc: {error}"))
+                    let message = format!("WASM SDK dealloc: {error}");
+                    TingError::plugin_load(
+                        PluginErrorKind::Loading,
+                        "instantiate_module::plugin_load",
+                        message,
+                    )
+                    .with_source(anyhow::anyhow!(error))
                 })?;
-            let memory = instance
-                .get_memory(&mut store, "memory")
-                .ok_or_else(|| TingError::PluginLoadError("WASM SDK memory missing".into()))?;
+            let memory = instance.get_memory(&mut store, "memory").ok_or_else(|| {
+                TingError::plugin_load(
+                    PluginErrorKind::Loading,
+                    "instantiate_module::plugin_load",
+                    "WASM SDK memory missing".into(),
+                )
+            })?;
             let mut operations: Vec<&str> = vec!["initialize", "shutdown"];
             for capability in &metadata.capabilities {
                 match capability {
@@ -261,29 +351,60 @@ impl WasmRuntime {
                     .call_async(&mut store, bytes.len() as i32)
                     .await
                     .map_err(|error| {
-                        TingError::PluginLoadError(format!("WASM SDK alloc: {error}"))
+                        let message = format!("WASM SDK alloc: {error}");
+                        TingError::plugin_load(
+                            PluginErrorKind::Loading,
+                            "instantiate_module::plugin_load",
+                            message,
+                        )
+                        .with_source(anyhow::anyhow!(error))
                     })?;
-                let offset = usize::try_from(pointer)
-                    .map_err(|_| TingError::PluginLoadError("Invalid WASM SDK pointer".into()))?;
+                let offset = usize::try_from(pointer).map_err(|_| {
+                    TingError::plugin_load(
+                        PluginErrorKind::InvalidOutput,
+                        "instantiate_module::plugin_load",
+                        "Invalid WASM SDK pointer".into(),
+                    )
+                })?;
                 memory.write(&mut store, offset, bytes).map_err(|error| {
-                    TingError::PluginLoadError(format!("WASM SDK write: {error}"))
+                    let message = format!("WASM SDK write: {error}");
+                    TingError::plugin_load(
+                        PluginErrorKind::Loading,
+                        "instantiate_module::plugin_load",
+                        message,
+                    )
+                    .with_source(anyhow::anyhow!(error))
                 })?;
                 let supported = supports
                     .call_async(&mut store, (pointer, bytes.len() as i32))
                     .await
                     .map_err(|error| {
-                        TingError::PluginLoadError(format!("WASM SDK supports: {error}"))
+                        let message = format!("WASM SDK supports: {error}");
+                        TingError::plugin_load(
+                            PluginErrorKind::Loading,
+                            "instantiate_module::plugin_load",
+                            message,
+                        )
+                        .with_source(anyhow::anyhow!(error))
                     })?;
                 dealloc
                     .call_async(&mut store, (pointer, bytes.len() as i32))
                     .await
                     .map_err(|error| {
-                        TingError::PluginLoadError(format!("WASM SDK release: {error}"))
+                        let message = format!("WASM SDK release: {error}");
+                        TingError::plugin_load(
+                            PluginErrorKind::Loading,
+                            "instantiate_module::plugin_load",
+                            message,
+                        )
+                        .with_source(anyhow::anyhow!(error))
                     })?;
                 if supported != 1 {
-                    return Err(TingError::PluginLoadError(format!(
-                        "WASM SDK lacks declared operation {operation}"
-                    )));
+                    return Err(TingError::plugin_load(
+                        PluginErrorKind::UnsupportedOperation,
+                        "instantiate_module::plugin_load",
+                        format!("WASM SDK lacks declared operation {operation}"),
+                    ));
                 }
             }
         }
@@ -379,9 +500,11 @@ fn validate_declared_exports(module: &Module, metadata: &PluginMetadata) -> Resu
         if !matches!(found, Some(ExternType::Func(function))
             if signature_matches(&function, &params, &result))
         {
-            return Err(TingError::PluginLoadError(format!(
-                "WASM SDK export {name} is missing or has incompatible signature"
-            )));
+            return Err(TingError::plugin_load(
+                PluginErrorKind::InvalidManifest,
+                "validate_declared_exports::plugin_load",
+                format!("WASM SDK export {name} is missing or has incompatible signature"),
+            ));
         }
     }
     let invalid: Vec<_> = required
@@ -407,20 +530,22 @@ fn validate_declared_exports(module: &Module, metadata: &PluginMetadata) -> Resu
             Some(ExternType::Memory(_))
         )
     {
-        return Err(TingError::PluginLoadError(format!(
-            "WASM plugin {} has missing or incompatible ABI exports: {}{}",
-            metadata.instance_id(),
-            invalid.join(", "),
-            if module
-                .exports()
-                .any(|export| export.name() == "memory"
+        return Err(TingError::plugin_load(
+            PluginErrorKind::AbiMismatch,
+            "validate_declared_exports::plugin_load",
+            format!(
+                "WASM plugin {} has missing or incompatible ABI exports: {}{}",
+                metadata.instance_id(),
+                invalid.join(", "),
+                if module.exports().any(|export| export.name() == "memory"
                     && matches!(export.ty(), ExternType::Memory(_)))
-            {
-                ""
-            } else {
-                " memory"
-            }
-        )));
+                {
+                    ""
+                } else {
+                    " memory"
+                }
+            ),
+        ));
     }
     Ok(())
 }

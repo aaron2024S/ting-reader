@@ -2,6 +2,7 @@ use super::{
     Result, StreamContext, TingError, create_decrypted_stream, get_remote_media_reader,
     is_download_query, preload, stream_mime_type_from_path,
 };
+use crate::core::app::error::{InputErrorKind, LookupErrorKind, PluginErrorKind};
 use axum::{
     body::Body,
     http::{StatusCode, header},
@@ -220,12 +221,16 @@ pub(super) async fn stream_source(context: StreamContext) -> Result<axum::respon
 
         if range_header.is_some() {
             let content_length = content_length.ok_or_else(|| {
-                TingError::PluginExecutionError(
+                TingError::plugin_execution(
+                    PluginErrorKind::Runtime,
+                    "stream_source::plugin_execution",
                     "Format stream returned a range without a known length".into(),
                 )
             })?;
             let logic_size = logic_size.ok_or_else(|| {
-                TingError::PluginExecutionError(
+                TingError::plugin_execution(
+                    PluginErrorKind::Runtime,
+                    "stream_source::plugin_execution",
                     "Format stream returned a range without a known length".into(),
                 )
             })?;
@@ -313,18 +318,36 @@ pub(super) async fn stream_source(context: StreamContext) -> Result<axum::respon
             let (start, end) = r
                 .strip_prefix("bytes=")
                 .and_then(|value| value.split_once('-'))
-                .ok_or_else(|| TingError::InvalidRequest("Invalid Range header".into()))?;
-            let start = start
-                .parse::<u64>()
-                .map_err(|_| TingError::InvalidRequest("Invalid Range start".into()))?;
+                .ok_or_else(|| {
+                    TingError::invalid_request(
+                        InputErrorKind::OutOfRange,
+                        "stream_source::invalid_request",
+                        "Invalid Range header".into(),
+                    )
+                })?;
+            let start = start.parse::<u64>().map_err(|_| {
+                TingError::invalid_request(
+                    InputErrorKind::OutOfRange,
+                    "stream_source::invalid_request",
+                    "Invalid Range start".into(),
+                )
+            })?;
             let end = if end.is_empty() {
                 0
             } else {
-                let inclusive_end = end
-                    .parse::<u64>()
-                    .map_err(|_| TingError::InvalidRequest("Invalid Range end".into()))?;
+                let inclusive_end = end.parse::<u64>().map_err(|_| {
+                    TingError::invalid_request(
+                        InputErrorKind::OutOfRange,
+                        "stream_source::invalid_request",
+                        "Invalid Range end".into(),
+                    )
+                })?;
                 if inclusive_end < start {
-                    return Err(TingError::InvalidRequest("Invalid Range bounds".into()));
+                    return Err(TingError::invalid_request(
+                        InputErrorKind::OutOfRange,
+                        "stream_source::invalid_request",
+                        "Invalid Range bounds".into(),
+                    ));
                 }
                 inclusive_end.saturating_add(1)
             };
@@ -339,7 +362,11 @@ pub(super) async fn stream_source(context: StreamContext) -> Result<axum::respon
             .storage_service
             .get_local_reader(std::path::Path::new(&chapter.path), range)
             .await
-            .map_err(|e| TingError::NotFound(format!("Local file not found: {}", e)))?;
+            .map_err(|e| {
+                let message = format!("Local file not found: {}", e);
+                TingError::not_found(LookupErrorKind::File, "stream_source::not_found", message)
+                    .with_source(anyhow::anyhow!(e))
+            })?;
         (
             Box::new(f) as Box<dyn tokio::io::AsyncRead + Send + Unpin>,
             size,

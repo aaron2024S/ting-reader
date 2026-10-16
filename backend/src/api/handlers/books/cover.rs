@@ -1,7 +1,8 @@
 use super::{AppState, update_book};
 use crate::api::models::UpdateBookRequest;
 use crate::auth::middleware::AuthUser;
-use crate::core::app::error::{Result, TingError};
+use crate::core::app::error::{AccessErrorKind, InputErrorKind, LookupErrorKind};
+use crate::core::app::error::{ErrorResponse, Result, TingError};
 use crate::core::storage::local_paths::{
     ensure_path_inside_root, path_to_display_string, resolve_existing_local_library_root,
 };
@@ -27,20 +28,30 @@ pub async fn upload_book_cover(
     mut multipart: Multipart,
 ) -> Result<Response> {
     if user.role != "admin" {
-        return Err(TingError::PermissionDenied(
+        return Err(TingError::permission(
+            AccessErrorKind::AdministratorRequired,
+            "upload_book_cover::permission",
             "Only administrators can upload book covers".to_string(),
         ));
     }
-    let book = state
-        .book_repo
-        .find_by_id(&id)
-        .await?
-        .ok_or_else(|| TingError::NotFound(format!("Book with id {id} not found")))?;
+    let book = state.book_repo.find_by_id(&id).await?.ok_or_else(|| {
+        TingError::not_found(
+            LookupErrorKind::Book,
+            "upload_book_cover::not_found",
+            format!("Book with id {id} not found"),
+        )
+    })?;
     let library = state
         .library_repo
         .find_by_id(&book.library_id)
         .await?
-        .ok_or_else(|| TingError::NotFound("Book library not found".to_string()))?;
+        .ok_or_else(|| {
+            TingError::not_found(
+                LookupErrorKind::Book,
+                "upload_book_cover::not_found",
+                "Book library not found".to_string(),
+            )
+        })?;
 
     let mut image_bytes = None;
     let mut metadata_bytes = None;
@@ -54,7 +65,9 @@ pub async fn upload_book_cover(
                 (MAX_METADATA_BYTES, &mut metadata_bytes)
             }
             _ => {
-                return Err(TingError::InvalidRequest(
+                return Err(TingError::invalid_request(
+                    InputErrorKind::InvalidValue,
+                    "upload_book_cover::invalid_request",
                     "Expected one cover file and optional metadata".to_string(),
                 ));
             }
@@ -67,10 +80,15 @@ pub async fn upload_book_cover(
             if bytes.len() + chunk.len() > limit {
                 return Ok((
                     StatusCode::PAYLOAD_TOO_LARGE,
-                    Json(serde_json::json!({
-                        "error": "PayloadTooLarge",
-                        "message": "Uploaded cover or metadata exceeds the size limit",
-                    })),
+                    Json(ErrorResponse::with_details(
+                        "PayloadTooLarge".into(),
+                        "Uploaded cover or metadata exceeds the size limit".into(),
+                        serde_json::json!({
+                            "reason": "payload",
+                            "operation": "upload_book_cover",
+                            "retryable": false,
+                        }),
+                    )),
                 )
                     .into_response());
             }
@@ -80,20 +98,41 @@ pub async fn upload_book_cover(
     }
     let bytes = image_bytes
         .filter(|bytes| !bytes.is_empty())
-        .ok_or_else(|| TingError::InvalidRequest("A cover image is required".to_string()))?;
+        .ok_or_else(|| {
+            TingError::invalid_request(
+                InputErrorKind::MissingField,
+                "upload_book_cover::invalid_request",
+                "A cover image is required".to_string(),
+            )
+        })?;
     let mut metadata: UpdateBookRequest =
-        serde_json::from_slice(metadata_bytes.as_deref().unwrap_or(b"{}"))
-            .map_err(|error| TingError::InvalidRequest(format!("Invalid metadata: {error}")))?;
+        serde_json::from_slice(metadata_bytes.as_deref().unwrap_or(b"{}")).map_err(|error| {
+            let message = format!("Invalid metadata: {error}");
+            TingError::invalid_request(
+                InputErrorKind::InvalidValue,
+                "upload_book_cover::invalid_request",
+                message,
+            )
+            .with_source(anyhow::anyhow!(error))
+        })?;
     // File placement is determined by the existing book, never multipart paths.
     if metadata.library_id.is_some() || metadata.path.is_some() || metadata.hash.is_some() {
-        return Err(TingError::InvalidRequest(
+        return Err(TingError::invalid_request(
+            InputErrorKind::InvalidValue,
+            "upload_book_cover::invalid_request",
             "Cover uploads cannot move a book or change its library".to_string(),
         ));
     }
     let jpeg = tokio::task::spawn_blocking(move || normalize_cover(bytes))
         .await
         .map_err(|error| {
-            TingError::InvalidRequest(format!("Image processing failed: {error}"))
+            let message = format!("Image processing failed: {error}");
+            TingError::invalid_request(
+                InputErrorKind::InvalidValue,
+                "upload_book_cover::invalid_request",
+                message,
+            )
+            .with_source(anyhow::anyhow!(error))
         })??;
 
     let target_dir = match library.library_type.as_str() {
@@ -109,7 +148,9 @@ pub async fn upload_book_cover(
             let canonical = tokio::fs::canonicalize(candidate).await?;
             ensure_path_inside_root(&root, &canonical)?;
             if !canonical.is_dir() {
-                return Err(TingError::InvalidRequest(
+                return Err(TingError::invalid_request(
+                    InputErrorKind::InvalidPath,
+                    "upload_book_cover::invalid_request",
                     "The book path must be a directory".to_string(),
                 ));
             }
@@ -117,7 +158,9 @@ pub async fn upload_book_cover(
         }
         "webdav" | "rss" => crate::core::books::metadata::remote_metadata_dir(&book.path)?,
         _ => {
-            return Err(TingError::InvalidRequest(
+            return Err(TingError::invalid_request(
+                InputErrorKind::UnsupportedValue,
+                "upload_book_cover::invalid_request",
                 "This library does not support cover uploads".to_string(),
             ));
         }
@@ -143,21 +186,38 @@ pub async fn upload_book_cover(
 }
 
 fn normalize_cover(bytes: Vec<u8>) -> Result<Vec<u8>> {
-    let format = image::guess_format(&bytes)
-        .map_err(|_| TingError::InvalidRequest("Invalid cover image".to_string()))?;
+    let format = image::guess_format(&bytes).map_err(|_| {
+        TingError::invalid_request(
+            InputErrorKind::InvalidValue,
+            "normalize_cover::invalid_request",
+            "Invalid cover image".to_string(),
+        )
+    })?;
     if !matches!(
         format,
         image::ImageFormat::Jpeg | image::ImageFormat::Png | image::ImageFormat::WebP
     ) {
-        return Err(TingError::InvalidRequest(
+        return Err(TingError::invalid_request(
+            InputErrorKind::InvalidValue,
+            "normalize_cover::invalid_request",
             "Cover images must be JPEG, PNG or WebP".to_string(),
         ));
     }
     let (width, height) = image::ImageReader::with_format(Cursor::new(&bytes), format)
         .into_dimensions()
-        .map_err(|error| TingError::InvalidRequest(format!("Invalid cover image: {error}")))?;
+        .map_err(|error| {
+            let message = format!("Invalid cover image: {error}");
+            TingError::invalid_request(
+                InputErrorKind::InvalidValue,
+                "normalize_cover::invalid_request",
+                message,
+            )
+            .with_source(anyhow::anyhow!(error))
+        })?;
     if u64::from(width) * u64::from(height) > 16_000_000 {
-        return Err(TingError::InvalidRequest(
+        return Err(TingError::invalid_request(
+            InputErrorKind::OutOfRange,
+            "normalize_cover::invalid_request",
             "Cover images must not exceed 16 megapixels".to_string(),
         ));
     }
@@ -167,14 +227,27 @@ fn normalize_cover(bytes: Vec<u8>) -> Result<Vec<u8>> {
     limits.max_image_height = Some(8192);
     limits.max_alloc = Some(128 * 1024 * 1024);
     reader.limits(limits);
-    let mut decoder = reader
-        .into_decoder()
-        .map_err(|error| TingError::InvalidRequest(format!("Invalid cover image: {error}")))?;
+    let mut decoder = reader.into_decoder().map_err(|error| {
+        let message = format!("Invalid cover image: {error}");
+        TingError::invalid_request(
+            InputErrorKind::InvalidValue,
+            "normalize_cover::invalid_request",
+            message,
+        )
+        .with_source(anyhow::anyhow!(error))
+    })?;
     let orientation = decoder
         .orientation()
         .unwrap_or(image::metadata::Orientation::NoTransforms);
-    let mut decoded = image::DynamicImage::from_decoder(decoder)
-        .map_err(|error| TingError::InvalidRequest(format!("Invalid cover image: {error}")))?;
+    let mut decoded = image::DynamicImage::from_decoder(decoder).map_err(|error| {
+        let message = format!("Invalid cover image: {error}");
+        TingError::invalid_request(
+            InputErrorKind::InvalidValue,
+            "normalize_cover::invalid_request",
+            message,
+        )
+        .with_source(anyhow::anyhow!(error))
+    })?;
     decoded.apply_orientation(orientation);
     let mut image = decoded.into_rgba8();
     // JPEG has no alpha channel; composite transparent input onto white.
@@ -189,7 +262,15 @@ fn normalize_cover(bytes: Vec<u8>) -> Result<Vec<u8>> {
     let mut jpeg = Vec::new();
     image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 90)
         .encode_image(&rgb)
-        .map_err(|error| TingError::InvalidRequest(format!("Cover encoding failed: {error}")))?;
+        .map_err(|error| {
+            let message = format!("Cover encoding failed: {error}");
+            TingError::invalid_request(
+                InputErrorKind::InvalidValue,
+                "normalize_cover::invalid_request",
+                message,
+            )
+            .with_source(anyhow::anyhow!(error))
+        })?;
     Ok(jpeg)
 }
 

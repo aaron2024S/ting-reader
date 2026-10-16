@@ -1,3 +1,4 @@
+import { apiErrorMessage } from '../../core/api/errors';
 import React, { useState } from 'react';
 import apiClient from '../../core/api/client';
 import type { Book } from '../../core/types';
@@ -53,7 +54,7 @@ const SeriesModal: React.FC<SeriesModalProps> = ({ isOpen, onClose, selectedBook
       onClose();
     } catch (err) {
       console.error('创建系列失败', err);
-      alert(t('seriesModal.createFailed'));
+      alert(apiErrorMessage(err, t('seriesModal.createFailed')));
     } finally {
       setLoading(false);
     }

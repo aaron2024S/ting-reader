@@ -131,7 +131,7 @@ JSON 安全输出：
 }
 ```
 
-网络请求未完成时 `status` 为 `0`，错误信息位于 `error`。
+网络请求未完成时 `status` 为 `0`。失败的 `error` 使用统一的 `error/message/details/trace_id` 对象，展示 `error.message`。`details.upstream_status` 保留已收到的上游 HTTP 状态，业务拒绝还会保留 `details.upstream_code`，无需从文本解析错误码。
 
 ## 请求行为
 

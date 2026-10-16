@@ -2,6 +2,7 @@
 //! declared extensions and probe results; special file parsing stays in plugins.
 
 use super::PluginManager;
+use crate::core::app::error::PluginErrorKind;
 use crate::core::app::error::{Result, TingError};
 use crate::plugin::host_api::resources::{ResourceLimits, ResourceScope, ResourceSource};
 use crate::plugin::types::{PluginCapability, PluginInvocationContext};
@@ -30,7 +31,13 @@ impl ExtractedFormat {
     /// The metadata schema itself remains shared across all runtimes.
     pub fn into_scanner_json(self, cover_dir: Option<&Path>) -> Result<serde_json::Value> {
         let mut result = serde_json::to_value(&self.metadata).map_err(|error| {
-            TingError::PluginExecutionError(format!("Invalid metadata: {error}"))
+            let message = format!("Invalid metadata: {error}");
+            TingError::plugin_execution(
+                PluginErrorKind::InvalidManifest,
+                "into_scanner_json::plugin_execution",
+                message,
+            )
+            .with_source(anyhow::anyhow!(error))
         })?;
         let cover_url = match self.metadata.cover {
             Some(ting_plugin_contract::format::AssetRef::RemoteUrl { url }) => Some(url),
@@ -47,7 +54,9 @@ impl ExtractedFormat {
                     }
                     Some("image/jpeg") if bytes.starts_with(b"\xff\xd8") => "jpg",
                     _ => {
-                        return Err(TingError::PluginExecutionError(
+                        return Err(TingError::plugin_execution(
+                            PluginErrorKind::InvalidOutput,
+                            "into_scanner_json::plugin_execution",
                             "Invalid plugin cover image".into(),
                         ));
                     }
@@ -101,7 +110,15 @@ impl PluginManager {
                 {
                     registry
                         .register(&entry.metadata.instance_id(), declaration.clone())
-                        .map_err(|error| TingError::PluginExecutionError(error.to_string()))?;
+                        .map_err(|error| {
+                            let message = error.to_string();
+                            TingError::plugin_execution(
+                                PluginErrorKind::Runtime,
+                                "format_registry::plugin_execution",
+                                message,
+                            )
+                            .with_source(anyhow::anyhow!(error))
+                        })?;
                 }
             }
         }
@@ -119,7 +136,15 @@ impl PluginManager {
         for (key, scope, input) in &grants {
             let length = scope
                 .stat(input)
-                .map_err(|error| TingError::PluginExecutionError(error.to_string()))?
+                .map_err(|error| {
+                    let message = error.to_string();
+                    TingError::plugin_execution(
+                        PluginErrorKind::Runtime,
+                        "select_probed_format::plugin_execution",
+                        message,
+                    )
+                    .with_source(anyhow::anyhow!(error))
+                })?
                 .length
                 .unwrap_or(0);
             let mut available = length.min(4096);
@@ -145,7 +170,13 @@ impl PluginManager {
                     )
                     .await?;
                 let probe: ProbeResult = serde_json::from_value(output).map_err(|error| {
-                    TingError::PluginExecutionError(format!("Invalid probe response: {error}"))
+                    let message = format!("Invalid probe response: {error}");
+                    TingError::plugin_execution(
+                        PluginErrorKind::InvalidOutput,
+                        "select_probed_format::plugin_execution",
+                        message,
+                    )
+                    .with_source(anyhow::anyhow!(error))
                 })?;
                 match probe {
                     ProbeResult::NeedMore { total_bytes }
@@ -157,10 +188,20 @@ impl PluginManager {
                         }
                         scope
                             .extend_readable_end(input, available)
-                            .map_err(|error| TingError::PluginExecutionError(error.to_string()))?;
+                            .map_err(|error| {
+                                let message = error.to_string();
+                                TingError::plugin_execution(
+                                    PluginErrorKind::Runtime,
+                                    "select_probed_format::plugin_execution",
+                                    message,
+                                )
+                                .with_source(anyhow::anyhow!(error))
+                            })?;
                     }
                     ProbeResult::NeedMore { .. } => {
-                        return Err(TingError::PluginExecutionError(
+                        return Err(TingError::plugin_execution(
+                            PluginErrorKind::Runtime,
+                            "select_probed_format::plugin_execution",
                             "Format probe exceeded its byte budget or failed to advance".into(),
                         ));
                     }
@@ -172,14 +213,28 @@ impl PluginManager {
 
         let selected = registry
             .select(extension, &results, None)
-            .map_err(|error| TingError::PluginExecutionError(error.to_string()))?;
+            .map_err(|error| {
+                let message = error.to_string();
+                TingError::plugin_execution(
+                    PluginErrorKind::Runtime,
+                    "select_probed_format::plugin_execution",
+                    message,
+                )
+                .with_source(anyhow::anyhow!(error))
+            })?;
         let Some(selected) = selected else {
             return Ok(None);
         };
         let (_, scope, input) = grants
             .into_iter()
             .find(|(key, _, _)| key == &selected)
-            .ok_or_else(|| TingError::PluginExecutionError("Selected format unavailable".into()))?;
+            .ok_or_else(|| {
+                TingError::plugin_execution(
+                    PluginErrorKind::Unavailable,
+                    "select_probed_format::plugin_execution",
+                    "Selected format unavailable".into(),
+                )
+            })?;
         let FormatProviderKey {
             plugin_id,
             capability_id,
@@ -245,9 +300,15 @@ impl PluginManager {
                     ResourceLimits::default(),
                 )
                 .await?;
-            let input = scope
-                .grant_file(source_path, 4096, None)
-                .map_err(|error| TingError::PluginExecutionError(error.to_string()))?;
+            let input = scope.grant_file(source_path, 4096, None).map_err(|error| {
+                let message = error.to_string();
+                TingError::plugin_execution(
+                    PluginErrorKind::Runtime,
+                    "select_local_format_with_operation::plugin_execution",
+                    message,
+                )
+                .with_source(anyhow::anyhow!(error))
+            })?;
             grants.push((key, scope, input));
         }
         self.select_probed_format(extension, principal, &registry, grants)
@@ -286,7 +347,15 @@ impl PluginManager {
                 .await?;
             let input = scope
                 .grant_source(Arc::clone(&source), 4096.min(length), 0)
-                .map_err(|error| TingError::PluginExecutionError(error.to_string()))?;
+                .map_err(|error| {
+                    let message = error.to_string();
+                    TingError::plugin_execution(
+                        PluginErrorKind::Runtime,
+                        "select_source_format::plugin_execution",
+                        message,
+                    )
+                    .with_source(anyhow::anyhow!(error))
+                })?;
             grants.push((key, scope, input));
         }
         self.select_probed_format(extension, principal, &registry, grants)
@@ -346,12 +415,28 @@ impl PluginManager {
                     selected
                         .scope
                         .stat(&selected.input)
-                        .map_err(|error| TingError::PluginExecutionError(error.to_string()))?
+                        .map_err(|error| {
+                            let message = error.to_string();
+                            TingError::plugin_execution(
+                                PluginErrorKind::Runtime,
+                                "extract_selected_format_metadata::plugin_execution",
+                                message,
+                            )
+                            .with_source(anyhow::anyhow!(error))
+                        })?
                         .length
                         .unwrap_or(0),
                 ),
             )
-            .map_err(|error| TingError::PluginExecutionError(error.to_string()))?;
+            .map_err(|error| {
+                let message = error.to_string();
+                TingError::plugin_execution(
+                    PluginErrorKind::Runtime,
+                    "extract_selected_format_metadata::plugin_execution",
+                    message,
+                )
+                .with_source(anyhow::anyhow!(error))
+            })?;
         let result = self
             .invoke_capability(
                 &selected.plugin_id,
@@ -363,25 +448,46 @@ impl PluginManager {
             .await?;
         let metadata: ting_plugin_contract::format::FormatMetadata = serde_json::from_value(result)
             .map_err(|error| {
-                TingError::PluginExecutionError(format!("Invalid format metadata: {error}"))
+                let message = format!("Invalid format metadata: {error}");
+                TingError::plugin_execution(
+                    PluginErrorKind::InvalidManifest,
+                    "extract_selected_format_metadata::plugin_execution",
+                    message,
+                )
+                .with_source(anyhow::anyhow!(error))
             })?;
-        metadata
-            .validate()
-            .map_err(|error| TingError::PluginExecutionError(error.to_string()))?;
+        metadata.validate().map_err(|error| {
+            let message = error.to_string();
+            TingError::plugin_execution(
+                PluginErrorKind::Runtime,
+                "extract_selected_format_metadata::plugin_execution",
+                message,
+            )
+            .with_source(anyhow::anyhow!(error))
+        })?;
         let (cover_bytes, cover_mime) =
             if let Some(ting_plugin_contract::format::AssetRef::HostAsset { id }) =
                 metadata.cover.as_ref()
             {
                 let resource = ting_plugin_contract::format_calls::ResourceId(id.clone());
-                let stat = selected
-                    .scope
-                    .stat(&resource)
-                    .map_err(|error| TingError::PluginExecutionError(error.to_string()))?;
+                let stat = selected.scope.stat(&resource).map_err(|error| {
+                    let message = error.to_string();
+                    TingError::plugin_execution(
+                        PluginErrorKind::Runtime,
+                        "extract_selected_format_metadata::plugin_execution",
+                        message,
+                    )
+                    .with_source(anyhow::anyhow!(error))
+                })?;
                 let length = stat
                     .length
                     .filter(|length| *length <= MAX_METADATA_READ_BYTES)
                     .ok_or_else(|| {
-                        TingError::PluginExecutionError("Invalid format cover length".into())
+                        TingError::plugin_execution(
+                            PluginErrorKind::InvalidOutput,
+                            "extract_selected_format_metadata::plugin_execution",
+                            "Invalid format cover length".into(),
+                        )
                     })?;
                 let mut bytes = Vec::with_capacity(length as usize);
                 while bytes.len() < length as usize {
@@ -394,9 +500,19 @@ impl PluginManager {
                                 ting_plugin_contract::format_calls::MAX_MEDIA_CHUNK_BYTES as usize,
                             ),
                         )
-                        .map_err(|error| TingError::PluginExecutionError(error.to_string()))?;
+                        .map_err(|error| {
+                            let message = error.to_string();
+                            TingError::plugin_execution(
+                                PluginErrorKind::Runtime,
+                                "extract_selected_format_metadata::plugin_execution",
+                                message,
+                            )
+                            .with_source(anyhow::anyhow!(error))
+                        })?;
                     if chunk.is_empty() && !eof {
-                        return Err(TingError::PluginExecutionError(
+                        return Err(TingError::plugin_execution(
+                            PluginErrorKind::Runtime,
+                            "extract_selected_format_metadata::plugin_execution",
                             "Empty format cover chunk".into(),
                         ));
                     }
@@ -436,37 +552,71 @@ impl PluginManager {
                     .cloned()
             })
             .ok_or_else(|| {
-                TingError::PluginExecutionError("Format declaration unavailable".into())
+                TingError::plugin_execution(
+                    PluginErrorKind::Unavailable,
+                    "write_local_format_metadata::plugin_execution",
+                    "Format declaration unavailable".into(),
+                )
             })?;
         if !capability.supports("write_metadata") {
             return Ok(false);
         }
-        let stat = selected
-            .scope
-            .stat(&selected.input)
-            .map_err(|error| TingError::PluginExecutionError(error.to_string()))?;
+        let stat = selected.scope.stat(&selected.input).map_err(|error| {
+            let message = error.to_string();
+            TingError::plugin_execution(
+                PluginErrorKind::Runtime,
+                "write_local_format_metadata::plugin_execution",
+                message,
+            )
+            .with_source(anyhow::anyhow!(error))
+        })?;
         let revision = stat.revision.ok_or_else(|| {
-            TingError::PluginExecutionError("Format source revision unavailable".into())
+            TingError::plugin_execution(
+                PluginErrorKind::Unavailable,
+                "write_local_format_metadata::plugin_execution",
+                "Format source revision unavailable".into(),
+            )
         })?;
         let length = stat.length.unwrap_or(0);
         selected
             .scope
             .extend_readable_end(&selected.input, length)
-            .map_err(|error| TingError::PluginExecutionError(error.to_string()))?;
+            .map_err(|error| {
+                let message = error.to_string();
+                TingError::plugin_execution(
+                    PluginErrorKind::Runtime,
+                    "write_local_format_metadata::plugin_execution",
+                    message,
+                )
+                .with_source(anyhow::anyhow!(error))
+            })?;
         let mut patch = patch;
         if let Some(path) = cover_path {
             let resource = selected
                 .scope
                 .grant_file(path, MAX_METADATA_READ_BYTES, None)
-                .map_err(|error| TingError::PluginExecutionError(error.to_string()))?;
+                .map_err(|error| {
+                    let message = error.to_string();
+                    TingError::plugin_execution(
+                        PluginErrorKind::Runtime,
+                        "write_local_format_metadata::plugin_execution",
+                        message,
+                    )
+                    .with_source(anyhow::anyhow!(error))
+                })?;
             patch.cover = ting_plugin_contract::format_calls::PatchField::Set(
                 ting_plugin_contract::format::AssetRef::HostAsset { id: resource.0 },
             );
         }
-        let output = selected
-            .scope
-            .create_output(None)
-            .map_err(|error| TingError::PluginExecutionError(error.to_string()))?;
+        let output = selected.scope.create_output(None).map_err(|error| {
+            let message = error.to_string();
+            TingError::plugin_execution(
+                PluginErrorKind::Runtime,
+                "write_local_format_metadata::plugin_execution",
+                message,
+            )
+            .with_source(anyhow::anyhow!(error))
+        })?;
         let result = self
             .invoke_capability(
                 &selected.plugin_id,
@@ -480,21 +630,42 @@ impl PluginManager {
             )
             .await?;
         let result: WriteMetadataResult = serde_json::from_value(result).map_err(|error| {
-            TingError::PluginExecutionError(format!("Invalid format write: {error}"))
+            let message = format!("Invalid format write: {error}");
+            TingError::plugin_execution(
+                PluginErrorKind::InvalidOutput,
+                "write_local_format_metadata::plugin_execution",
+                message,
+            )
+            .with_source(anyhow::anyhow!(error))
         })?;
-        let output_stat = selected
-            .scope
-            .stat(&output)
-            .map_err(|error| TingError::PluginExecutionError(error.to_string()))?;
+        let output_stat = selected.scope.stat(&output).map_err(|error| {
+            let message = error.to_string();
+            TingError::plugin_execution(
+                PluginErrorKind::Runtime,
+                "write_local_format_metadata::plugin_execution",
+                message,
+            )
+            .with_source(anyhow::anyhow!(error))
+        })?;
         if output_stat.length != Some(result.bytes_written) {
-            return Err(TingError::PluginExecutionError(
+            return Err(TingError::plugin_execution(
+                PluginErrorKind::Runtime,
+                "write_local_format_metadata::plugin_execution",
                 "Format write length mismatch".into(),
             ));
         }
         selected
             .scope
             .commit_local_output(&output, &selected.input, path, &revision)
-            .map_err(|error| TingError::PluginExecutionError(error.to_string()))?;
+            .map_err(|error| {
+                let message = error.to_string();
+                TingError::plugin_execution(
+                    PluginErrorKind::Runtime,
+                    "write_local_format_metadata::plugin_execution",
+                    message,
+                )
+                .with_source(anyhow::anyhow!(error))
+            })?;
         Ok(true)
     }
 }

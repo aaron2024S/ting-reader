@@ -1,3 +1,4 @@
+use crate::core::app::error::PluginErrorKind;
 use crate::core::app::error::{Result, TingError};
 use std::path::Path;
 
@@ -58,10 +59,11 @@ pub async fn calculate_theme_color_from_bytes(bytes: &[u8]) -> Result<Option<Str
 
     match result {
         Ok(opt) => Ok(opt),
-        Err(e) => Err(TingError::PluginExecutionError(format!(
-            "Task join error: {}",
-            e
-        ))),
+        Err(e) => Err(TingError::plugin_execution(
+            PluginErrorKind::Communication,
+            "calculate_theme_color_from_bytes::plugin_execution",
+            format!("Task join error: {}", e),
+        )),
     }
 }
 

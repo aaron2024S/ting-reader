@@ -1,3 +1,4 @@
+use crate::core::app::error::PluginErrorKind;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use ting_plugin_contract::capability::{ToolDeclaration, route_parameter};
@@ -49,17 +50,30 @@ impl PluginManager {
         metadata: &PluginMetadata,
         replacing: Option<&str>,
     ) -> Result<()> {
-        ting_plugin_contract::capability::validate_capabilities(&metadata.capabilities)
-            .map_err(|error| TingError::PluginLoadError(error.to_string()))?;
+        ting_plugin_contract::capability::validate_capabilities(&metadata.capabilities).map_err(
+            |error| {
+                let message = error.to_string();
+                TingError::plugin_load(
+                    PluginErrorKind::Runtime,
+                    "validate_capability_registration::plugin_load",
+                    message,
+                )
+                .with_source(anyhow::anyhow!(error))
+            },
+        )?;
         for (instance_id, entry) in registry {
             if entry.state == PluginState::Failed || replacing == Some(instance_id.as_str()) {
                 continue;
             }
             if entry.metadata.id == metadata.id {
-                return Err(TingError::PluginLoadError(format!(
-                    "Plugin {} already has a registered instance: {}",
-                    metadata.id, instance_id
-                )));
+                return Err(TingError::plugin_load(
+                    PluginErrorKind::InvalidManifest,
+                    "validate_capability_registration::plugin_load",
+                    format!(
+                        "Plugin {} already has a registered instance: {}",
+                        metadata.id, instance_id
+                    ),
+                ));
             }
             for candidate in &metadata.capabilities {
                 let PluginCapability::HttpRoute(candidate) = candidate else {
@@ -73,13 +87,17 @@ impl PluginManager {
                         &candidate.route,
                         &existing.route,
                     ) {
-                        return Err(TingError::PluginLoadError(format!(
-                            "Route conflict: {} {} with plugin {} capability {}",
-                            candidate.route.method.as_str(),
-                            candidate.route.path,
-                            entry.metadata.id,
-                            existing.id
-                        )));
+                        return Err(TingError::plugin_load(
+                            PluginErrorKind::AbiMismatch,
+                            "validate_capability_registration::plugin_load",
+                            format!(
+                                "Route conflict: {} {} with plugin {} capability {}",
+                                candidate.route.method.as_str(),
+                                candidate.route.path,
+                                entry.metadata.id,
+                                existing.id
+                            ),
+                        ));
                     }
                 }
             }

@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router';
 import apiClient from '../../core/api/client';
+import { apiErrorMessage } from '../../core/api/errors';
 import { useAuthStore } from '../../core/stores/authStore';
 import { useTheme, type Theme } from '../../core/hooks/useTheme';
 import { useAppLanguage } from '../../core/i18n/useAppLanguage';
@@ -193,8 +194,7 @@ const LoginPage: React.FC = () => {
       navigate('/');
     } catch (err: unknown) {
       console.error(t('auth.loginError'), err);
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const msg = (err as any)?.response?.data?.error || t('auth.loginFailed');
+      const msg = apiErrorMessage(err, t('auth.loginFailed'));
       setError(msg);
     } finally {
       setLoading(false);

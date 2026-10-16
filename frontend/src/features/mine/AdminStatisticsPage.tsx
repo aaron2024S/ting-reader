@@ -1,3 +1,4 @@
+import { apiErrorMessage } from '../../core/api/errors';
 import React, { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
@@ -48,7 +49,7 @@ const AdminStatisticsPage: React.FC = () => {
       setReport(res.data);
     } catch (err) {
       console.error('Failed to fetch statistics report', err);
-      setError(t('adminStats.loadFailed'));
+      setError(apiErrorMessage(err, t('adminStats.loadFailed')));
     } finally {
       setLoading(false);
       setRefreshing(false);

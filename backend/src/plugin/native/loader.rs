@@ -9,6 +9,7 @@
 //! - Safe library unloading and resource cleanup
 //! - Thread-safe library management
 
+use crate::core::app::error::{DeadlineErrorKind, LookupErrorKind, PluginErrorKind};
 use crate::core::app::error::{Result, TingError};
 use crate::plugin::native::host_api;
 use crate::plugin::sandbox::ResourceLimits;
@@ -174,33 +175,42 @@ impl NativeLoader {
     ) -> Result<()> {
         // Validate the file exists
         if !path.exists() {
-            return Err(TingError::PluginLoadError(format!(
-                "Library file not found: {:?}",
-                path
-            )));
+            return Err(TingError::plugin_load(
+                PluginErrorKind::Unavailable,
+                "load_library_with_limits::plugin_load",
+                format!("Library file not found: {:?}", path),
+            ));
         }
 
         // Validate file extension matches platform
         if !self.is_valid_library_extension(path) {
-            return Err(TingError::PluginLoadError(format!(
-                "Invalid library file extension: {:?}",
-                path
-            )));
+            return Err(TingError::plugin_load(
+                PluginErrorKind::InvalidOutput,
+                "load_library_with_limits::plugin_load",
+                format!("Invalid library file extension: {:?}", path),
+            ));
         }
 
         // Load the library
         let library = unsafe {
             Library::new(path).map_err(|e| {
-                TingError::PluginLoadError(format!("Failed to load library {:?}: {}", path, e))
+                let message = format!("Failed to load library {:?}: {}", path, e);
+                TingError::plugin_load(
+                    PluginErrorKind::Loading,
+                    "load_library_with_limits::plugin_load",
+                    message,
+                )
+                .with_source(anyhow::anyhow!(e))
             })?
         };
         let abi = Self::load_abi(&library, &plugin_id)?;
         let instance = unsafe { (abi.create)() };
         if instance.is_null() {
-            return Err(TingError::PluginLoadError(format!(
-                "Native plugin {} failed to create instance",
-                plugin_id
-            )));
+            return Err(TingError::plugin_load(
+                PluginErrorKind::Runtime,
+                "load_library_with_limits::plugin_load",
+                format!("Native plugin {} failed to create instance", plugin_id),
+            ));
         }
         if let Err(error) = validate_native_exports(&abi, instance, &metadata) {
             unsafe { (abi.destroy)(instance) };
@@ -230,14 +240,19 @@ impl NativeLoader {
         };
 
         let mut libraries = self.libraries.write().map_err(|e| {
-            TingError::PluginLoadError(format!("Failed to acquire write lock: {}", e))
+            TingError::plugin_load(
+                PluginErrorKind::Synchronization,
+                "load_library_with_limits::plugin_load",
+                format!("Failed to acquire write lock: {}", e),
+            )
         })?;
 
         if libraries.contains_key(&plugin_id) {
-            return Err(TingError::PluginLoadError(format!(
-                "Native plugin {} is already loaded",
-                plugin_id
-            )));
+            return Err(TingError::plugin_load(
+                PluginErrorKind::Loading,
+                "load_library_with_limits::plugin_load",
+                format!("Native plugin {} is already loaded", plugin_id),
+            ));
         }
         libraries.insert(plugin_id, Arc::new(loaded));
 
@@ -248,33 +263,46 @@ impl NativeLoader {
         type Bootstrap = unsafe extern "C" fn() -> *const NativeAbiHeader;
         let bootstrap: Symbol<Bootstrap> = unsafe {
             library.get(NATIVE_BOOTSTRAP_SYMBOL).map_err(|error| {
-                TingError::PluginLoadError(format!(
+                let message = format!(
                     "Native plugin {} lacks ABI v2 bootstrap: {}",
                     plugin_id, error
-                ))
+                );
+                TingError::plugin_load(
+                    PluginErrorKind::AbiMismatch,
+                    "load_abi::plugin_load",
+                    message,
+                )
+                .with_source(anyhow::anyhow!(error))
             })?
         };
         let header = unsafe { bootstrap() };
         if header.is_null() {
-            return Err(TingError::PluginLoadError(format!(
-                "Native plugin {} returned a null ABI header",
-                plugin_id
-            )));
+            return Err(TingError::plugin_load(
+                PluginErrorKind::AbiMismatch,
+                "load_abi::plugin_load",
+                format!("Native plugin {} returned a null ABI header", plugin_id),
+            ));
         }
         let header_value = unsafe { std::ptr::read(header) };
         if header_value.abi_revision != NATIVE_ABI_REVISION
             || header_value.struct_size as usize != std::mem::size_of::<NativePluginAbiV2>()
         {
-            return Err(TingError::PluginLoadError(format!(
-                "Native plugin {} has unsupported ABI revision {} or struct size {}",
-                plugin_id, header_value.abi_revision, header_value.struct_size
-            )));
+            return Err(TingError::plugin_load(
+                PluginErrorKind::AbiMismatch,
+                "load_abi::plugin_load",
+                format!(
+                    "Native plugin {} has unsupported ABI revision {} or struct size {}",
+                    plugin_id, header_value.abi_revision, header_value.struct_size
+                ),
+            ));
         }
         let abi = unsafe { std::ptr::read(header.cast::<NativePluginAbiV2>()) };
         if abi.target != NativeTargetInfo::CURRENT {
-            return Err(TingError::PluginLoadError(format!(
-                "Native plugin {plugin_id} target layout does not match the Host"
-            )));
+            return Err(TingError::plugin_load(
+                PluginErrorKind::Runtime,
+                "load_abi::plugin_load",
+                format!("Native plugin {plugin_id} target layout does not match the Host"),
+            ));
         }
         Ok(abi)
     }
@@ -289,18 +317,28 @@ impl NativeLoader {
     /// * `Err(TingError)` if unloading failed or the library is still in use
     pub fn unload_library(&self, plugin_id: &PluginId) -> Result<()> {
         let mut libraries = self.libraries.write().map_err(|e| {
-            TingError::PluginLoadError(format!("Failed to acquire write lock: {}", e))
+            TingError::plugin_load(
+                PluginErrorKind::Synchronization,
+                "unload_library::plugin_load",
+                format!("Failed to acquire write lock: {}", e),
+            )
         })?;
 
-        let loaded = libraries
-            .get(plugin_id)
-            .ok_or_else(|| TingError::PluginNotFound(format!("Plugin {} not found", plugin_id)))?;
+        let loaded = libraries.get(plugin_id).ok_or_else(|| {
+            TingError::plugin_not_found(
+                LookupErrorKind::Plugin,
+                "unload_library::plugin_not_found",
+                format!("Plugin {} not found", plugin_id),
+            )
+        })?;
 
         let ref_count = loaded.ref_count.load(Ordering::Acquire);
         if ref_count == 0 {
-            return Err(TingError::PluginLoadError(format!(
-                "Native plugin {plugin_id} was already unloaded"
-            )));
+            return Err(TingError::plugin_load(
+                PluginErrorKind::Loading,
+                "unload_library::plugin_load",
+                format!("Native plugin {plugin_id} was already unloaded"),
+            ));
         }
         loaded.ref_count.fetch_sub(1, Ordering::AcqRel);
 
@@ -358,11 +396,19 @@ impl NativeLoader {
     ) -> Result<serde_json::Value> {
         let loaded = {
             let libraries = self.libraries.read().map_err(|e| {
-                TingError::PluginLoadError(format!("Failed to acquire read lock: {}", e))
+                TingError::plugin_load(
+                    PluginErrorKind::Synchronization,
+                    "call_function_with_context::plugin_load",
+                    format!("Failed to acquire read lock: {}", e),
+                )
             })?;
 
             Arc::clone(libraries.get(plugin_id).ok_or_else(|| {
-                TingError::PluginNotFound(format!("Plugin {} not found", plugin_id))
+                TingError::plugin_not_found(
+                    LookupErrorKind::Plugin,
+                    "call_function_with_context::plugin_not_found",
+                    format!("Plugin {} not found", plugin_id),
+                )
             })?)
         };
         let timeout = loaded.resource_limits.max_cpu_time;
@@ -373,23 +419,35 @@ impl NativeLoader {
                 .iter()
                 .any(|cap| cap.supports(function_name))
         {
-            return Err(TingError::PluginExecutionError(format!(
-                "Native plugin {plugin_id} did not declare operation {function_name}"
-            )));
+            return Err(TingError::plugin_execution(
+                PluginErrorKind::UnsupportedOperation,
+                "call_function_with_context::plugin_execution",
+                format!("Native plugin {plugin_id} did not declare operation {function_name}"),
+            ));
         }
 
         let args_str = serde_json::to_vec(&args).map_err(|e| {
-            TingError::PluginExecutionError(format!("Failed to serialize arguments: {}", e))
+            let message = format!("Failed to serialize arguments: {}", e);
+            TingError::plugin_execution(
+                PluginErrorKind::Runtime,
+                "call_function_with_context::plugin_execution",
+                message,
+            )
+            .with_source(anyhow::anyhow!(e))
         })?;
         if args_str.len() > MAX_NATIVE_CONTROL_BYTES {
-            return Err(TingError::PluginExecutionError(
+            return Err(TingError::plugin_execution(
+                PluginErrorKind::Runtime,
+                "call_function_with_context::plugin_execution",
                 "Native control input exceeds the 1 MiB limit".into(),
             ));
         }
         if loaded.unavailable.load(Ordering::Acquire) {
-            return Err(TingError::PluginExecutionError(format!(
-                "Native plugin {plugin_id} is unavailable after a timed-out call"
-            )));
+            return Err(TingError::plugin_execution(
+                PluginErrorKind::Unavailable,
+                "call_function_with_context::plugin_execution",
+                format!("Native plugin {plugin_id} is unavailable after a timed-out call"),
+            ));
         }
         let plugin_id = plugin_id.clone();
         let worker_id = plugin_id.clone();
@@ -418,7 +476,13 @@ impl NativeLoader {
                 let _ = sender.send(result.map(|(output, _)| output));
             })
             .map_err(|error| {
-                TingError::PluginExecutionError(format!("Failed to start Native worker: {error}"))
+                let message = format!("Failed to start Native worker: {error}");
+                TingError::plugin_execution(
+                    PluginErrorKind::Runtime,
+                    "call_function_with_context::plugin_execution",
+                    message,
+                )
+                .with_source(anyhow::anyhow!(error))
             })?;
 
         match receiver.recv_timeout(timeout) {
@@ -430,15 +494,19 @@ impl NativeLoader {
                 if let Ok(mut stats) = loaded.stats.lock() {
                     stats.timeout_errors += 1;
                 }
-                Err(TingError::Timeout(format!(
-                    "Native plugin {plugin_id} exceeded its {timeout:?} call deadline"
-                )))
+                Err(TingError::timeout(
+                    DeadlineErrorKind::Elapsed,
+                    "call_function_with_context::timeout",
+                    format!("Native plugin {plugin_id} exceeded its {timeout:?} call deadline"),
+                ))
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 loaded.unavailable.store(true, Ordering::Release);
-                Err(TingError::PluginExecutionError(format!(
-                    "Native plugin {plugin_id} worker exited without returning"
-                )))
+                Err(TingError::plugin_execution(
+                    PluginErrorKind::Runtime,
+                    "call_function_with_context::plugin_execution",
+                    format!("Native plugin {plugin_id} worker exited without returning"),
+                ))
             }
         }
     }
@@ -459,22 +527,32 @@ impl NativeLoader {
                 .iter()
                 .any(|cap| cap.supports(operation))
         {
-            return Err(TingError::PluginExecutionError(format!(
-                "Native plugin {plugin_id} did not declare operation {operation}"
-            )));
+            return Err(TingError::plugin_execution(
+                PluginErrorKind::UnsupportedOperation,
+                "execute_native_call::plugin_execution",
+                format!("Native plugin {plugin_id} did not declare operation {operation}"),
+            ));
         }
         if loaded.unavailable.load(Ordering::Acquire) {
-            return Err(TingError::PluginExecutionError(format!(
-                "Native plugin {plugin_id} is unavailable"
-            )));
+            return Err(TingError::plugin_execution(
+                PluginErrorKind::Unavailable,
+                "execute_native_call::plugin_execution",
+                format!("Native plugin {plugin_id} is unavailable"),
+            ));
         }
         let _serial = loaded.call_lock.lock().map_err(|error| {
-            TingError::PluginExecutionError(format!("Native instance lock failed: {error}"))
+            TingError::plugin_execution(
+                PluginErrorKind::Synchronization,
+                "execute_native_call::plugin_execution",
+                format!("Native instance lock failed: {error}"),
+            )
         })?;
         if loaded.unavailable.load(Ordering::Acquire) {
-            return Err(TingError::PluginExecutionError(format!(
-                "Native plugin {plugin_id} is unavailable"
-            )));
+            return Err(TingError::plugin_execution(
+                PluginErrorKind::Unavailable,
+                "execute_native_call::plugin_execution",
+                format!("Native plugin {plugin_id} is unavailable"),
+            ));
         }
         if !unsafe {
             (loaded.abi.supports)(
@@ -483,9 +561,11 @@ impl NativeLoader {
                 operation.len(),
             )
         } {
-            return Err(TingError::PluginExecutionError(format!(
-                "Native plugin {plugin_id} does not support {operation}"
-            )));
+            return Err(TingError::plugin_execution(
+                PluginErrorKind::UnsupportedOperation,
+                "execute_native_call::plugin_execution",
+                format!("Native plugin {plugin_id} does not support {operation}"),
+            ));
         }
         let mut allocation = HostAllocation {
             buffer: None,
@@ -512,20 +592,34 @@ impl NativeLoader {
             )
         };
         if code != 0 {
-            return Err(TingError::PluginExecutionError(format!(
-                "Native plugin {plugin_id} returned error code {code} from {operation}"
-            )));
+            return Err(TingError::plugin_execution(
+                PluginErrorKind::UnsupportedOperation,
+                "execute_native_call::plugin_execution",
+                format!("Native plugin {plugin_id} returned error code {code} from {operation}"),
+            ));
         }
         let bytes = allocation.buffer.ok_or_else(|| {
-            TingError::PluginExecutionError("Native plugin did not allocate an output".into())
+            TingError::plugin_execution(
+                PluginErrorKind::InvalidOutput,
+                "execute_native_call::plugin_execution",
+                "Native plugin did not allocate an output".into(),
+            )
         })?;
         if !std::ptr::eq(output.data, bytes.as_ptr()) || output.len > bytes.len() {
-            return Err(TingError::PluginExecutionError(
+            return Err(TingError::plugin_execution(
+                PluginErrorKind::InvalidOutput,
+                "execute_native_call::plugin_execution",
                 "Native plugin returned an invalid Host allocation".into(),
             ));
         }
         let value = serde_json::from_slice(&bytes[..output.len]).map_err(|error| {
-            TingError::PluginExecutionError(format!("Invalid Native response JSON: {error}"))
+            let message = format!("Invalid Native response JSON: {error}");
+            TingError::plugin_execution(
+                PluginErrorKind::InvalidOutput,
+                "execute_native_call::plugin_execution",
+                message,
+            )
+            .with_source(anyhow::anyhow!(error))
         })?;
         Ok((value, bytes.len()))
     }
@@ -533,19 +627,31 @@ impl NativeLoader {
     /// Get resource usage statistics for a plugin
     pub fn get_stats(&self, plugin_id: &PluginId) -> Result<ResourceStats> {
         let libraries = self.libraries.read().map_err(|e| {
-            TingError::PluginLoadError(format!("Failed to acquire read lock: {}", e))
+            TingError::plugin_load(
+                PluginErrorKind::Synchronization,
+                "get_stats::plugin_load",
+                format!("Failed to acquire read lock: {}", e),
+            )
         })?;
 
-        let loaded = libraries
-            .get(plugin_id)
-            .ok_or_else(|| TingError::PluginNotFound(format!("Plugin {} not found", plugin_id)))?;
+        let loaded = libraries.get(plugin_id).ok_or_else(|| {
+            TingError::plugin_not_found(
+                LookupErrorKind::Plugin,
+                "get_stats::plugin_not_found",
+                format!("Plugin {} not found", plugin_id),
+            )
+        })?;
 
         loaded
             .stats
             .lock()
             .map(|stats| stats.clone())
             .map_err(|error| {
-                TingError::PluginLoadError(format!("Native statistics lock failed: {error}"))
+                TingError::plugin_load(
+                    PluginErrorKind::Synchronization,
+                    "get_stats::plugin_load",
+                    format!("Native statistics lock failed: {error}"),
+                )
             })
     }
 
@@ -560,12 +666,20 @@ impl NativeLoader {
     /// Get the path of a loaded library
     pub fn get_library_path(&self, plugin_id: &PluginId) -> Result<PathBuf> {
         let libraries = self.libraries.read().map_err(|e| {
-            TingError::PluginLoadError(format!("Failed to acquire read lock: {}", e))
+            TingError::plugin_load(
+                PluginErrorKind::Synchronization,
+                "get_library_path::plugin_load",
+                format!("Failed to acquire read lock: {}", e),
+            )
         })?;
 
-        let loaded = libraries
-            .get(plugin_id)
-            .ok_or_else(|| TingError::PluginNotFound(format!("Plugin {} not found", plugin_id)))?;
+        let loaded = libraries.get(plugin_id).ok_or_else(|| {
+            TingError::plugin_not_found(
+                LookupErrorKind::Plugin,
+                "get_library_path::plugin_not_found",
+                format!("Plugin {} not found", plugin_id),
+            )
+        })?;
 
         Ok(loaded.path.clone())
     }
@@ -573,12 +687,20 @@ impl NativeLoader {
     /// Get metadata for a loaded library
     pub fn get_metadata(&self, plugin_id: &PluginId) -> Result<PluginMetadata> {
         let libraries = self.libraries.read().map_err(|e| {
-            TingError::PluginLoadError(format!("Failed to acquire read lock: {}", e))
+            TingError::plugin_load(
+                PluginErrorKind::Synchronization,
+                "get_metadata::plugin_load",
+                format!("Failed to acquire read lock: {}", e),
+            )
         })?;
 
-        let loaded = libraries
-            .get(plugin_id)
-            .ok_or_else(|| TingError::PluginNotFound(format!("Plugin {} not found", plugin_id)))?;
+        let loaded = libraries.get(plugin_id).ok_or_else(|| {
+            TingError::plugin_not_found(
+                LookupErrorKind::Plugin,
+                "get_metadata::plugin_not_found",
+                format!("Plugin {} not found", plugin_id),
+            )
+        })?;
 
         Ok(loaded.metadata.clone())
     }
@@ -588,12 +710,20 @@ impl NativeLoader {
     /// This prevents the library from being unloaded while it's in use.
     pub fn increment_ref_count(&self, plugin_id: &PluginId) -> Result<()> {
         let libraries = self.libraries.read().map_err(|e| {
-            TingError::PluginLoadError(format!("Failed to acquire read lock: {}", e))
+            TingError::plugin_load(
+                PluginErrorKind::Synchronization,
+                "increment_ref_count::plugin_load",
+                format!("Failed to acquire read lock: {}", e),
+            )
         })?;
 
-        let loaded = libraries
-            .get(plugin_id)
-            .ok_or_else(|| TingError::PluginNotFound(format!("Plugin {} not found", plugin_id)))?;
+        let loaded = libraries.get(plugin_id).ok_or_else(|| {
+            TingError::plugin_not_found(
+                LookupErrorKind::Plugin,
+                "increment_ref_count::plugin_not_found",
+                format!("Plugin {} not found", plugin_id),
+            )
+        })?;
 
         loaded.ref_count.fetch_add(1, Ordering::AcqRel);
 
@@ -658,11 +788,15 @@ fn validate_native_exports(
     missing.sort_unstable();
     missing.dedup();
     if !missing.is_empty() {
-        return Err(TingError::PluginLoadError(format!(
-            "Native plugin {} is missing declared function exports: {}",
-            metadata.instance_id(),
-            missing.join(", ")
-        )));
+        return Err(TingError::plugin_load(
+            PluginErrorKind::InvalidManifest,
+            "validate_native_exports::plugin_load",
+            format!(
+                "Native plugin {} is missing declared function exports: {}",
+                metadata.instance_id(),
+                missing.join(", ")
+            ),
+        ));
     }
     Ok(())
 }

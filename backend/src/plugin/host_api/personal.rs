@@ -1,6 +1,7 @@
 //! Host access to playlists, favorites, bookmarks and user settings.
 
 use super::{PluginHostGateway, PluginHostUser, required_string_param, string_param, usize_param};
+use crate::core::app::error::{AccessErrorKind, CodecErrorKind, InputErrorKind, LookupErrorKind};
 use crate::core::app::error::{Result, TingError};
 use crate::core::books::{BookmarkService, CreateBookmark};
 use crate::db::models::{Favorite, Playlist, PlaylistItem, UserSettings};
@@ -148,7 +149,9 @@ impl PluginHostGateway {
             None => existing.title.clone(),
         };
         if title.is_empty() {
-            return Err(TingError::InvalidRequest(
+            return Err(TingError::invalid_request(
+                InputErrorKind::InvalidValue,
+                "playlists_update::invalid_request",
                 "Playlist name cannot be empty".to_string(),
             ));
         }
@@ -365,13 +368,21 @@ impl PluginHostGateway {
                 Ok(serde_json::json!({"ok": true, "id": request.bookmark_id}))
             }
             _ => {
-                return Err(TingError::InvalidRequest(
+                return Err(TingError::invalid_request(
+                    InputErrorKind::UnsupportedValue,
+                    "bookmarks_invoke::invalid_request",
                     "Unknown bookmark Host method".into(),
                 ));
             }
         };
         result.map_err(|error| {
-            TingError::SerializationError(format!("Bookmark serialization failed: {error}"))
+            let message = format!("Bookmark serialization failed: {error}");
+            TingError::serialization(
+                CodecErrorKind::InvalidData,
+                "bookmarks_invoke::serialization",
+                message,
+            )
+            .with_source(anyhow::anyhow!(error))
         })
     }
 
@@ -401,10 +412,11 @@ impl PluginHostGateway {
     ) -> Result<Value> {
         let key = required_string_param(params, "key")?;
         if is_reserved_settings_key(&key) {
-            return Err(TingError::InvalidRequest(format!(
-                "user_settings key '{}' is reserved",
-                key
-            )));
+            return Err(TingError::invalid_request(
+                InputErrorKind::InvalidValue,
+                "user_settings_set::invalid_request",
+                format!("user_settings key '{}' is reserved", key),
+            ));
         }
 
         let value = params.get("value").cloned().unwrap_or(Value::Null);
@@ -414,7 +426,13 @@ impl PluginHostGateway {
         map.insert(key.clone(), value);
 
         let json_text = serde_json::to_string(&Value::Object(map)).map_err(|e| {
-            TingError::SerializationError(format!("Failed to serialize user_settings: {}", e))
+            let message = format!("Failed to serialize user_settings: {}", e);
+            TingError::serialization(
+                CodecErrorKind::InvalidData,
+                "user_settings_set::serialization",
+                message,
+            )
+            .with_source(anyhow::anyhow!(e))
         })?;
 
         let settings = match existing {
@@ -458,10 +476,16 @@ impl PluginHostGateway {
             .find_by_user_and_id(playlist_id, &user.id)
             .await?
             .ok_or_else(|| {
-                TingError::NotFound(format!("Playlist with id {} not found", playlist_id))
+                TingError::not_found(
+                    LookupErrorKind::Playlist,
+                    "load_owned_playlist::not_found",
+                    format!("Playlist with id {} not found", playlist_id),
+                )
             })?;
         if playlist.user_id != user.id {
-            return Err(TingError::PermissionDenied(
+            return Err(TingError::permission(
+                AccessErrorKind::ResourceDenied,
+                "load_owned_playlist::permission",
                 "Playlist does not belong to current user".to_string(),
             ));
         }
@@ -470,8 +494,15 @@ impl PluginHostGateway {
 }
 
 fn decode_bookmark_params<T: DeserializeOwned>(params: &Value) -> Result<T> {
-    serde_json::from_value(params.clone())
-        .map_err(|error| TingError::InvalidRequest(format!("Invalid bookmark parameters: {error}")))
+    serde_json::from_value(params.clone()).map_err(|error| {
+        let message = format!("Invalid bookmark parameters: {error}");
+        TingError::invalid_request(
+            InputErrorKind::InvalidValue,
+            "decode_bookmark_params::invalid_request",
+            message,
+        )
+        .with_source(anyhow::anyhow!(error))
+    })
 }
 
 fn plugin_host_playlist_value(playlist: Playlist) -> Value {
@@ -512,7 +543,11 @@ fn required_playlist_name(params: &Value) -> Result<String> {
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned);
     raw.ok_or_else(|| {
-        TingError::InvalidRequest("playlists.create requires a non-empty name".to_string())
+        TingError::invalid_request(
+            InputErrorKind::MissingField,
+            "required_playlist_name::invalid_request",
+            "playlists.create requires a non-empty name".to_string(),
+        )
     })
 }
 
@@ -552,10 +587,16 @@ fn required_playlist_item_pair(params: &Value) -> Result<(String, String)> {
         .filter(|value| !value.is_empty())
         .map(|value| value.to_ascii_lowercase())
         .ok_or_else(|| {
-            TingError::InvalidRequest("playlist item requires 'item_type'".to_string())
+            TingError::invalid_request(
+                InputErrorKind::MissingField,
+                "required_playlist_item_pair::invalid_request",
+                "playlist item requires 'item_type'".to_string(),
+            )
         })?;
     if !matches!(item_type.as_str(), "book" | "series") {
-        return Err(TingError::InvalidRequest(
+        return Err(TingError::invalid_request(
+            InputErrorKind::InvalidValue,
+            "required_playlist_item_pair::invalid_request",
             "playlist item_type must be 'book' or 'series'".to_string(),
         ));
     }
@@ -566,7 +607,13 @@ fn required_playlist_item_pair(params: &Value) -> Result<(String, String)> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
-        .ok_or_else(|| TingError::InvalidRequest("playlist item requires 'item_id'".to_string()))?;
+        .ok_or_else(|| {
+            TingError::invalid_request(
+                InputErrorKind::MissingField,
+                "required_playlist_item_pair::invalid_request",
+                "playlist item requires 'item_id'".to_string(),
+            )
+        })?;
 
     Ok((item_type, item_id))
 }

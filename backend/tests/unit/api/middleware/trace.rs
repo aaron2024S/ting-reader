@@ -126,3 +126,63 @@ async fn test_trace_id_unique_per_request() {
     // Trace IDs should be different
     assert_ne!(trace_id1, trace_id2);
 }
+
+#[tokio::test]
+async fn concurrent_error_responses_keep_their_own_request_trace() {
+    use crate::core::app::error::{InputErrorKind, TingError};
+
+    let app = Router::new()
+        .route(
+            "/business",
+            get(|| async {
+                tokio::task::yield_now().await;
+                TingError::validation(
+                    InputErrorKind::MissingField,
+                    "create_book",
+                    "Title is required".into(),
+                )
+            }),
+        )
+        .route(
+            "/auth",
+            get(|| async { crate::api::middleware::auth::AuthError::MissingToken }),
+        )
+        .route(
+            "/limit",
+            get(|| async {
+                crate::api::middleware::rate_limit::RateLimitError::LimitExceeded {
+                    limit: 1,
+                    window_seconds: 60,
+                    retry_after: 10,
+                }
+            }),
+        )
+        .layer(middleware::from_fn(trace_id_middleware));
+
+    let responses = futures::future::join_all(
+        ["/business", "/auth", "/limit", "/business"]
+            .into_iter()
+            .map(|path| {
+                app.clone()
+                    .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+            }),
+    )
+    .await;
+    let mut trace_ids = std::collections::HashSet::new();
+    for response in responses {
+        let response = response.unwrap();
+        let trace_id = response.headers()[TRACE_ID_HEADER]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let bytes = axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["trace_id"], trace_id);
+        assert!(body["details"]["reason"].is_string());
+        assert!(body["details"]["operation"].is_string());
+        assert!(body["details"]["retryable"].is_boolean());
+        assert!(trace_ids.insert(trace_id));
+    }
+}

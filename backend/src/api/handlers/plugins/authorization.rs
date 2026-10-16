@@ -3,6 +3,7 @@
 use crate::api::require_admin;
 use crate::api::state::AppState;
 use crate::auth::middleware::AuthUser;
+use crate::core::app::error::{AccessErrorKind, AuthenticationErrorKind};
 use crate::core::app::error::{Result, TingError};
 use crate::plugin::PluginHostUser;
 use crate::plugin::manager::capabilities::RegisteredCapability;
@@ -65,7 +66,13 @@ pub(super) async fn issue_plugin_client_grant(
 ) -> Result<String> {
     let expiration = Utc::now()
         .checked_add_signed(chrono::Duration::seconds(PLUGIN_CLIENT_GRANT_TTL_SECONDS))
-        .ok_or_else(|| TingError::AuthenticationError("Failed to calculate grant expiry".into()))?
+        .ok_or_else(|| {
+            TingError::authentication(
+                AuthenticationErrorKind::ExpiredCredentials,
+                "issue_plugin_client_grant::authentication",
+                "Failed to calculate grant expiry".into(),
+            )
+        })?
         .timestamp() as usize;
     let claims = PluginClientGrantClaims {
         sub: user.id.clone(),
@@ -81,7 +88,13 @@ pub(super) async fn issue_plugin_client_grant(
         &EncodingKey::from_secret(secret.as_bytes()),
     )
     .map_err(|error| {
-        TingError::AuthenticationError(format!("Failed to issue plugin client grant: {error}"))
+        let message = format!("Failed to issue plugin client grant: {error}");
+        TingError::authentication(
+            AuthenticationErrorKind::InvalidCredentials,
+            "issue_plugin_client_grant::authentication",
+            message,
+        )
+        .with_source(anyhow::anyhow!(error))
     })
 }
 
@@ -97,7 +110,9 @@ pub(super) async fn require_plugin_client_grant(
         || claims.plugin_id != plugin_id
         || capability_id.is_some_and(|expected| claims.capability_id != expected)
     {
-        return Err(TingError::PermissionDenied(
+        return Err(TingError::permission(
+            AccessErrorKind::ResourceDenied,
+            "require_plugin_client_grant::permission",
             "Plugin client grant does not match this request".to_string(),
         ));
     }
@@ -109,7 +124,9 @@ pub(super) async fn decode_plugin_client_grant(
     grant: &str,
 ) -> Result<PluginClientGrantClaims> {
     if grant.len() > 4096 {
-        return Err(TingError::PermissionDenied(
+        return Err(TingError::permission(
+            AccessErrorKind::ResourceDenied,
+            "decode_plugin_client_grant::permission",
             "Invalid plugin client grant".to_string(),
         ));
     }
@@ -138,9 +155,17 @@ pub(super) fn decode_plugin_client_grant_with_secrets(
             .ok()
             .map(|token| token.claims)
         })
-        .ok_or_else(|| TingError::PermissionDenied("Invalid plugin client grant".into()))?;
+        .ok_or_else(|| {
+            TingError::permission(
+                AccessErrorKind::ResourceDenied,
+                "decode_plugin_client_grant_with_secrets::permission",
+                "Invalid plugin client grant".into(),
+            )
+        })?;
     if claims.grant_type != "plugin_client" {
-        return Err(TingError::PermissionDenied(
+        return Err(TingError::permission(
+            AccessErrorKind::ResourceDenied,
+            "decode_plugin_client_grant_with_secrets::permission",
             "Invalid plugin client grant".to_string(),
         ));
     }

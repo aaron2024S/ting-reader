@@ -6,6 +6,7 @@
 use super::super::types::{Plugin, PluginContext, PluginInvocationContext, PluginMetadata};
 use super::host_api::NativeHostInvocationContext;
 use super::loader::NativeLoader;
+use crate::core::app::error::PluginErrorKind;
 use crate::core::app::error::{Result, TingError};
 use crate::plugin::PluginHostGatewayHandle;
 use serde_json::Value;
@@ -72,14 +73,16 @@ impl NativePlugin {
         context: &PluginInvocationContext,
     ) -> Result<Value> {
         let is_initialized = *self.initialized.read().map_err(|e| {
-            TingError::PluginExecutionError(format!("Failed to check initialization state: {}", e))
+            let message = format!("Failed to check initialization state: {}", e);
+            TingError::plugin_execution(PluginErrorKind::Synchronization, "call_method", message)
         })?;
 
         if !is_initialized {
-            return Err(TingError::PluginExecutionError(format!(
-                "Plugin {} is not initialized",
-                self.plugin_id
-            )));
+            return Err(TingError::plugin_execution(
+                PluginErrorKind::Unavailable,
+                "call_method::plugin_execution",
+                format!("Plugin {} is not initialized", self.plugin_id),
+            ));
         }
 
         // Call the native function through the loader in a blocking task
@@ -100,7 +103,15 @@ impl NativePlugin {
             loader.call_function_with_context(&plugin_id, &method, params, Some(host_context))
         })
         .await
-        .map_err(|e| TingError::PluginExecutionError(format!("Task join error: {}", e)))?
+        .map_err(|e| {
+            let message = format!("Task join error: {}", e);
+            TingError::plugin_execution(
+                PluginErrorKind::Communication,
+                "call_method::plugin_execution",
+                message,
+            )
+            .with_source(anyhow::anyhow!(e))
+        })?
     }
 }
 
@@ -154,13 +165,22 @@ impl Plugin for NativePlugin {
             )
         })
         .await
-        .map_err(|e| TingError::PluginExecutionError(format!("Task join error: {}", e)))?;
+        .map_err(|e| {
+            let message = format!("Task join error: {}", e);
+            TingError::plugin_execution(
+                PluginErrorKind::Communication,
+                "initialize::plugin_execution",
+                message,
+            )
+            .with_source(anyhow::anyhow!(e))
+        })?;
 
         crate::plugin::require_successful_lifecycle_result(result?, "initialize")?;
 
         // Mark as initialized
         let mut initialized = self.initialized.write().map_err(|e| {
-            TingError::PluginExecutionError(format!("Failed to update initialization state: {}", e))
+            let message = format!("Failed to update initialization state: {}", e);
+            TingError::plugin_execution(PluginErrorKind::Synchronization, "initialize", message)
         })?;
         *initialized = true;
 
@@ -188,13 +208,22 @@ impl Plugin for NativePlugin {
             loader.call_function(&plugin_id, "shutdown", shutdown_params)
         })
         .await
-        .map_err(|e| TingError::PluginExecutionError(format!("Task join error: {}", e)))?;
+        .map_err(|e| {
+            let message = format!("Task join error: {}", e);
+            TingError::plugin_execution(
+                PluginErrorKind::Communication,
+                "shutdown::plugin_execution",
+                message,
+            )
+            .with_source(anyhow::anyhow!(e))
+        })?;
 
         crate::plugin::require_successful_lifecycle_result(result?, "shutdown")?;
 
         // Mark as not initialized
         let mut initialized = self.initialized.write().map_err(|e| {
-            TingError::PluginExecutionError(format!("Failed to update initialization state: {}", e))
+            let message = format!("Failed to update initialization state: {}", e);
+            TingError::plugin_execution(PluginErrorKind::Synchronization, "shutdown", message)
         })?;
         *initialized = false;
 

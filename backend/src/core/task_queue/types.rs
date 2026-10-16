@@ -1,3 +1,4 @@
+use crate::core::app::error::{ErrorResponse, TingError};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::time::Duration;
@@ -38,6 +39,12 @@ impl TaskStatus {
 pub struct RetryPolicy {
     pub max_retries: u32,
     pub backoff: BackoffStrategy,
+}
+
+impl RetryPolicy {
+    pub fn should_retry(&self, error: &TingError, failures: u32) -> bool {
+        error.is_retryable() && failures < self.max_retries
+    }
 }
 
 impl Default for RetryPolicy {
@@ -115,7 +122,7 @@ pub struct Task {
     pub timeout: Duration,
     pub status: TaskStatus,
     pub retries: u32,
-    pub error: Option<String>,
+    pub error: Option<ErrorResponse>,
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 

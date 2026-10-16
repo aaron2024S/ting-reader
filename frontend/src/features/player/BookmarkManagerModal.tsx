@@ -1,3 +1,4 @@
+import { apiErrorMessage } from '../../core/api/errors';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Bookmark, BookmarkPlus, Pencil, Trash2, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -40,7 +41,7 @@ const BookmarkManagerModal: React.FC<Props> = ({ bookId, bookTitle, chapterId, p
     } catch (error) {
       if (controller.signal.aborted) return;
       console.error('获取书签失败', error);
-      alert(t('bookmarks.loadFailed', '加载书签失败'));
+      alert(apiErrorMessage(error, t('bookmarks.loadFailed', '加载书签失败')));
     } finally {
       if (!controller.signal.aborted) setLoading(false);
     }
@@ -62,7 +63,7 @@ const BookmarkManagerModal: React.FC<Props> = ({ bookId, bookTitle, chapterId, p
       await load();
     } catch (error) {
       console.error('添加书签失败', error);
-      alert(t('bookmarks.saveFailed', '添加书签失败'));
+      alert(apiErrorMessage(error, t('bookmarks.saveFailed', '添加书签失败')));
     } finally {
       setSaving(false);
     }
@@ -76,7 +77,7 @@ const BookmarkManagerModal: React.FC<Props> = ({ bookId, bookTitle, chapterId, p
       await load(1);
     } catch (error) {
       console.error('更新书签失败', error);
-      alert(t('common.saveFailed'));
+      alert(apiErrorMessage(error, t('common.saveFailed')));
     }
   };
 
@@ -86,7 +87,7 @@ const BookmarkManagerModal: React.FC<Props> = ({ bookId, bookTitle, chapterId, p
       await load(items.length === 1 && page > 1 ? page - 1 : page);
     } catch (error) {
       console.error('删除书签失败', error);
-      alert(t('common.deleteFailed', '删除失败'));
+      alert(apiErrorMessage(error, t('common.deleteFailed', '删除失败')));
     }
   };
 

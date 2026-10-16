@@ -2,6 +2,7 @@
 //!
 //! Runtime field order stops and joins the watchdog before V8 disposal.
 
+use crate::core::app::error::{DeadlineErrorKind, InputErrorKind, LimitErrorKind, PluginErrorKind};
 use crate::core::app::error::{Result, TingError};
 use deno_core::{JsRuntime, v8};
 use std::ffi::c_void;
@@ -30,7 +31,9 @@ struct BudgetState {
 impl JsBudget {
     pub fn new(memory_limit: usize) -> Result<Self> {
         if memory_limit < 16 * 1024 * 1024 {
-            return Err(TingError::InvalidRequest(
+            return Err(TingError::invalid_request(
+                InputErrorKind::InvalidValue,
+                "new::invalid_request",
                 "JS memory budget must be at least 16 MiB".into(),
             ));
         }
@@ -108,13 +111,19 @@ impl JsBudget {
 
     pub fn check(&self) -> Result<()> {
         match self.0.reason.load(Ordering::SeqCst) {
-            TIMED_OUT => Err(TingError::Timeout(
+            TIMED_OUT => Err(TingError::timeout(
+                DeadlineErrorKind::Elapsed,
+                "check::timeout",
                 "JS execution exceeded its deadline; instance is unavailable".into(),
             )),
-            MEMORY_EXCEEDED => Err(TingError::ResourceLimitExceeded(
+            MEMORY_EXCEEDED => Err(TingError::resource_limit(
+                LimitErrorKind::Memory,
+                "check::resource_limit",
                 "JS memory budget exceeded; instance is unavailable".into(),
             )),
-            CANCELLED => Err(TingError::PluginExecutionError(
+            CANCELLED => Err(TingError::plugin_execution(
+                PluginErrorKind::Cancelled,
+                "check::plugin_execution",
                 "JS invocation was cancelled; instance is unavailable".into(),
             )),
             _ => Ok(()),

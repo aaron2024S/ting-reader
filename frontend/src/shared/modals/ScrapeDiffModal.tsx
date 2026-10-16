@@ -1,3 +1,4 @@
+import { apiErrorMessage } from '../../core/api/errors';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import apiClient from '../../core/api/client';
@@ -143,7 +144,7 @@ const ScrapeDiffModal: React.FC<Props> = ({ bookId, onClose, onSave }) => {
       setSearchValuesBySourceId(buildSearchValuesBySource(enabledSources, currentBook));
     } catch (err) {
       console.error('Failed to load scrape data', err);
-      setError(t('scrapeDiff.loadFailed'));
+      setError(apiErrorMessage(err, t('scrapeDiff.loadFailed')));
     } finally {
       setLoading(false);
     }
@@ -308,7 +309,7 @@ const ScrapeDiffModal: React.FC<Props> = ({ bookId, onClose, onSave }) => {
             return {
               source,
               items: [] as ScraperSearchItem[],
-              error: t('scrapeDiff.searchFailed'),
+              error: apiErrorMessage(err, t('scrapeDiff.searchFailed')),
             };
           }
         })
@@ -348,7 +349,7 @@ const ScrapeDiffModal: React.FC<Props> = ({ bookId, onClose, onSave }) => {
       setResults([]);
       setSelectedResultIndex(null);
       setResultView('list');
-      setError(t('scrapeDiff.searchFailed'));
+      setError(apiErrorMessage(err, t('scrapeDiff.searchFailed')));
       setSearchErrors({});
       setStep('results');
     } finally {
@@ -493,7 +494,7 @@ const ScrapeDiffModal: React.FC<Props> = ({ bookId, onClose, onSave }) => {
       onClose();
     } catch (err) {
       console.error('Failed to apply scrape result', err);
-      alert(t('scrapeDiff.applyFailed'));
+      alert(apiErrorMessage(err, t('scrapeDiff.applyFailed')));
     } finally {
       setSaving(false);
     }

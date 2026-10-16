@@ -83,6 +83,39 @@ pub struct TaskRecord {
     pub updated_at: String,
 }
 
+impl TaskRecord {
+    /// The existing TEXT column stores an error envelope. Historical rows
+    /// contain only display text, so their original classification is unknown.
+    pub fn failure(&self) -> Option<crate::core::app::error::ErrorResponse> {
+        use crate::core::app::error::{ErrorResponse, TaskErrorKind, TingError};
+        self.error.as_ref().map(|stored| {
+            serde_json::from_str(stored).unwrap_or_else(|_| {
+                ErrorResponse::from_error_with_trace_id(
+                    &TingError::task(TaskErrorKind::Unclassified, "task.history", stored.clone()),
+                    format!("legacy-task-{}", self.id),
+                )
+            })
+        })
+    }
+
+    pub fn encode_failure(
+        error: Option<&crate::core::app::error::ErrorResponse>,
+    ) -> crate::core::app::error::Result<Option<String>> {
+        use crate::core::app::error::{CodecErrorKind, TingError};
+        error
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|error| {
+                TingError::serialization(
+                    CodecErrorKind::InvalidData,
+                    "task.persist_error",
+                    "Failed to serialize task error".into(),
+                )
+                .with_source(error.into())
+            })
+    }
+}
+
 /// User record in the database
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct User {

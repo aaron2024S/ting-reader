@@ -1,3 +1,4 @@
+import { apiErrorMessage } from '../../core/api/errors';
 import React, { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Link } from "react-router";
@@ -105,7 +106,7 @@ const MyPage: React.FC = () => {
       setTimeout(() => setAccountSaved(false), 1800);
     } catch (err: unknown) {
       const message =
-        err instanceof Error ? err.message : t("mine.updateFailed");
+        apiErrorMessage(err, t("mine.updateFailed"));
       alert(message);
     }
   };

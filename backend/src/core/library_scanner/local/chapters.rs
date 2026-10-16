@@ -3,6 +3,7 @@ use super::super::shared::{
     apply_chapter_title_template, chapter_title_template_preserves_raw,
     clean_or_preserve_chapter_title,
 };
+use crate::core::app::error::LookupErrorKind;
 use crate::core::app::error::{Result, TingError};
 use crate::db::models::Chapter;
 use crate::db::repository::Repository;
@@ -97,11 +98,13 @@ impl LibraryScanner {
             chapter_title_template_preserves_raw(chapter_title_template);
 
         // Fetch book to check for regex rule
-        let book = self
-            .book_repo
-            .find_by_id(book_id)
-            .await?
-            .ok_or_else(|| TingError::NotFound("Book not found".to_string()))?;
+        let book = self.book_repo.find_by_id(book_id).await?.ok_or_else(|| {
+            TingError::not_found(
+                LookupErrorKind::Book,
+                "process_chapters::not_found",
+                "Book not found".to_string(),
+            )
+        })?;
 
         let chapter_regex = if let Some(pattern) = &book.chapter_regex {
             regex::Regex::new(pattern).ok()

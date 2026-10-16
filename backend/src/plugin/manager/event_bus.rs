@@ -1,5 +1,6 @@
 //! Manager-owned subscriptions for one plugin event bus instance. Callbacks are
 //! invoked after the lock is released so they can publish or unsubscribe.
+use crate::core::app::error::{InputErrorKind, LimitErrorKind, LookupErrorKind, PluginErrorKind};
 use crate::core::app::error::{Result, TingError};
 use crate::plugin::types::PluginEventBus;
 use serde_json::Value;
@@ -26,7 +27,9 @@ impl DefaultPluginEventBus {
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
         {
-            return Err(TingError::ValidationError(
+            return Err(TingError::validation(
+                InputErrorKind::InvalidValue,
+                "validate_event::validation",
                 "Invalid plugin event name".into(),
             ));
         }
@@ -38,14 +41,22 @@ impl PluginEventBus for DefaultPluginEventBus {
     fn publish(&self, event_type: &str, data: Value) -> Result<()> {
         Self::validate_event(event_type)?;
         if data.to_string().len() > 1024 * 1024 {
-            return Err(TingError::ResourceLimitExceeded(
+            return Err(TingError::resource_limit(
+                LimitErrorKind::Payload,
+                "publish::resource_limit",
                 "Event exceeds 1 MiB".into(),
             ));
         }
         let handlers: Vec<_> = self
             .subscriptions
             .read()
-            .map_err(|_| TingError::PluginExecutionError("Event subscriptions unavailable".into()))?
+            .map_err(|_| {
+                TingError::plugin_execution(
+                    PluginErrorKind::Unavailable,
+                    "publish::plugin_execution",
+                    "Event subscriptions unavailable".into(),
+                )
+            })?
             .values()
             .filter(|(name, _)| name == event_type)
             .map(|(_, handler)| Arc::clone(handler))
@@ -53,7 +64,11 @@ impl PluginEventBus for DefaultPluginEventBus {
         for handler in handlers {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler(data.clone())))
                 .map_err(|_| {
-                    TingError::PluginExecutionError("Plugin event handler panicked".into())
+                    TingError::plugin_execution(
+                        PluginErrorKind::Runtime,
+                        "publish::plugin_execution",
+                        "Plugin event handler panicked".into(),
+                    )
                 })?;
         }
         Ok(())
@@ -65,10 +80,16 @@ impl PluginEventBus for DefaultPluginEventBus {
     ) -> Result<String> {
         Self::validate_event(event_type)?;
         let mut subscriptions = self.subscriptions.write().map_err(|_| {
-            TingError::PluginExecutionError("Event subscriptions unavailable".into())
+            TingError::plugin_execution(
+                PluginErrorKind::Unavailable,
+                "subscribe::plugin_execution",
+                "Event subscriptions unavailable".into(),
+            )
         })?;
         if subscriptions.len() >= 1024 {
-            return Err(TingError::ResourceLimitExceeded(
+            return Err(TingError::resource_limit(
+                LimitErrorKind::Payload,
+                "subscribe::resource_limit",
                 "Too many event subscriptions".into(),
             ));
         }
@@ -80,10 +101,18 @@ impl PluginEventBus for DefaultPluginEventBus {
         let removed = self
             .subscriptions
             .write()
-            .map_err(|_| TingError::PluginExecutionError("Event subscriptions unavailable".into()))?
+            .map_err(|_| {
+                TingError::plugin_execution(
+                    PluginErrorKind::Unavailable,
+                    "unsubscribe::plugin_execution",
+                    "Event subscriptions unavailable".into(),
+                )
+            })?
             .remove(subscription_id);
         if removed.is_none() {
-            return Err(TingError::NotFound(
+            return Err(TingError::not_found(
+                LookupErrorKind::Resource,
+                "unsubscribe::not_found",
                 "Event subscription does not exist".into(),
             ));
         }

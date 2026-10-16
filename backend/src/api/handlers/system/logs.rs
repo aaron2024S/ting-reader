@@ -1,4 +1,5 @@
 use crate::api::state::AppState;
+use crate::core::app::error::ExternalErrorKind;
 use crate::core::app::error::{Result, TingError};
 use crate::core::app::logging::{
     LogEntry, LogQueryFilter, normalized_log_filter as normalized_filter,
@@ -135,6 +136,7 @@ pub async fn get_system_logs(
 
         // Convert tasks to LogEntry and add them
         for task in tasks {
+            let failure = task.failure();
             let module = match task.task_type.as_str() {
                 "scan" | "library_scan" | "scrape" => "audit::scan",
                 "write_metadata" => "audit::metadata",
@@ -147,31 +149,27 @@ pub async fn get_system_logs(
                 "INFO"
             };
 
-            let (message, raw_message, message_key, message_params) =
-                if let Some(key) = task.message_key {
-                    let message_params = task
-                        .message_params
-                        .and_then(|params| serde_json::from_str(&params).ok());
-                    (
-                        task.message.clone().unwrap_or_default(),
-                        task.message.filter(|value| !value.is_empty()),
-                        Some(key),
-                        message_params,
-                    )
-                } else if let Some(msg) = task.message {
-                    if !msg.is_empty() {
-                        (msg.clone(), Some(msg), None, None)
-                    } else if let Some(payload) = task.payload {
-                        let params = serde_json::json!({ "payload": payload });
-                        (
-                            String::new(),
-                            None,
-                            Some("task.execute_with_payload".to_string()),
-                            Some(params),
-                        )
-                    } else {
-                        (String::new(), None, Some("task.execute".to_string()), None)
-                    }
+            let (message, raw_message, message_key, message_params) = if let Some(error) = &failure
+            {
+                (
+                    error.message.clone(),
+                    Some(error.message.clone()),
+                    None,
+                    None,
+                )
+            } else if let Some(key) = task.message_key {
+                let message_params = task
+                    .message_params
+                    .and_then(|params| serde_json::from_str(&params).ok());
+                (
+                    task.message.clone().unwrap_or_default(),
+                    task.message.filter(|value| !value.is_empty()),
+                    Some(key),
+                    message_params,
+                )
+            } else if let Some(msg) = task.message {
+                if !msg.is_empty() {
+                    (msg.clone(), Some(msg), None, None)
                 } else if let Some(payload) = task.payload {
                     let params = serde_json::json!({ "payload": payload });
                     (
@@ -182,7 +180,18 @@ pub async fn get_system_logs(
                     )
                 } else {
                     (String::new(), None, Some("task.execute".to_string()), None)
-                };
+                }
+            } else if let Some(payload) = task.payload {
+                let params = serde_json::json!({ "payload": payload });
+                (
+                    String::new(),
+                    None,
+                    Some("task.execute_with_payload".to_string()),
+                    Some(params),
+                )
+            } else {
+                (String::new(), None, Some("task.execute".to_string()), None)
+            };
 
             let timestamp = if task.status == "running" {
                 // Update running tasks to "now" so they appear at the top, or use updated_at
@@ -203,6 +212,7 @@ pub async fn get_system_logs(
                     "task_id": task.id.clone(),
                     "task_status": task.status.clone(),
                     "task_type": task.task_type.clone(),
+                    "error": failure,
                 })),
                 task_id: Some(task.id),
                 task_status: Some(task.status),
@@ -218,7 +228,15 @@ pub async fn get_system_logs(
         filtered
     })
     .await
-    .map_err(|e| TingError::ExternalError(e.to_string()))?;
+    .map_err(|e| {
+        let message = e.to_string();
+        TingError::external_tool(
+            ExternalErrorKind::Response,
+            "get_system_logs::external_tool",
+            message,
+        )
+        .with_source(anyhow::anyhow!(e))
+    })?;
 
     let total = filtered_logs.len();
     let (page, page_size) = normalized_pagination(query.page, query.page_size);
@@ -262,7 +280,15 @@ pub async fn export_system_logs(
             .collect::<Vec<_>>()
     })
     .await
-    .map_err(|e| TingError::ExternalError(e.to_string()))?;
+    .map_err(|e| {
+        let message = e.to_string();
+        TingError::external_tool(
+            ExternalErrorKind::Response,
+            "export_system_logs::external_tool",
+            message,
+        )
+        .with_source(anyhow::anyhow!(e))
+    })?;
 
     let mut output = String::new();
     for log in filtered_logs {
@@ -339,7 +365,15 @@ pub async fn clear_system_logs(
         }
     })
     .await
-    .map_err(|e| TingError::ExternalError(e.to_string()))?;
+    .map_err(|e| {
+        let message = e.to_string();
+        TingError::external_tool(
+            ExternalErrorKind::Response,
+            "clear_system_logs::external_tool",
+            message,
+        )
+        .with_source(anyhow::anyhow!(e))
+    })?;
 
     Ok(Json(ClearSystemLogsResponse {
         message: "System and plugin logs cleared successfully".to_string(),
