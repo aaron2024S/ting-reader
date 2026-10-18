@@ -62,7 +62,26 @@ jobs:
             git -C "$work" remote add origin "https://github.com/${GITEE_OWNER}/$repo.git"
             git -C "$work" fetch -q origin '+refs/heads/main:refs/remotes/origin/main' \
               || { echo "$repo: fetch main failed"; return 1; }
-            git -C "$work" push -q --force "$push_url" 'refs/remotes/origin/main:refs/heads/main' \
+            git -C "$work" checkout -q -f -B main 'refs/remotes/origin/main'
+
+            echo "== $repo: localize doc links for Gitee"
+            find "$work" -type f -name '*.md' -not -path '*/.git/*' -print0 |
+              xargs -0 -r perl -pi -e '
+                s{https://github\.com/dqsq2e2/(ting-reader-plugin-store|ting-reader-flutter|ypshuo-scraper-wasm|ai-booklist-assistant|luci-app-tingreader|ai-cover-generator|ai-scraper-js|rss-feed|ting-reader)(?![\w-])(?!/wiki)}{https://gitee.com/dqsq2e2/$1}g;
+                s{https://raw\.githubusercontent\.com/dqsq2e2/(ting-reader-plugin-store|ting-reader-flutter|ypshuo-scraper-wasm|ai-booklist-assistant|luci-app-tingreader|ai-cover-generator|ai-scraper-js|rss-feed|ting-reader)(?![\w-])/(.+?)(?=[)\s<>"\]]|$)}{https://gitee.com/dqsq2e2/$1/raw/$2}g;
+              '
+            if [ -n "$tag" ]; then
+              find "$work" -type f -name '*.md' -not -path '*/.git/*' -print0 |
+                xargs -0 -r env TAG="$tag" perl -pi -e '
+                  s{https://gitee\.com/dqsq2e2/(ting-reader-plugin-store|ting-reader-flutter|ypshuo-scraper-wasm|ai-booklist-assistant|luci-app-tingreader|ai-cover-generator|ai-scraper-js|rss-feed|ting-reader)(?![\w-])/releases/latest/download/}{https://gitee.com/dqsq2e2/$1/releases/download/$ENV{TAG}/}g;
+                '
+            fi
+            if [ -n "$(git -C "$work" status --porcelain)" ]; then
+              git -C "$work" add -A
+              git -C "$work" -c user.name='dqsq2e2' -c user.email='192683602+dqsq2e2@users.noreply.github.com' \
+                commit -q -m 'docs: localize doc links for Gitee mirror'
+            fi
+            git -C "$work" push -q --force "$push_url" 'refs/heads/main:refs/heads/main' \
               || { echo "$repo: push main failed"; return 1; }
 
             if [ -z "$tag" ]; then
