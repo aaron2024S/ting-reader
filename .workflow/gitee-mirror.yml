@@ -5,7 +5,6 @@ ref_variable:
   - SYNC_GITEE_TOKEN
 strategy:
   blocking: true
-  stepTimeout: 30
 triggers:
   trigger: auto
   push:
@@ -24,7 +23,7 @@ stages:
     steps:
       - step: build@gcc
         name: mirror_sync
-        displayName: 同步 9 个仓库
+        displayName: 同步通知对应的仓库
         gccVersion: '10.3'
         commands:
           - set -e
@@ -37,3 +36,4 @@ stages:
         notify: []
         strategy:
           retry: '0'
+          timeout: 30

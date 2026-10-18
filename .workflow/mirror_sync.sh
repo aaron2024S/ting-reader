@@ -112,9 +112,10 @@ main_in_sync() {
 
 sync_main() {
   local repo="$1" gh_head="$2" latest_tag="$3" work="$RUN_DIR/$1"
+  echo "$repo: fetching GitHub main"
   git init -q "$work" || return 1
   git -C "$work" remote add origin "https://github.com/$OWNER/$repo.git" || return 1
-  timeout 300 git -C "$work" fetch -q origin "$gh_head" \
+  timeout --kill-after=15s 180 git -C "$work" fetch --depth=32 -q origin "$gh_head" \
     || { echo "$repo: fetch main failed"; return 1; }
   git -C "$work" checkout -q -f -B main "$gh_head" || return 1
 
@@ -132,7 +133,8 @@ sync_main() {
       commit -q --allow-empty \
       -m "docs: localize links and texts for Gitee mirror [gh:$gh_head] [tag:$latest_tag]" || return 1
   fi
-  timeout 300 git -C "$work" -c "http.extraheader=Authorization: Basic $PUSH_AUTH" \
+  echo "$repo: updating Gitee main"
+  timeout --kill-after=15s 300 git -C "$work" -c "http.extraheader=Authorization: Basic $PUSH_AUTH" \
     push -q --force "https://gitee.com/$OWNER/$repo.git" 'refs/heads/main:refs/heads/main' \
     || { echo "$repo: push main failed"; return 1; }
 }
@@ -186,9 +188,9 @@ sync_release() {
 
   if [ -z "$id" ]; then
     echo "== $repo: push tag $tag"
-    timeout 300 git -C "$work" fetch -q origin "+refs/tags/$tag:refs/tags/$tag" \
+    timeout --kill-after=15s 180 git -C "$work" fetch --depth=32 -q origin "+refs/tags/$tag:refs/tags/$tag" \
       || { echo "$repo: fetch tag failed"; return 1; }
-    timeout 300 git -C "$work" -c "http.extraheader=Authorization: Basic $PUSH_AUTH" \
+    timeout --kill-after=15s 300 git -C "$work" -c "http.extraheader=Authorization: Basic $PUSH_AUTH" \
       push -q --force "https://gitee.com/$OWNER/$repo.git" "refs/tags/$tag:refs/tags/$tag" \
       || { echo "$repo: push tag failed"; return 1; }
     resp="$(curl -sS --connect-timeout 20 --max-time 90 -X POST "$GE_API/$OWNER/$repo/releases" \
@@ -255,12 +257,14 @@ sync_repo() {
   echo "== $repo: targets: $(jq -r '.[].tag_name' <<<"$targets" 2>/dev/null | tr '\n' ' ')main-head: ${gh_head:-unknown}"
 
   # 空跑快速检查
+  echo "$repo: checking Gitee main"
   if main_in_sync "$repo" "$gh_head" "$latest_tag"; then
     main_ok=1
   else
     [ "$?" -eq 1 ] || return 1
   fi
   rel_ok=1
+  echo "$repo: checking release attachments"
   i=0
   while [ "$i" -lt "$n" ]; do
     if ! release_in_sync "$repo" "$(jq -c ".[$i]" <<<"$targets")"; then
