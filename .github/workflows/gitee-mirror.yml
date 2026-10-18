@@ -40,8 +40,8 @@ jobs:
           script: |
             const token = process.env.SYNC_GITEE_TOKEN;
             if (!token) throw new Error('GITEE_TOKEN is not configured');
-            const base = 'https://gitee.com/api/v5/repos/dqsq2e2/ting-reader/contents/';
-            const branch = 'mirror-notify';
+            const base = 'https://gitee.com/api/v5/repos/dqsq2e2/ting-reader-mirror-ci/contents/';
+            const branch = 'main';
             const event = {
               repository: context.repo.owner + '/' + context.repo.repo,
               event: context.eventName,
@@ -55,6 +55,7 @@ jobs:
               for (let attempt = 0; attempt < 6; attempt++) {
                 try {
                   const current = await fetch(endpoint + '?ref=' + branch, {
+                    headers: { Authorization: 'Bearer ' + token },
                     signal: AbortSignal.timeout(30000),
                   });
                   if (current.status !== 404 && !current.ok) {
@@ -90,15 +91,7 @@ jobs:
                 }
               }
             }
-            // Keep only the small runner configuration on the control branch.
-            // Application code and all release binaries are pulled by Gitee.
-            for (const path of ['.workflow/mirror_sync.sh', '.workflow/gitee-mirror.yml']) {
-              const source = await github.rest.repos.getContent({
-                owner: 'dqsq2e2', repo: 'ting-reader', path, ref: 'main',
-              });
-              await update(path, source.data.content, 'ci: update mirror runner configuration');
-            }
-            await update('.workflow/mirror-request.json',
+            await update('requests/latest.json',
               Buffer.from(JSON.stringify(event) + '\n').toString('base64'),
               'ci: request mirror sync from ' + event.repository);
             core.info('Gitee notified; code and release assets will be pulled by Gitee Go.');
