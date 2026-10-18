@@ -27,9 +27,7 @@ stages:
         gccVersion: '10.3'
         commands:
           - set -e
-          # The notification branch is independent of the mirrored main branch.
-          - curl --fail --silent --show-error --location --retry 3 --connect-timeout 20 --max-time 120 https://raw.githubusercontent.com/dqsq2e2/ting-reader/main/.workflow/mirror_sync.sh -o /tmp/ting-reader-mirror-sync.sh
-          - bash /tmp/ting-reader-mirror-sync.sh --request .workflow/mirror-request.json
+          - bash .workflow/mirror_sync.sh --request .workflow/mirror-request.json
         caches: []
         notify: []
         strategy:
