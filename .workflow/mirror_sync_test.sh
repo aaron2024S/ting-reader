@@ -86,4 +86,45 @@ head_fixture=0123456789abcdef0123456789abcdef01234567
     fail "accepted a truncated download"
   fi
 )
-echo 'All 9 mirror synchronization regression checks passed.'
+(
+  seed="$RUN_DIR/seed"
+  snapshot="$RUN_DIR/upstream"
+  mkdir -p "$seed" "$snapshot/root"
+  command git init -q -b main "$seed"
+  echo old > "$seed/README.md"
+  echo obsolete > "$seed/obsolete.txt"
+  command git -C "$seed" add -A
+  command git -C "$seed" -c user.name=fixture -c user.email=fixture@example.invalid commit -q -m fixture
+  echo updated > "$snapshot/root/README.md"
+  echo ignored.txt > "$snapshot/root/.gitignore"
+  echo tracked-upstream > "$snapshot/root/ignored.txt"
+  tar -czf "$RUN_DIR/fixture.tar.gz" -C "$snapshot" root
+  curl() {
+    while [ "$#" -gt 0 ]; do
+      if [ "$1" = -o ]; then cp "$RUN_DIR/fixture.tar.gz" "$2"; return; fi
+      shift
+    done
+    fail "archive download did not specify a destination"
+  }
+  timeout() { shift 2; "$@"; }
+  git() {
+    local args=() arg
+    for arg in "$@"; do
+      if [ "$arg" = "https://gitee.com/dqsq2e2/ting-reader.git" ]; then
+        args+=("$seed")
+      else
+        args+=("$arg")
+      fi
+    done
+    command git "${args[@]}"
+  }
+  snapshot_from_github ting-reader "$head_fixture" "$RUN_DIR/ting-reader"
+  [[ "$(cat "$RUN_DIR/ting-reader/README.md")" == updated ]] || fail "archive did not replace the mirror tree"
+  [[ ! -e "$RUN_DIR/ting-reader/obsolete.txt" ]] || fail "archive retained a deleted upstream file"
+  command git -C "$RUN_DIR/ting-reader" ls-files --error-unmatch ignored.txt >/dev/null ||
+    fail "archive dropped an upstream tracked file matching .gitignore"
+  if snapshot_from_github ting-reader "$head_fixture" "$RUN_DIR/seed"; then
+    fail "archive replacement accepted a directory it does not own"
+  fi
+)
+echo 'All 10 mirror synchronization regression checks passed.'

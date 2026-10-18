@@ -105,6 +105,27 @@ localize() {
 
 # ---------- 同步逻辑 ----------
 
+# Some Gitee runners can download GitHub archives but stall on Git's pack
+# transfer. Preserve the existing mirror history and commit an upstream
+# snapshot when that happens; the mirror commit records its GitHub source.
+snapshot_from_github() {
+  local repo="$1" ref="$2" work="$3" archive="$RUN_DIR/source-$1.tar.gz"
+  [ "$work" = "$RUN_DIR/$repo" ] || return 1
+  echo "$repo: Git transfer unavailable; pulling GitHub source archive"
+  curl -fsSL --retry 1 --connect-timeout 20 --max-time 180 \
+    --speed-time 60 --speed-limit 1024 \
+    "https://codeload.github.com/$OWNER/$repo/tar.gz/$ref" -o "$archive" || return 1
+  rm -rf -- "$work"
+  timeout --kill-after=15s 90 git clone -q --depth=1 --no-tags --single-branch \
+    --branch main "https://gitee.com/$OWNER/$repo.git" "$work" || return 1
+  git -C "$work" rm -q -r --ignore-unmatch . || return 1
+  tar -xzf "$archive" --strip-components=1 -C "$work" || return 1
+  rm -f -- "$archive"
+  # The archive contains tracked upstream files, including files that match
+  # .gitignore. Keep those files when reconstructing the snapshot's index.
+  git -C "$work" add -f -A || return 1
+}
+
 main_in_sync() {
   local repo="$1" gh_head="$2" latest_tag="$3" head msg
   head="$(gitee_get "$GE_API/$OWNER/$repo/commits?sha=main&per_page=1" | jq -r '.[0].sha // empty')" || return 2
@@ -121,9 +142,11 @@ sync_main() {
   echo "$repo: fetching GitHub main"
   git init -q "$work" || return 1
   git -C "$work" remote add origin "https://github.com/$OWNER/$repo.git" || return 1
-  timeout --kill-after=15s 180 git -C "$work" fetch --depth=32 -q origin "$gh_head" \
-    || { echo "$repo: fetch main failed"; return 1; }
-  git -C "$work" checkout -q -f -B main "$gh_head" || return 1
+  if timeout --kill-after=15s 60 git -C "$work" fetch --depth=32 -q origin "$gh_head"; then
+    git -C "$work" checkout -q -f -B main "$gh_head" || return 1
+  else
+    snapshot_from_github "$repo" "$gh_head" "$work" || return 1
+  fi
 
   localize "$work" "$repo" "$latest_tag" || return 1
 
@@ -132,8 +155,8 @@ sync_main() {
     git -C "$work" -c user.name="$OWNER" \
       -c user.email='192683602+dqsq2e2@users.noreply.github.com' \
       commit -q -m "docs: localize links and texts for Gitee mirror [gh:$gh_head] [tag:$latest_tag]" || return 1
-  elif ! git -C "$work" log -1 --format=%s | grep -q '\[gh:' 2>/dev/null; then
-    # 无本地化差异但缺少同步标记（历史提交），补一个标记提交
+  else
+    # Even an unchanged localized tree must record the current upstream SHA.
     git -C "$work" -c user.name="$OWNER" \
       -c user.email='192683602+dqsq2e2@users.noreply.github.com' \
       commit -q --allow-empty \
@@ -194,8 +217,16 @@ sync_release() {
 
   if [ -z "$id" ]; then
     echo "== $repo: push tag $tag"
-    timeout --kill-after=15s 180 git -C "$work" fetch --depth=32 -q origin "+refs/tags/$tag:refs/tags/$tag" \
-      || { echo "$repo: fetch tag failed"; return 1; }
+    if ! timeout --kill-after=15s 60 git -C "$work" fetch --depth=32 -q \
+        "https://github.com/$OWNER/$repo.git" "+refs/tags/$tag:refs/tags/$tag"; then
+      snapshot_from_github "$repo" "$tag" "$work" || return 1
+      localize "$work" "$repo" "$tag" || return 1
+      git -C "$work" add -A || return 1
+      git -C "$work" -c user.name="$OWNER" \
+        -c user.email='192683602+dqsq2e2@users.noreply.github.com' \
+        commit -q --allow-empty -m "docs: mirror GitHub release $tag" || return 1
+      git -C "$work" tag -f "$tag" || return 1
+    fi
     timeout --kill-after=15s 300 git -C "$work" -c "http.extraheader=Authorization: Basic $PUSH_AUTH" \
       push -q --force "https://gitee.com/$OWNER/$repo.git" "refs/tags/$tag:refs/tags/$tag" \
       || { echo "$repo: push tag failed"; return 1; }
