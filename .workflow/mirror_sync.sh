@@ -142,7 +142,7 @@ sync_main() {
   echo "$repo: fetching GitHub main"
   git init -q "$work" || return 1
   git -C "$work" remote add origin "https://github.com/$OWNER/$repo.git" || return 1
-  if timeout --kill-after=15s 60 git -C "$work" fetch --depth=32 -q origin "$gh_head"; then
+  if timeout --kill-after=15s 180 git -C "$work" fetch --depth=32 --progress origin "$gh_head"; then
     git -C "$work" checkout -q -f -B main "$gh_head" || return 1
   else
     snapshot_from_github "$repo" "$gh_head" "$work" || return 1
@@ -217,7 +217,7 @@ sync_release() {
 
   if [ -z "$id" ]; then
     echo "== $repo: push tag $tag"
-    if ! timeout --kill-after=15s 60 git -C "$work" fetch --depth=32 -q \
+    if ! timeout --kill-after=15s 180 git -C "$work" fetch --depth=32 --progress \
         "https://github.com/$OWNER/$repo.git" "+refs/tags/$tag:refs/tags/$tag"; then
       snapshot_from_github "$repo" "$tag" "$work" || return 1
       localize "$work" "$repo" "$tag" || return 1

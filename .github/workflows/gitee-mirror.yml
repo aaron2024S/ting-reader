@@ -53,41 +53,41 @@ jobs:
             async function update(path, content, message) {
               const endpoint = base + path;
               for (let attempt = 0; attempt < 6; attempt++) {
-              try {
-                const current = await fetch(endpoint + '?ref=' + branch, {
-                  signal: AbortSignal.timeout(30000),
-                });
-                if (current.status !== 404 && !current.ok) {
-                  throw new Error('Cannot read Gitee notification: HTTP ' + current.status);
-                }
-                const existing = current.ok ? await current.json() : null;
-                if (existing?.content &&
-                    Buffer.from(existing.content, 'base64').equals(Buffer.from(content, 'base64'))) {
+                try {
+                  const current = await fetch(endpoint + '?ref=' + branch, {
+                    signal: AbortSignal.timeout(30000),
+                  });
+                  if (current.status !== 404 && !current.ok) {
+                    throw new Error('Cannot read Gitee notification: HTTP ' + current.status);
+                  }
+                  const existing = current.ok ? await current.json() : null;
+                  if (existing?.content &&
+                      Buffer.from(existing.content, 'base64').equals(Buffer.from(content, 'base64'))) {
+                    return;
+                  }
+                  const sha = existing?.sha;
+                  const response = await fetch(endpoint, {
+                    method: sha ? 'PUT' : 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                      access_token: token,
+                      branch,
+                      content,
+                      message,
+                      ...(sha ? { sha } : {}),
+                    }),
+                    signal: AbortSignal.timeout(30000),
+                  });
+                  if (!response.ok) {
+                    // Response bodies may echo credentials.
+                    throw new Error('Gitee notification failed: HTTP ' + response.status);
+                  }
                   return;
+                } catch (error) {
+                  if (attempt === 5) throw error;
+                  core.warning(error.message);
+                  await new Promise(resolve => setTimeout(resolve, 2000 * (attempt + 1)));
                 }
-                const sha = existing?.sha;
-                const response = await fetch(endpoint, {
-                  method: sha ? 'PUT' : 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({
-                    access_token: token,
-                    branch,
-                    content,
-                    message,
-                    ...(sha ? { sha } : {}),
-                  }),
-                  signal: AbortSignal.timeout(30000),
-                });
-                if (!response.ok) {
-                  // Response bodies may echo credentials.
-                  throw new Error('Gitee notification failed: HTTP ' + response.status);
-                }
-                return;
-              } catch (error) {
-                if (attempt === 5) throw error;
-                core.warning(error.message);
-                await new Promise(resolve => setTimeout(resolve, 2000 * (attempt + 1)));
-              }
               }
             }
             // Keep only the small runner configuration on the control branch.
