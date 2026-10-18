@@ -22,6 +22,12 @@ for tool in git curl jq perl timeout sha256sum; do
   }
 done
 
+if [ "${1:-}" = "--request" ]; then
+  [ "$#" -eq 2 ] || { echo "ERROR: --request requires an event file"; exit 1; }
+  REPOS="$(jq -er '.repository | select(type == "string" and startswith("dqsq2e2/")) | split("/") | last' "$2")" \
+    || { echo "ERROR: invalid mirror notification"; exit 1; }
+fi
+
 # Each run owns its temporary directory; simultaneous notifications cannot
 # delete another run's checkout or partially downloaded assets.
 RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ting-reader-mirror.XXXXXXXX")" || exit 1
