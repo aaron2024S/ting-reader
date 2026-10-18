@@ -181,7 +181,21 @@ release_in_sync() {
   done < <(jq -r '.assets[]? | [.browser_download_url, .name] | @tsv' <<<"$m")
 
   if [ "$tag" = "backend-latest" ]; then
-    local gh_url gh_content ge_content
+    local gh_url gh_content ge_content expected pointer actual
+    expected="$(jq -r '.assets[]? | select(.name == "latest.json") | .digest // empty' <<<"$m" | head -n 1)"
+    if [[ "$expected" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+      # GitHub already supplies the pointer checksum. Compare a cached Gitee
+      # download instead of repeatedly downloading the same file overseas.
+      pointer="$RUN_DIR/pointer-$repo-${expected#sha256:}"
+      if [ ! -f "$pointer" ]; then
+        curl -fsSL --retry 1 --connect-timeout 10 --max-time 45 \
+          "https://gitee.com/$OWNER/$repo/releases/download/$tag/latest.json" -o "$pointer" \
+          || { rm -f -- "$pointer"; return 1; }
+      fi
+      actual="$(sha256sum "$pointer")"
+      [ "${actual%% *}" = "${expected#sha256:}" ]
+      return
+    fi
     gh_url="$(jq -r '.assets[]? | select(.name == "latest.json") | .browser_download_url' <<<"$m" | head -n 1)"
     [ -n "$gh_url" ] || return 0
     gh_content="$(curl -sSfL --retry 3 --connect-timeout 20 --max-time 90 "$gh_url" || true)"

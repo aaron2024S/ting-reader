@@ -127,4 +127,21 @@ head_fixture=0123456789abcdef0123456789abcdef01234567
     fail "archive replacement accepted a directory it does not own"
   fi
 )
-echo 'All 10 mirror synchronization regression checks passed.'
+(
+  expected="$(printf '{"version":"2.0.6"}\n' | sha256sum)"
+  expected="${expected%% *}"
+  gitee_get() { echo '{"id":1,"assets":[{"name":"latest.json"}]}'; }
+  curl() {
+    [[ "$*" != *github.com* ]] || fail "unchanged pointer caused an overseas download"
+    while [ "$#" -gt 0 ]; do
+      if [ "$1" = -o ]; then printf '{"version":"2.0.6"}\n' > "$2"; return; fi
+      shift
+    done
+    fail "pointer download did not specify its destination"
+  }
+  pointer="$(jq -nc --arg hash "$expected" '{tag_name:"backend-latest",assets:[{name:"latest.json",digest:("sha256:"+$hash)}]}')"
+  release_in_sync luci-app-tingreader "$pointer"
+  curl() { fail "pointer was downloaded twice"; }
+  release_in_sync luci-app-tingreader "$pointer"
+)
+echo 'All 11 mirror synchronization regression checks passed.'
