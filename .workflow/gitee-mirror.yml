@@ -1,10 +1,20 @@
 version: '1.0'
 name: gitee-mirror
 displayName: Gitee 镜像同步
+ref_variable:
+  - SYNC_GITEE_TOKEN
+strategy:
+  blocking: true
+  stepTimeout: 30
 triggers:
   trigger: auto
-  schedule:
-    - cron: '23 */4 * * ?'
+  push:
+    branches:
+      precise:
+        - mirror-notify
+    commitMessages:
+      include:
+        - '^ci: request mirror sync'
 stages:
   - name: sync
     displayName: 同步代码与最新 Release
@@ -12,13 +22,15 @@ stages:
     trigger: auto
     executor: []
     steps:
-      - step: build@nodejs
+      - step: build@gcc
         name: mirror_sync
         displayName: 同步 9 个仓库
-        nodeVersion: 14.16.0
+        gccVersion: '10.3'
         commands:
           - set -e
-          - bash .workflow/mirror_sync.sh
+          # The notification branch is independent of the mirrored main branch.
+          - curl --fail --silent --show-error --location --retry 3 --connect-timeout 20 --max-time 120 https://raw.githubusercontent.com/dqsq2e2/ting-reader/main/.workflow/mirror_sync.sh -o /tmp/ting-reader-mirror-sync.sh
+          - bash /tmp/ting-reader-mirror-sync.sh
         caches: []
         notify: []
         strategy:
