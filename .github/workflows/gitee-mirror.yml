@@ -112,10 +112,14 @@ jobs:
                 continue
               fi
               echo "$repo: fetching asset $fname"
-              curl -sSfL --retry 3 --retry-delay 5 -o "$assets_dir/$fname" "$url" \
+              curl -sSfL --retry 3 --retry-delay 5 \
+                --connect-timeout 20 --speed-time 60 --speed-limit 1024 \
+                -o "$assets_dir/$fname" "$url" \
                 || { echo "$repo: asset download failed: $fname"; failed=1; break; }
               local up
-              up="$(curl -sS -X POST "$gitee_api/releases/$id/attach_files" \
+              up="$(curl -sS --connect-timeout 20 \
+                --speed-time 120 --speed-limit 10240 --max-time 2700 \
+                -X POST "$gitee_api/releases/$id/attach_files" \
                 -F "access_token=${GITEE_TOKEN}" \
                 -F "file=@$assets_dir/$fname" \
                 -F "need_download_url=true")"
