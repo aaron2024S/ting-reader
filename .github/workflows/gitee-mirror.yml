@@ -1,6 +1,9 @@
 name: Gitee Mirror
 
 # 将代码与最新 Release 同步到 Gitee 镜像仓库（dqsq2e2/<repo>）。
+# 镜像内的文档与 LuCI 运行时文件会把指向已镜像仓库的 GitHub 链接、
+# 显示文字本地化为 Gitee 地址；luci-app-tingreader 额外同步
+# 配套后端包 release（backend-v*）与 backend-latest 指针。
 # 新仓库加入 REPOS 列表前，需先在 Gitee 上创建同名仓库。
 
 on:
@@ -43,56 +46,37 @@ jobs:
           set -u
           echo "::add-mask::${GITEE_TOKEN}"
 
-          sync_repo() {
-            local repo="$1"
-            local gh_api="https://api.github.com/repos/${GITEE_OWNER}/$repo"
+          # 同步一个 release 目标：推送缺失 tag、创建缺失 release、补传缺失附件。
+          # backend-latest 的 latest.json 会被上游原地更新，内容变化时重建 release。
+          sync_release_target() {
+            local repo="$1" m="$2" work="$3" push_url="$4"
             local gitee_api="https://gitee.com/api/v5/repos/${GITEE_OWNER}/$repo"
-            local push_url="https://${GITEE_OWNER}:${GITEE_TOKEN}@gitee.com/${GITEE_OWNER}/$repo.git"
-
-            echo "== $repo: latest release info"
-            local meta tag body
-            meta="$(curl -sS --retry 3 --retry-delay 5 -H "Authorization: Bearer ${GH_TOKEN}" "$gh_api/releases/latest")"
-            tag="$(jq -r '.tag_name // empty' <<<"$meta")"
-            body="$(jq -r '.body // empty' <<<"$meta")"
-
-            echo "== $repo: sync main branch"
-            local work="/tmp/$repo"
-            rm -rf "$work"
-            git init -q "$work"
-            git -C "$work" remote add origin "https://github.com/${GITEE_OWNER}/$repo.git"
-            git -C "$work" fetch -q origin '+refs/heads/main:refs/remotes/origin/main' \
-              || { echo "$repo: fetch main failed"; return 1; }
-            git -C "$work" checkout -q -f -B main 'refs/remotes/origin/main'
-
-            echo "== $repo: localize doc links for Gitee"
-            find "$work" -type f -name '*.md' -not -path '*/.git/*' -print0 |
-              xargs -0 -r perl -pi -e '
-                s{https://github\.com/dqsq2e2/(ting-reader-plugin-store|ting-reader-flutter|ypshuo-scraper-wasm|ai-booklist-assistant|luci-app-tingreader|ai-cover-generator|ai-scraper-js|rss-feed|ting-reader)(?![\w-])(?!/wiki)}{https://gitee.com/dqsq2e2/$1}g;
-                s{https://raw\.githubusercontent\.com/dqsq2e2/(ting-reader-plugin-store|ting-reader-flutter|ypshuo-scraper-wasm|ai-booklist-assistant|luci-app-tingreader|ai-cover-generator|ai-scraper-js|rss-feed|ting-reader)(?![\w-])/(.+?)(?=[)\s<>"\]]|$)}{https://gitee.com/dqsq2e2/$1/raw/$2}g;
-              '
-            if [ -n "$tag" ]; then
-              find "$work" -type f -name '*.md' -not -path '*/.git/*' -print0 |
-                xargs -0 -r env TAG="$tag" perl -pi -e '
-                  s{https://gitee\.com/dqsq2e2/(ting-reader-plugin-store|ting-reader-flutter|ypshuo-scraper-wasm|ai-booklist-assistant|luci-app-tingreader|ai-cover-generator|ai-scraper-js|rss-feed|ting-reader)(?![\w-])/releases/latest/download/}{https://gitee.com/dqsq2e2/$1/releases/download/$ENV{TAG}/}g;
-                '
-            fi
-            if [ -n "$(git -C "$work" status --porcelain)" ]; then
-              git -C "$work" add -A
-              git -C "$work" -c user.name='dqsq2e2' -c user.email='192683602+dqsq2e2@users.noreply.github.com' \
-                commit -q -m 'docs: localize doc links for Gitee mirror'
-            fi
-            git -C "$work" push -q --force "$push_url" 'refs/heads/main:refs/heads/main' \
-              || { echo "$repo: push main failed"; return 1; }
-
-            if [ -z "$tag" ]; then
-              echo "$repo: no published release, code mirror only"
-              return 0
-            fi
-            echo "$repo: latest release is $tag"
-
-            local rel id
+            local tag body rel id
+            tag="$(jq -r '.tag_name // empty' <<<"$m")"
+            body="$(jq -r '.body // empty' <<<"$m")"
+            [ -n "$tag" ] || return 0
+            echo "== $repo: sync release $tag"
             rel="$(curl -sS "$gitee_api/releases/tags/$tag?access_token=${GITEE_TOKEN}")"
             id="$(jq -r '.id // empty' <<<"$rel")"
+
+            if [ "$tag" = "backend-latest" ]; then
+              local gh_url gh_content ge_content
+              gh_url="$(jq -r '.assets[]? | select(.name == "latest.json") | .browser_download_url' <<<"$m" | head -n 1)"
+              gh_content=''
+              [ -z "$gh_url" ] || gh_content="$(curl -sSfL --retry 3 "$gh_url" || true)"
+              if [ -n "$id" ]; then
+                ge_content="$(curl -sSfL --retry 2 "https://gitee.com/${GITEE_OWNER}/$repo/releases/download/$tag/latest.json" || true)"
+                if [ -n "$gh_content" ] && [ "$gh_content" = "$ge_content" ]; then
+                  echo "$repo: backend-latest up to date"
+                  return 0
+                fi
+                echo "$repo: refresh backend-latest (latest.json changed)"
+                local dcode
+                dcode="$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE "$gitee_api/releases/$id?access_token=${GITEE_TOKEN}")"
+                [ "$dcode" = "204" ] || { echo "$repo: delete backend-latest failed: HTTP $dcode"; return 1; }
+                id=''
+              fi
+            fi
 
             if [ -z "$id" ]; then
               echo "== $repo: push tag $tag"
@@ -115,30 +99,107 @@ jobs:
                 echo "$repo: create release failed: $resp"
                 return 1
               fi
+              rel="$(curl -sS "$gitee_api/releases/tags/$tag?access_token=${GITEE_TOKEN}")"
             fi
 
             echo "== $repo: upload missing assets"
-            local assets_dir="/tmp/assets-$repo"
+            local assets_dir="/tmp/assets-$repo-${tag//\//-}"
             mkdir -p "$assets_dir"
+            local failed=0
             while IFS=$'\t' read -r url fname; do
-              [ -z "$fname" ] && continue
+              [ -n "$fname" ] || continue
               if jq -e --arg f "$fname" '.assets[]? | select(.name == $f)' <<<"$rel" >/dev/null; then
                 continue
               fi
               echo "$repo: fetching asset $fname"
               curl -sSfL --retry 3 --retry-delay 5 -o "$assets_dir/$fname" "$url" \
-                || { echo "$repo: asset download failed: $fname"; return 1; }
-              local upload_resp
-              upload_resp="$(curl -sS -X POST "$gitee_api/releases/$id/attach_files" \
+                || { echo "$repo: asset download failed: $fname"; failed=1; break; }
+              local up
+              up="$(curl -sS -X POST "$gitee_api/releases/$id/attach_files" \
                 -F "access_token=${GITEE_TOKEN}" \
                 -F "file=@$assets_dir/$fname" \
                 -F "need_download_url=true")"
-              if ! grep -q 'browser_download_url' <<<"$upload_resp"; then
-                echo "$repo: asset upload failed: $fname: $upload_resp"
-                return 1
+              if ! grep -q 'browser_download_url' <<<"$up"; then
+                echo "$repo: asset upload failed: $fname: $up"
+                failed=1
+                break
               fi
               echo "$repo: uploaded $fname"
-            done < <(jq -r '.assets[]? | [.browser_download_url, .name] | @tsv' <<<"$meta")
+            done < <(jq -r '.assets[]? | [.browser_download_url, .name] | @tsv' <<<"$m")
+            rm -rf "$assets_dir"
+            [ "$failed" -eq 0 ] || return 1
+            echo "$repo: release $tag up to date"
+          }
+
+          sync_repo() {
+            local repo="$1"
+            local gh_api="https://api.github.com/repos/${GITEE_OWNER}/$repo"
+            local push_url="https://${GITEE_OWNER}:${GITEE_TOKEN}@gitee.com/${GITEE_OWNER}/$repo.git"
+
+            echo "== $repo: release targets"
+            local targets latest_tag
+            if [ "$repo" = "luci-app-tingreader" ]; then
+              targets="$(curl -sS --retry 3 --retry-delay 5 -H "Authorization: Bearer ${GH_TOKEN}" \
+                "$gh_api/releases?per_page=100" | jq -c '
+                    ( [.[] | select(.tag_name == "backend-latest")][0:1]
+                    + [.[] | select((.tag_name | startswith("backend-v")))][0:1]
+                    + [.[] | select((.tag_name | startswith("luci-v")))][0:1] )')"
+            else
+              targets="$(curl -sS --retry 3 --retry-delay 5 -H "Authorization: Bearer ${GH_TOKEN}" \
+                "$gh_api/releases/latest" | jq -c '[.]')"
+            fi
+            latest_tag="$(jq -r '.[0].tag_name // empty' <<<"$targets" 2>/dev/null)"
+            echo "$repo: will mirror release tags: $(jq -r '.[].tag_name' <<<"$targets" 2>/dev/null | tr '\n' ' ')"
+
+            echo "== $repo: sync main branch"
+            local work="/tmp/$repo"
+            rm -rf "$work"
+            git init -q "$work"
+            git -C "$work" remote add origin "https://github.com/${GITEE_OWNER}/$repo.git"
+            git -C "$work" fetch -q origin '+refs/heads/main:refs/remotes/origin/main' \
+              || { echo "$repo: fetch main failed"; return 1; }
+            git -C "$work" checkout -q -f -B main 'refs/remotes/origin/main'
+
+            echo "== $repo: localize links and texts for Gitee"
+            local alt='ting-reader-plugin-store|ting-reader-flutter|ypshuo-scraper-wasm|ai-booklist-assistant|luci-app-tingreader|ai-cover-generator|ai-scraper-js|rss-feed|ting-reader'
+            find "$work" -type f -name '*.md' -not -path '*/.git/*' -print0 |
+              xargs -0 -r perl -pi -e '
+                s{https?://github\.com/dqsq2e2/('"$alt"')(?![\w-])(?!/wiki)}{https://gitee.com/dqsq2e2/$1}g;
+                s{https?://raw\.githubusercontent\.com/dqsq2e2/('"$alt"')(?![\w-])/(.+?)(?=[)\s<>"\]]|$)}{https://gitee.com/dqsq2e2/$1/raw/$2}g;
+                s{\[GitHub Releases\]}{[Gitee Releases]}g;
+                s{!\[GitHub Release\]}{![Gitee Release]}g;
+              '
+            if [ -n "$latest_tag" ]; then
+              find "$work" -type f -name '*.md' -not -path '*/.git/*' -print0 |
+                xargs -0 -r env TAG="$latest_tag" perl -pi -e '
+                  s{https://gitee\.com/dqsq2e2/('"$alt"')(?![\w-])/releases/latest/download/}{https://gitee.com/dqsq2e2/$1/releases/download/$ENV{TAG}/}g;
+                '
+            fi
+            if [ "$repo" = "luci-app-tingreader" ]; then
+              find "$work" -type f ! -path '*/.git/*' ! -path '*/.github/*' -print0 |
+                xargs -0 -r perl -pi -e '
+                  s{https?://github\.com/dqsq2e2/('"$alt"')(?![\w-])(?!/wiki)}{https://gitee.com/dqsq2e2/$1}g;
+                  s{(?<!https://)(?<!http://)github\.com/dqsq2e2/('"$alt"')(?![\w-])(?!/wiki)}{gitee.com/dqsq2e2/$1}g;
+                  s{https?://raw\.githubusercontent\.com/dqsq2e2/('"$alt"')(?![\w-])/(.+?)(?=[)\s<>"\]]|$)}{https://gitee.com/dqsq2e2/$1/raw/$2}g;
+                  s{gitee\.com/dqsq2e2/('"$alt"')(?![\w-])/tags\b}{gitee.com/dqsq2e2/$1/releases}g;
+                  s{\bGitHub\b}{Gitee}g;
+                '
+            fi
+            if [ -n "$(git -C "$work" status --porcelain)" ]; then
+              git -C "$work" add -A
+              git -C "$work" -c user.name='dqsq2e2' -c user.email='192683602+dqsq2e2@users.noreply.github.com' \
+                commit -q -m 'docs: localize links and texts for Gitee mirror'
+            fi
+            git -C "$work" push -q --force "$push_url" 'refs/heads/main:refs/heads/main' \
+              || { echo "$repo: push main failed"; return 1; }
+
+            local i n
+            n="$(jq 'length' <<<"$targets" 2>/dev/null || echo 0)"
+            i=0
+            while [ "$i" -lt "$n" ]; do
+              sync_release_target "$repo" "$(jq -c ".[$i]" <<<"$targets")" "$work" "$push_url" || return 1
+              i=$((i + 1))
+            done
             echo "$repo: up to date"
           }
 
@@ -150,6 +211,6 @@ jobs:
               fail=1
             fi
             echo "::endgroup::"
-            rm -rf "/tmp/$repo" "/tmp/assets-$repo"
+            rm -rf "/tmp/$repo" "/tmp/assets-$repo-"*
           done
           exit $fail
