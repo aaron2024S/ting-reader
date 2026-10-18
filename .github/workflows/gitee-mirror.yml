@@ -1,0 +1,136 @@
+name: Gitee Mirror
+
+# 将代码与最新 Release 同步到 Gitee 镜像仓库（dqsq2e2/<repo>）。
+# 新仓库加入 REPOS 列表前，需先在 Gitee 上创建同名仓库。
+
+on:
+  schedule:
+    - cron: '23 */2 * * *'
+  release:
+    types: [published]
+  workflow_dispatch:
+
+concurrency:
+  group: gitee-mirror
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  GITEE_OWNER: dqsq2e2
+  REPOS: >-
+    ting-reader
+    ting-reader-flutter
+    luci-app-tingreader
+    ai-booklist-assistant
+    ai-cover-generator
+    ai-scraper-js
+    rss-feed
+    ting-reader-plugin-store
+    ypshuo-scraper-wasm
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Sync repositories and latest releases to Gitee
+        shell: bash
+        env:
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -u
+          echo "::add-mask::${GITEE_TOKEN}"
+
+          sync_repo() {
+            local repo="$1"
+            local gh_api="https://api.github.com/repos/${GITEE_OWNER}/$repo"
+            local gitee_api="https://gitee.com/api/v5/repos/${GITEE_OWNER}/$repo"
+            local push_url="https://${GITEE_OWNER}:${GITEE_TOKEN}@gitee.com/${GITEE_OWNER}/$repo.git"
+
+            echo "== $repo: latest release info"
+            local meta tag body
+            meta="$(curl -sS --retry 3 --retry-delay 5 -H "Authorization: Bearer ${GH_TOKEN}" "$gh_api/releases/latest")"
+            tag="$(jq -r '.tag_name // empty' <<<"$meta")"
+            body="$(jq -r '.body // empty' <<<"$meta")"
+
+            echo "== $repo: sync main branch"
+            local work="/tmp/$repo"
+            rm -rf "$work"
+            git init -q "$work"
+            git -C "$work" remote add origin "https://github.com/${GITEE_OWNER}/$repo.git"
+            git -C "$work" fetch -q origin '+refs/heads/main:refs/remotes/origin/main' \
+              || { echo "$repo: fetch main failed"; return 1; }
+            git -C "$work" push -q --force "$push_url" 'refs/remotes/origin/main:refs/heads/main' \
+              || { echo "$repo: push main failed"; return 1; }
+
+            if [ -z "$tag" ]; then
+              echo "$repo: no published release, code mirror only"
+              return 0
+            fi
+            echo "$repo: latest release is $tag"
+
+            local rel id
+            rel="$(curl -sS "$gitee_api/releases/tags/$tag?access_token=${GITEE_TOKEN}")"
+            id="$(jq -r '.id // empty' <<<"$rel")"
+
+            if [ -z "$id" ]; then
+              echo "== $repo: push tag $tag"
+              git -C "$work" fetch -q origin "+refs/tags/$tag:refs/tags/$tag" \
+                || { echo "$repo: fetch tag failed"; return 1; }
+              git -C "$work" push -q --force "$push_url" "refs/tags/$tag:refs/tags/$tag" \
+                || { echo "$repo: push tag failed"; return 1; }
+              echo "== $repo: create release $tag"
+              local payload resp
+              payload="$(jq -n --arg tag "$tag" --arg body "$body" --arg owner "$GITEE_OWNER" --arg repo "$repo" \
+                '{ tag_name: $tag,
+                   name: $tag,
+                   body: (if ($body | length) > 0 then $body
+                          else "同步自 GitHub Release：https://github.com/\($owner)/\($repo)/releases/tag/\($tag)" end),
+                   target_commitish: "main" }')"
+              resp="$(curl -sS -X POST "$gitee_api/releases?access_token=${GITEE_TOKEN}" \
+                -H 'Content-Type: application/json' -d "$payload")"
+              id="$(jq -r '.id // empty' <<<"$resp")"
+              if [ -z "$id" ]; then
+                echo "$repo: create release failed: $resp"
+                return 1
+              fi
+            fi
+
+            echo "== $repo: upload missing assets"
+            local assets_dir="/tmp/assets-$repo"
+            mkdir -p "$assets_dir"
+            while IFS=$'\t' read -r url fname; do
+              [ -z "$fname" ] && continue
+              if jq -e --arg f "$fname" '.assets[]? | select(.name == $f)' <<<"$rel" >/dev/null; then
+                continue
+              fi
+              echo "$repo: fetching asset $fname"
+              curl -sSfL --retry 3 --retry-delay 5 -o "$assets_dir/$fname" "$url" \
+                || { echo "$repo: asset download failed: $fname"; return 1; }
+              local upload_resp
+              upload_resp="$(curl -sS -X POST "$gitee_api/releases/$id/attach_files" \
+                -F "access_token=${GITEE_TOKEN}" \
+                -F "file=@$assets_dir/$fname" \
+                -F "need_download_url=true")"
+              if ! grep -q 'browser_download_url' <<<"$upload_resp"; then
+                echo "$repo: asset upload failed: $fname: $upload_resp"
+                return 1
+              fi
+              echo "$repo: uploaded $fname"
+            done < <(jq -r '.assets[]? | [.browser_download_url, .name] | @tsv' <<<"$meta")
+            echo "$repo: up to date"
+          }
+
+          fail=0
+          for repo in $REPOS; do
+            echo "::group::$repo"
+            if ! sync_repo "$repo"; then
+              echo "::warning::Gitee mirror of $repo failed, will retry on next run"
+              fail=1
+            fi
+            echo "::endgroup::"
+            rm -rf "/tmp/$repo" "/tmp/assets-$repo"
+          done
+          exit $fail
